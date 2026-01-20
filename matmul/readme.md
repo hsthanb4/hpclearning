@@ -1,6 +1,6 @@
 ### 参考链接：
 https://github.com/wangzyon/NVIDIA_SGEMM_PRACTICE
 
-{    
-    "claudeCode.environmentVariables": [         {             "name": "CLAUDE_CODE_SKIP_AUTH_LOGIN",             "value": "true"         }     ],     "claudeCode.claudeProcessWrapper": "/home/lixiang/.ept/bin/ept-claude",
-}
+
+### docker启动：
+docker run --gpus all -it --rm -v $(pwd):/workspace -w /workspace gemm-cuda:12.2.2 /bin/bash
