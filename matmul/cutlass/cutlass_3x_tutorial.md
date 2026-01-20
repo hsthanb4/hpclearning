@@ -418,7 +418,7 @@ using EpilogueOp = cutlass::epilogue::thread::LinearCombinationRelu<
 | Orin | Ampere | sm_87 | `cutlass::arch::Sm87` |
 | RTX 4060 | Ada Lovelace | sm_89 | `cutlass::arch::Sm89` |
 | H100 | Hopper | sm_90 | `cutlass::arch::Sm90` |
-| Blackwell | Blackwell | sm_100 | `cutlass::arch::Sm100` |
+| B100/B200 | Blackwell | sm_90a | `cutlass::arch::Sm90a` |
 
 ### 6.2 硬件特性映射
 
@@ -433,10 +433,11 @@ using EpilogueOp = cutlass::epilogue::thread::LinearCombinationRelu<
 - Thread Block Cluster
 - Warp Specialization 硬件优化
 
-**Blackwell (sm_100)**：
+**Blackwell (sm_90a)**：
 - 第五代 Tensor Core
-- 更强的 TMA
+- 增强的 TMA 能力
 - 更大的 Shared Memory
+- 改进的 Warp Specialization
 
 ---
 

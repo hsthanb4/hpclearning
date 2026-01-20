@@ -63,6 +63,11 @@ Layout Algebra 提供了一组操作，将复杂的数据布局变换分解为�
 Shape = (S₀, S₁, S₂, ...)
 ```
 
+**重要说明**：
+- 对于矩阵，通常第 0 维是行（M），第 1 维是列（N）
+- Shape `(M, N)` 表示 M 行 N 列的矩阵
+- 这与数学中的表示一致：C[M, N] = A[M, K] × B[K, N]
+
 **示例**：
 - `(6, 4)`：6 行 4 列的矩阵
 - `(128, 8, 16)`：三维数据，大小为 128×8×16
@@ -79,6 +84,10 @@ Stride = (D₀, D₁, D₂, ...)
 **示例**：
 - `(4, 1)`：行主序，行方向步长为 4，列方向步长为 1（同一行元素连续）
 - `(1, 6)`：列主序，行方向步长为 1，列方向步长为 6（同一列元素连续）
+
+**解释**：
+- **行主序**：在行方向（mode-0）移动一步，跳过整行的元素（N 个），所以 stride₀ = N
+- **列主序**：在列方向（mode-1）移动一步，跳过整列的元素（M 个），所以 stride₁ = M
 
 #### Layout 的完整表示
 
@@ -979,7 +988,23 @@ for (int i = 0; i < N; ++i) {
 
 #### Bank Conflict 回顾
 
-GPU Shared Memory 分为 32 个 bank（Ampere/Hopper），每个 bank 宽度 4 字节。如果一个 warp 的 32 个线程同时访问同一个 bank 的不同地址，会发生冲突。
+GPU Shared Memory 分为 32 个 bank，每个 bank 宽度 4 字节。
+
+**关键概念**：
+- **Bank 索引** = `(地址 / 4) % 32`
+- 如果一个 warp 的 32 个线程同时访问同一个 bank 的不同地址，会发生 bank conflict
+- **串行度** = 访问同一 bank 的线程数（最坏情况：32-way conflict）
+
+**示例**：
+```
+32×32 矩阵，行主序，stride = 32
+线程访问同一列：thread[i] 访问 data[i]
+- thread 0: addr = 0  → bank 0
+- thread 1: addr = 32 → bank 8  (32/4 % 32 = 8)
+- thread 2: addr = 64 → bank 16
+- thread 3: addr = 96 → bank 24
+- thread 4: addr = 128 → bank 0  (128/4 % 32 = 0) ← conflict!
+```
 
 #### 解决方案：Padding
 
