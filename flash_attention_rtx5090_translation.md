@@ -113,6 +113,12 @@ KV 迭代：沿序列长度处理 [BLOCK_KV × head_dim] 的 tiles
 - 处理连续的 8 个 BF16 元素
 - 系统确保通过线程级组织实现合并访存
 
+![Global to Shared Memory 数据传输](https://gau-nernst.github.io/fa-5090/global_to_shared.svg)
+*图：2D tile 的 Global 到 Shared Memory 数据传输*
+
+![合并访存模式](https://gau-nernst.github.io/fa-5090/coalesced.svg)
+*图：连续线程处理连续的 8×BF16 元素组*
+
 **函数签名**：
 ```cpp
 template<int HEIGHT, int WIDTH, int TB_SIZE>
@@ -125,6 +131,15 @@ void global_to_shared(bf16* gmem, bf16* smem);
 
 - **Query 数据**：`ldmatrix.x4` 用于 16×16 tiles（作为乘数 A）
 - **Key/Value 数据**：`ldmatrix.x2` 用于 8×16 tiles（作为乘数 B）
+
+![Flash Attention Warp 分区](https://gau-nernst.github.io/fa-5090/fa_warp_partition.svg)
+*图：Flash Attention 2 中 warps 如何分区 BLOCK_Q 维度*
+
+![ldmatrix Tile 顺序](https://gau-nernst.github.io/fa-5090/ldmatrix.svg)
+*图：mma.m16n8k16 操作中 ldmatrix tiles 的顺序*
+
+![ldmatrix K/V 加载](https://gau-nernst.github.io/fa-5090/ldmatrix_kv.svg)
+*图：加载 K 和 V 数据时使用转置的 ldmatrix*
 
 **重要说明**：
 > "只有 Q 在 MMA 中充当 A。K 和 V 都在各自的 MMA 中充当 B，尽管 K 需要转置的 `ldmatrix` 才能获得正确的布局。"
@@ -175,6 +190,12 @@ S_rmem: [2][8][4] = 64 寄存器
    - 使用 4 线程组内的蝶式归约（butterfly reduction）
    - 通过 `__shfl_xor_sync()` 实现
 
+![行归约操作](https://gau-nernst.github.io/fa-5090/row_reduction.svg)
+*图：MMA 输出上的行归约操作*
+
+![蝶式归约](https://gau-nernst.github.io/fa-5090/butterfly_reduction.svg)
+*图：4 线程内使用 __shfl_xor_sync() 的蝶式归约*
+
 2. **最大值减法和指数运算**：
    - 逐元素应用：`exp(score - max)`
 
@@ -201,6 +222,9 @@ head_dim=128
 - Shared Memory 的 bank conflicts
 - 内存停顿（memory stalls）
 
+![版本 1 Warp 状态](https://gau-nernst.github.io/fa-5090/v1_warp_state.png)
+*图：版本 1 的 Nsight Compute Warp 状态统计*
+
 ---
 
 ## 版本 2：Shared Memory Swizzling
@@ -215,6 +239,12 @@ head_dim=128
 在 `ldmatrix` 操作中出现 **bank conflicts**：
 - GPU 有 32 个 shared memory banks
 - 从 64 元素宽的行加载 8×8 tiles 时造成 **"8-way bank conflicts"**
+
+![Bank Conflicts 可视化](https://gau-nernst.github.io/fa-5090/bank_conflicts.svg)
+*图：8×64 BF16 tile 的 memory bank 分布（展示 bank conflict）*
+
+![ldmatrix Bank Conflicts](https://gau-nernst.github.io/fa-5090/ldmatrix_bank_conflicts.png)
+*图：Nsight Compute 显示的实际 vs 理想 L1 Wavefronts Shared 指标*
 
 **原因**：
 > "当我们移动到下一行时，我们再次访问相同的 memory banks"
@@ -267,6 +297,9 @@ Row 1: threads → bank 0, 1, 2, ..., 7, 0, 1, ...  ← 冲突！
 Row 0: threads → bank 0, 1, 2, 3, 4, 5, 6, 7
 Row 1: threads → bank 4, 5, 6, 7, 0, 1, 2, 3  ← 交错分布
 ```
+
+![版本 2 Warp 状态](https://gau-nernst.github.io/fa-5090/v2_warp_state.png)
+*图：版本 2 的 Nsight Compute Warp 状态统计（bank conflicts 已消除）*
 
 ---
 
@@ -327,6 +360,9 @@ while (kv_iter < num_kv_tiles) {
 
 尽管 `BLOCK_KV` 减少，但通过重叠计算和内存传输，仍实现了 4.9% 的提升。这说明流水线带来的延迟隐藏效益超过了 tile 大小减小的负面影响。
 
+![版本 3 Warp 状态](https://gau-nernst.github.io/fa-5090/v3_warp_state.png)
+*图：版本 3 的 Nsight Compute Warp 状态统计（长延迟已改善）*
+
 ---
 
 ## 版本 4：ldmatrix.x4 优化
@@ -369,6 +405,9 @@ ldmatrix.x4  // 一次加载全部 32 个元素
 ### 权衡分析
 
 虽然改变了 tile 大小，但减少的指令数量带来了显著的性能提升。
+
+![ldmatrix.x4 选项](https://gau-nernst.github.io/fa-5090/ldmatrix_x4_B.svg)
+*图：使用 ldmatrix.x4 加载乘数 B 的可能选项*
 
 ---
 
