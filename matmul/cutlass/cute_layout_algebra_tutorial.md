@@ -102,7 +102,9 @@ Stride = (D₀, D₁, D₂, ...)
 
 ### 2.2 Layout 作为函数
 
-给定 Layout `(S₀, S₁, ...):(D₀, D₁, ...)`，其对应的函数为：
+#### 扁平 Layout 的映射
+
+给定**扁平** Layout `(S₀, S₁, ...):(D₀, D₁, ...)`，其对应的函数为：
 
 ```
 Layout(i₀, i₁, ...) = i₀ × D₀ + i₁ × D₁ + ...
@@ -110,6 +112,29 @@ Layout(i₀, i₁, ...) = i₀ × D₀ + i₁ × D₁ + ...
 
 其中：
 - `0 ≤ iₖ < Sₖ`（坐标在 Shape 范围内）
+
+#### 层次化 Layout 的递归映射
+
+对于**层次化** Layout，映射是**递归定义**的。每个模态可以是：
+1. **标量**：直接返回值
+2. **元组**：递归地应用映射
+
+**递归定义**：
+```
+Layout(shape, stride)(coord) =
+  if shape is scalar:
+    coord × stride
+  else:  // shape and stride are tuples
+    sum(Layout(shape[i], stride[i])(coord[i]) for i in modes)
+```
+
+**通用公式**：
+```
+Layout((S₀, S₁, ...), (D₀, D₁, ...))(i₀, i₁, ...) =
+  Layout(S₀, D₀)(i₀) + Layout(S₁, D₁)(i₁) + ...
+```
+
+其中每个 `Layout(Sₖ, Dₖ)(iₖ)` 可能进一步递归展开。
 
 **示例 1：行主序矩阵**
 ```
@@ -155,6 +180,28 @@ Stride: ((D₀₀, D₀₁), D₁, D₂, ...)
 Layout: ((4, 4), (2, 2)):((8, 1), (32, 4))
          ^^^^^   ^^^^^    ^^^^^   ^^^^^^
         块内4×4  2×2个块  块内步长 块间步长
+```
+
+**递归映射计算**：
+
+给定坐标 `((i₀, i₁), (j₀, j₁))`，递归地计算：
+
+```
+Layout(((4,4), (2,2)), ((8,1), (32,4)))((i₀,i₁), (j₀,j₁)) =
+  Layout((4,4), (8,1))(i₀, i₁) + Layout((2,2), (32,4))(j₀, j₁)
+  = [i₀×8 + i₁×1] + [j₀×32 + j₁×4]
+  = 8i₀ + i₁ + 32j₀ + 4j₁
+```
+
+**示例计算**：访问 Block(1,1) 的元素 [2,3]
+```
+坐标: ((2, 3), (1, 1))
+offset = 8×2 + 1×3 + 32×1 + 4×1
+       = 16 + 3 + 32 + 4
+       = 55
+
+验证：原矩阵 8×8 中，第 7 行第 8 列（0-indexed: [6,7]）
+     = 6×8 + 7 = 55 ✓
 ```
 
 **理解**：
@@ -294,28 +341,34 @@ return concatenate(result, layout_a)
 
 #### 示例
 
-**示例 1：Reshape**
+**示例 1：使用 Composition 重新索引**
+
+Composition 更常用于重新索引数据访问模式，而非简单的 reshape。
 
 ```cpp
-// 原始 Layout：10×2 矩阵，行主序
-A = (10, 2):(2, 1)
+// 原始 Layout：16 个元素，stride=2（隔一个取一个）
+A = (16):(2)
+// 值域：{0, 2, 4, 6, ..., 30}
 
-// 目标形状：5×4
-B = (5, 4):(1, 0)  // stride_1 = 0 表示逻辑上的 reshape
+// 逻辑索引：连续的 0-7
+B = (8):(1)
 
+// Composition
 R = A ∘ B
-  = (5, (2, 2)):(2, (1, 10))
+  = (8):(2)
 
 // 解释：
-// - 外层 5：按行方向分成 5 组
-// - 内层 (2,2)：每组 2×2 = 4 个元素
+// B 生成连续索引 0,1,2,...,7
+// A 将这些索引映射到 {0,2,4,...,14}
+// R(i) = A(B(i)) = A(i) = i×2
 ```
 
 **验证**：
 ```
-R(0, 0) = A(B(0, 0)) = A(0) = 0
-R(2, 3) = A(B(2, 3)) = A(11) = ... (计算 10×2 中的线性索引)
+R(3) = A(B(3)) = A(3) = 3×2 = 6 ✓
 ```
+
+**注意**：对于 reshape 操作，推荐使用 `logical_divide` 而非 composition。Reshape 示例见 3.4 节。
 
 **示例 2：转置**
 
@@ -504,14 +557,35 @@ Tile 3: [12, 13, 14, 15]
 // 原始 Layout：8×8 矩阵，行主序
 A = (8, 8):(8, 1)
 
-// Tiler：2×2 块
-B = (2, 2):(8, 1)
+// Tiler：每个块取 2×2 元素（使用 Shape 作为 tiler）
+B = (2, 2)  // CuTe 自动推导为 (2, 2):(8, 1)
 
 // Division
 R = A ÷ B
   = ((2, 2), (4, 4)):((8, 1), (16, 2))
      ^^^^^   ^^^^^    ^^^^^   ^^^^^^
     块内2×2  4×4个块  块内步长 块间步长
+```
+
+**Stride 计算详解**：
+
+1. **块内 stride `(8, 1)`**：
+   - 在一个 2×2 块内移动
+   - 行方向：stride = 8（原矩阵的列数，跳到下一行）
+   - 列方向：stride = 1（连续）
+
+2. **块间 stride `(16, 2)`**：
+   - 从一个块跳到相邻块
+   - 行方向：跨 2 行 = 2×8 = 16 个元素
+   - 列方向：跨 2 列 = 2 个元素
+
+**验证计算**：访问 Block(1, 2) 的元素 [1, 0]
+```
+块索引: (1, 2) → 1×16 + 2×2 = 20（块起始位置）
+块内索引: (1, 0) → 1×8 + 0×1 = 8
+总偏移: 20 + 8 = 28
+
+验证：原矩阵 [3, 4]（第4行第5列）= 3×8 + 4 = 28 ✓
 ```
 
 **可视化**：
@@ -1318,30 +1392,146 @@ for (int i = 0; i < 4; ++i) {
 
 ### 8.1 Swizzle（交织访问）
 
-**Swizzle** 是一种通过位运算重排索引的技术，用于避免 bank conflict 和提高缓存局部性。
+#### 定义
 
-#### 示例：XOR Swizzle
+**Swizzle** 是一个函数对象（functor），它通过**位运算**转换偏移地址，用于：
+1. 避免 Shared Memory 的 bank conflict
+2. 提高缓存局部性
+3. 优化访存模式
+
+**核心思想**：将线性偏移通过 XOR 等位运算重新映射，打散规律的访问模式。
+
+#### Swizzle 函数定义
 
 ```cpp
-// 基础 Layout：32×32
-auto base_layout = make_layout(
-    make_shape(32, 32),
-    make_stride(33, 1)  // 已 padding
-);
+template <int B, int M, int S>
+struct Swizzle {
+    // 将偏移 offset 通过位运算转换
+    CUTE_HOST_DEVICE
+    int operator()(int offset) const {
+        // XOR-based swizzle
+        return offset ^ ((offset >> S) & M) << B);
+    }
+};
+```
 
-// 应用 XOR swizzle（位运算）
-auto swizzled = composition(
-    base_layout,
-    make_layout(
-        make_shape(32, 32),
-        make_stride(Swizzle<3, 0, 3>{}, Int<1>{})
+**参数说明**：
+- **B (Base)**：swizzle 的基础位数（log₂ of swizzle unit size）
+- **M (Mask)**：用于 swizzle 的位掩码
+- **S (Shift)**：右移位数
+
+#### 数学原理
+
+对于 Swizzle<B, M, S>：
+
+```
+swizzled_offset = offset ^ (((offset >> S) & M) << B)
+```
+
+**作用**：
+1. 将 offset 右移 S 位，提取高位信息
+2. 与掩码 M 进行 AND 操作
+3. 左移 B 位后与原 offset 进行 XOR
+4. 打散原有的规律访问模式
+
+#### 示例：Swizzle<3, 3, 3>
+
+这是 Shared Memory 中常用的 swizzle 模式。
+
+**参数**：
+- B = 3：swizzle 单位为 2³ = 8 字节
+- M = 3 (0b11)：掩码 2 位
+- S = 3：右移 3 位
+
+**计算示例**：
+```
+offset = 24 (0b11000)
+
+步骤 1: offset >> 3 = 3 (0b11)
+步骤 2: 3 & 3 = 3 (0b11)
+步骤 3: 3 << 3 = 24 (0b11000)
+步骤 4: 24 ^ 24 = 0
+
+swizzled_offset = 0
+```
+
+#### CuTe 中的使用
+
+**方法 1：直接使用 Swizzle Stride**
+
+```cpp
+using namespace cute;
+
+// 32×128 的 Shared Memory，half_t (2 bytes)
+// 使用 Swizzle<3, 3, 3> 避免 bank conflict
+auto smem_layout = make_layout(
+    make_shape(Int<32>{}, Int<128>{}),
+    make_stride(
+        Swizzle<3, 3, 3>{},  // 行方向 swizzle
+        Int<1>{}             // 列方向连续
     )
 );
+```
 
-// Swizzle<B, M, S>：
-// - B: base (log2 of swizzle size)
-// - M: mask
-// - S: shift
+**方法 2：Composition with Swizzle**
+
+```cpp
+// 基础布局
+auto base_layout = make_layout(
+    make_shape(Int<32>{}, Int<128>{}),
+    make_stride(Int<128>{}, Int<1>{})
+);
+
+// 应用 swizzle
+auto swizzle_fn = Swizzle<3, 3, 3>{};
+auto swizzled_layout = composition(base_layout, swizzle_fn);
+```
+
+#### Swizzle 的效果
+
+**不使用 Swizzle（有 bank conflict）**：
+```
+线程访问模式（列方向）：
+thread 0  -> addr 0   -> bank 0
+thread 1  -> addr 128 -> bank 0  ← conflict!
+thread 2  -> addr 256 -> bank 0  ← conflict!
+...
+32-way bank conflict
+```
+
+**使用 Swizzle<3, 3, 3>（无 bank conflict）**：
+```
+线程访问模式（列方向）：
+thread 0  -> addr 0   -> swizzled to bank 0
+thread 1  -> addr 128 -> swizzled to bank 8
+thread 2  -> addr 256 -> swizzled to bank 16
+...
+分散到不同 bank，无 conflict
+```
+
+#### 常用 Swizzle 配置
+
+| 数据类型 | 配置 | 说明 |
+|---------|------|------|
+| `half` (FP16) | `Swizzle<3, 3, 3>` | 2 字节，8-byte swizzle |
+| `float` (FP32) | `Swizzle<2, 2, 3>` | 4 字节，4-byte swizzle |
+| `double` (FP64) | `Swizzle<3, 1, 4>` | 8 字节，8-byte swizzle |
+
+#### 验证 Swizzle
+
+```cpp
+// 验证 swizzle 消除了 bank conflict
+Swizzle<3, 3, 3> sw;
+
+// 测试连续的 32 个地址
+for (int i = 0; i < 32; ++i) {
+    int addr = i * 128;  // 列方向访问
+    int swizzled = sw(addr);
+    int bank = (swizzled / 4) % 32;
+    printf("thread %d: addr %d -> swizzled %d -> bank %d\n",
+           i, addr, swizzled, bank);
+}
+// 应该看到 bank 分布在 0-31，无重复
 ```
 
 ---
