@@ -1,8 +1,15 @@
 # Day 1: GPU 架构与 CUDA 基础
 
 **学习日期**: 2026-02-02
+**最后更新**: 2026-02-02
 **学习目标**: 理解 GPU 硬件架构和 CUDA 编程模型
 **预计学习时间**: 8小时 (上午3h + 下午3h + 晚上2h)
+
+**更新说明**:
+- ✅ 已更新至最新的 Blackwell 架构 (2024)
+- ✅ 包含下一代 Rubin 架构信息 (2026预计)
+- ✅ 更新内存带宽数据 (B200: 8TB/s)
+- ✅ 新增 FP4/FP6 精度支持信息
 
 ---
 
@@ -82,10 +89,11 @@ SM 是 GPU 的基本执行单元，包含:
 **计算单元**:
 - **CUDA Cores**: 执行浮点和整数运算 (FP32, INT32)
   - 每个 SM 有 64-128 个 CUDA Cores
-- **Tensor Cores** (Volta/Turing/Ampere/Hopper):
+- **Tensor Cores** (Volta/Turing/Ampere/Hopper/Blackwell):
   - 专门用于矩阵乘累加 (Matrix Multiply-Accumulate)
-  - 支持 FP16, BF16, TF32, FP8, INT8, INT4
+  - 支持 FP16, BF16, TF32, FP8, FP6, FP4, INT8, INT4
   - 单个 Tensor Core 可在一个时钟周期完成 4×4×4 矩阵乘法
+  - Blackwell 第五代 Tensor Core 支持双倍 FP4 吞吐量
 - **Special Function Units (SFU)**:
   - 快速计算超越函数 (sin, cos, log, exp, sqrt)
   - 精度略低但速度快
@@ -159,8 +167,13 @@ GPU 内存层次 (从快到慢):
 | **Shared Memory** | 64-128KB/SM | 20-30 cycles | ~8TB/s | Block 内所有线程 | Block |
 | **L1 Cache** | 64-128KB/SM | 20-30 cycles | 自动管理 | Block | 自动 |
 | **L2 Cache** | 6-60MB | 100-200 cycles | ~4TB/s | 所有 SM | 自动 |
-| **Global Memory** | 16-80GB | 400-800 cycles | 1-2TB/s | 所有线程 | 应用程序 |
-| **CPU Memory** | GB-TB | 数万 cycles | ~100GB/s | CPU+GPU | 手动管理 |
+| **Global Memory** | 16-192GB | 400-800 cycles | 1-3.5TB/s | 所有线程 | 应用程序 |
+| **CPU Memory** | GB-TB | 数万 cycles | ~100GB/s (PCIe) | CPU+GPU | 手动管理 |
+
+**内存带宽参考** (各架构):
+- A100 (HBM2e): 1.9 TB/s
+- H100 (HBM3): 3.35 TB/s
+- B200 (HBM3e): 8 TB/s
 
 **内存访问优化原则**:
 1. **寄存器优先**: 尽量使用局部变量
@@ -184,16 +197,29 @@ D[4×4] = A[4×4] × B[4×4] + C[4×4]
 ```
 
 **支持的精度**:
-- **Volta**: FP16
-- **Turing**: FP16, INT8, INT4, INT1
-- **Ampere**: FP16, BF16, TF32 (自动), FP64 (A100), INT8, INT4
-- **Hopper**: FP8, FP16, BF16, TF32, FP64, INT8
+- **Volta (2017)**: FP16
+- **Turing (2018)**: FP16, INT8, INT4, INT1
+- **Ampere (2020)**: FP16, BF16, TF32 (自动), FP64 (A100), INT8, INT4
+- **Hopper (2022)**: FP8, FP16, BF16, TF32, FP64, INT8
+- **Blackwell (2024)**: FP4, FP6, FP8, FP16, BF16, TF32, FP64 (双精度), INT8
+
+**关键精度格式**:
 
 **TF32 (TensorFloat-32)**:
 - Mantissa: 10 bits (FP16 级别)
 - Exponent: 8 bits (FP32 级别)
 - 自动替换 FP32 的 GEMM，无需代码修改
 - 性能提升 8x，精度损失小于 0.1%
+
+**FP8 (Hopper+)**:
+- 两种格式: E4M3 (训练) 和 E5M2 (推理)
+- Transformer Engine 自动混合精度
+- 相比FP16性能提升2x
+
+**FP4/FP6 (Blackwell)**:
+- 超低精度推理
+- FP4 达到 20 PFLOPS (B200)
+- 适用于大规模模型部署
 
 **使用 Tensor Core 的方式**:
 1. **WMMA API** (Warp Matrix Multiply-Accumulate)
@@ -213,10 +239,15 @@ D[4×4] = A[4×4] × B[4×4] + C[4×4]
 | Pascal | GP100 | 6.0, 6.1 | P100, GTX 1080 | 2016 |
 | Volta | GV100 | 7.0 | V100, Titan V | 2017 |
 | Turing | TU102 | 7.5 | RTX 2080, T4 | 2018 |
-| Ampere | GA102/100 | 8.0, 8.6, 8.7 | A100, RTX 3090, RTX 3060 | 2020 |
-| Ada Lovelace | AD102 | 8.9 | RTX 4090, RTX 4060 | 2022 |
-| Hopper | GH100 | 9.0 | H100 | 2022 |
-| Blackwell | GB100 | 10.0 | B100, Thor | 2024 |
+| Ampere | GA102/100 | 8.0, 8.6, 8.7 | A100, RTX 3090, RTX 3060, Orin | 2020 |
+| Ada Lovelace | AD102 | 8.9 | RTX 4090, RTX 4060, L40S | 2022 |
+| Hopper | GH100 | 9.0 | H100, H200 | 2022 |
+| Blackwell | GB100/102/200 | 10.0 | B100, B200, GB200 NVL72 | 2024 |
+| Rubin | (未公布) | 11.0 (预计) | 下一代数据中心GPU | 2026 (预计) |
+
+**注意**:
+- Hopper H100 的实际 compute capability 是 **9.0** (sm_90)
+- 部分文档可能标注为 sm_90a (架构变体)
 
 #### 1.3.2 关键技术演进
 
@@ -230,12 +261,25 @@ D[4×4] = A[4×4] × B[4×4] + C[4×4]
 - Sparse Tensor Core (2:4 结构化稀疏, 2x 加速)
 - MIG (Multi-Instance GPU) - 虚拟化
 
-**Hopper (2022) - 最新旗舰**:
+**Hopper (2022) - H100/H200**:
 - 第四代 Tensor Core (FP8 支持)
 - Transformer Engine (自动 FP8 转换)
 - Thread Block Clusters (跨 SM 协作)
 - DPX Instructions (动态规划加速)
 - NVLink 4.0 (900GB/s)
+
+**Blackwell (2024) - 当前最新架构**:
+- 第五代 Tensor Core (双精度 FP4, FP6, FP8)
+- 第二代 Transformer Engine
+- NVLink 5.0 (1.8TB/s)
+- 208B 晶体管 (两个芯片封装)
+- GB200 NVL72: 72 GPU + 36 Grace CPU 超级芯片
+- 性能: FP4 达到 20 PFLOPS (H100 的 5x)
+
+**Rubin (2026预计) - 下一代架构**:
+- NVIDIA 在2024年GTC上宣布的下一代架构
+- 预计采用3nm工艺
+- 继续推进AI计算性能
 
 ---
 
@@ -249,7 +293,8 @@ D[4×4] = A[4×4] × B[4×4] + C[4×4]
 | RTX 3060 | Ampere | `sm_86` | `-DCMAKE_CUDA_ARCHITECTURES=86` |
 | Orin | Ampere | `sm_87` | `-DCMAKE_CUDA_ARCHITECTURES=87` |
 | RTX 4060 | Ada Lovelace | `sm_89` | `-DCMAKE_CUDA_ARCHITECTURES=89` |
-| Thor | Blackwell | `sm_100` | `-DCMAKE_CUDA_ARCHITECTURES=100` |
+| H100 | Hopper | `sm_90` | `-DCMAKE_CUDA_ARCHITECTURES=90` |
+| B100/B200 | Blackwell | `sm_100` | `-DCMAKE_CUDA_ARCHITECTURES=100` |
 
 **自动检测当前 GPU**:
 ```bash
