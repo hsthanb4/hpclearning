@@ -1,0 +1,223 @@
+# Triton 入门详细教程
+
+更新时间：2026-05-25
+
+这份教程面向已经学过 CUDA、PyTorch、FlashAttention 或 TileLang 的读者。目标不是背 API，而是建立一个能写、能调、能在面试里讲清楚的 Triton kernel 心智模型。
+
+资料核验：
+
+- Triton docs: https://triton-lang.org/main/index.html
+- Triton tutorials: https://triton-lang.org/main/getting-started/tutorials/
+- Triton installation: https://triton-lang.org/main/getting-started/installation.html
+- Triton language API: https://triton-lang.org/main/python-api/triton.language.html
+- Triton releases: https://github.com/triton-lang/triton/releases
+- OpenAI Triton intro: https://openai.com/index/triton/
+
+截至 2026-05-25，Triton docs main 页面说明 Triton 是面向现代 GPU 的 Python-based parallel programming language and compiler；GitHub releases 页面显示最新 release 为 v3.7.0。
+
+## 1. Triton 是什么
+
+Triton 是一个用于写 GPU kernel 的 Python DSL 和编译器。它的核心抽象不是 CUDA 里的单个 thread，而是一个 block-level 的 program：一个 program 处理一块向量、矩阵 tile 或 attention tile。
+
+一句话记忆：
+
+> Triton 让你用 Python 写出接近 CUDA 性能的 DNN 自定义 kernel，同时把 thread 级细节上升到 block tensor 和 program grid。
+
+适用场景：
+
+- PyTorch 中热点 op 的 fusion。
+- elementwise、reduction、softmax、layernorm。
+- matmul、group GEMM、persistent matmul。
+- attention、MoE dispatch、quantization/dequantization kernel。
+
+## 2. 安装和学习顺序
+
+官方文档给出的稳定安装方式是：
+
+```bash
+pip install triton
+```
+
+源码开发方式：
+
+```bash
+git clone https://github.com/triton-lang/triton.git
+cd triton
+pip install -r python/requirements.txt
+pip install -e .
+make dev-install
+make test-nogpu
+```
+
+如果要真正跑 GPU kernel，还需要有匹配的 PyTorch、GPU driver 和 CUDA/HIP 环境。本仓库当前提供学习材料和图解，不声明本机已经跑通 Triton。
+
+推荐学习顺序：
+
+1. Vector Add：理解 `@triton.jit`、`tl.program_id`、`tl.arange`、mask。
+2. Fused Softmax：理解一行一个 program、reduction、global memory 读写减少。
+3. Matmul：理解 `BLOCK_M/N/K`、`tl.dot`、program grouping、autotune。
+4. LayerNorm / Attention：理解真实 DNN kernel 中的访存、数值稳定和融合。
+
+对应图：`00_triton_learning_roadmap.excalidraw`
+
+## 3. Triton 编程模型
+
+一个 Triton kernel 通常有两部分：
+
+- Host wrapper：准备 PyTorch tensor、计算 grid、传入 meta-parameters。
+- JIT kernel：用 `@triton.jit` 写 block-level 程序。
+
+典型结构：
+
+```python
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def add_kernel(x_ptr, y_ptr, z_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    tl.store(z_ptr + offsets, x + y, mask=mask)
+
+
+def add(x, y):
+    z = torch.empty_like(x)
+    n = z.numel()
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE"]),)
+    add_kernel[grid](x, y, z, n, BLOCK_SIZE=1024)
+    return z
+```
+
+关键点：
+
+- `tl.program_id(0)` 表示当前 program 在 grid 第 0 维的位置。
+- `tl.arange` 创建 block 内 offset 向量。
+- `mask` 处理尾部非整除。
+- `BLOCK_SIZE: tl.constexpr` 是编译期 meta-parameter，会触发特化。
+
+对应图：`01_triton_programming_model.excalidraw`
+
+## 4. Vector Add 与 Softmax
+
+Vector Add 是最小入口，Fused Softmax 是第一个能体现性能价值的例子。
+
+Vector Add 学三件事：
+
+- 一个 program 处理连续的一段元素。
+- pointer arithmetic 和 mask 必须正确。
+- wrapper 的 grid lambda 决定 program 数量。
+
+Fused Softmax 学三件事：
+
+- 一行一个 program 能把多次 PyTorch op 读写融合成一次读和一次写。
+- 数值稳定要先减 `max`。
+- `BLOCK_SIZE` 通常取 next power of 2，但过大会带来寄存器压力。
+
+对应图：`02_triton_vector_add_softmax.excalidraw`
+
+## 5. Matmul 怎么理解
+
+Matmul 是 Triton 面试和实战的核心。你要能画出：
+
+- 一个 program 对应 C 的一个 `BLOCK_M x BLOCK_N` tile。
+- K 维按 `BLOCK_K` 分块循环。
+- A block 和 B block 通过 `tl.load` 进入 block tensor。
+- `tl.dot` 累加到 fp32 accumulator。
+- `tl.store` 写回 C。
+
+常见 meta-parameters：
+
+- `BLOCK_M` / `BLOCK_N`：输出 tile 大小。
+- `BLOCK_K`：K 维分块大小。
+- `num_warps`：每个 program 的 warp 数。
+- `num_stages`：流水深度。
+- `GROUP_M`：program ordering，影响 L2 cache 复用。
+
+对应图：`03_triton_matmul_tile_flow.excalidraw`
+
+## 6. Autotune、Debug 和 Profile
+
+Triton 的调优要有证据闭环：
+
+1. 先写 PyTorch reference。
+2. 小 shape 用 `torch.testing.assert_close`。
+3. 用 `triton.testing.do_bench` 做基础 benchmark。
+4. 用 `@triton.autotune` 枚举 `triton.Config`。
+5. 用 profiler 看 occupancy、register、memory throughput。
+
+注意：`triton.autotune` 会多次运行 kernel。如果 kernel 修改输出，必须考虑 `reset_to_zero`、`restore_value` 或保证输出被每次覆盖，否则 benchmark 会污染结果。
+
+对应图：`04_triton_autotune_debug_workflow.excalidraw`
+
+## 7. 练习题
+
+练习 1：Vector Add 变体。
+
+- 支持 `z = a * x + y`。
+- 尝试 `BLOCK_SIZE=256/512/1024/2048`。
+- 记录 latency 和带宽。
+
+练习 2：Row-wise Softmax。
+
+- 支持非 2 的幂列数。
+- 对齐 PyTorch 结果。
+- 比较 PyTorch 多 op 和 fused Triton 的显存读写次数。
+
+练习 3：Matmul。
+
+- 实现最小 matmul。
+- 加上 fp32 accumulator。
+- 尝试不同 `BLOCK_M/N/K` 和 `num_warps`。
+
+练习 4：LayerNorm。
+
+- 一行一个 program。
+- 先算 mean，再算 variance。
+- 思考为什么输入列数太大时一个 program 不够。
+
+练习 5：和 TileLang 对比。
+
+- 选择同一个 GEMM tile。
+- 用 Triton 解释 program/grid。
+- 用 TileLang 解释 T.Kernel/T.copy/T.gemm。
+
+## 8. 面试题
+
+Q：Triton program 和 CUDA thread 的关系是什么？
+
+A：Triton program 更像一个 block-level work unit，通常处理一个向量 block 或矩阵 tile。你不用显式写每个 thread 的 threadIdx，而是用 block tensor 和 compiler 映射到底层线程。
+
+Q：为什么 Triton 里很多参数是 `tl.constexpr`？
+
+A：这些参数参与编译期特化，比如 BLOCK_SIZE、BLOCK_M/N/K。编译器需要知道它们才能生成静态 shape 的 block tensor、展开循环和做优化。
+
+Q：mask 为什么重要？
+
+A：Triton program 通常按固定 block size 处理数据，真实 shape 不一定整除。mask 保证尾部 load/store 不越界，也保证 padding 不污染计算。
+
+Q：Triton matmul 为什么要关注 program ordering？
+
+A：不同 program 顺序会影响 A/B tile 在 L2 cache 中的复用。GROUP_M 这类策略让相邻 program 共享更多输入 tile，减少 HBM 访问。
+
+Q：Triton 和 CUDA 怎么取舍？
+
+A：Triton 更适合快速写 DNN block-level kernel 和 PyTorch 集成；CUDA 控制更细，适合极限手工优化、复杂同步或 Triton 表达困难的场景。
+
+Q：Triton 和 TileLang 怎么比较？
+
+A：Triton 生态成熟，PyTorch/Inductor 结合紧；TileLang 更强调 tiled dataflow、TVM IR 和调度体系衔接。面试里不要说谁替代谁，要说它们抽象边界不同。
+
+## 9. 文件清单
+
+- `00_triton_learning_roadmap.excalidraw`
+- `01_triton_programming_model.excalidraw`
+- `02_triton_vector_add_softmax.excalidraw`
+- `03_triton_matmul_tile_flow.excalidraw`
+- `04_triton_autotune_debug_workflow.excalidraw`
+- `05_triton_interview_map.excalidraw`
+- `generate_triton_tutorial.py`

@@ -1074,6 +1074,28 @@ print(tokenizer.decode(out[0], skip_special_tokens=True))</code></pre>
       </div>
     </section>
 
+    <section id="practice">
+      <h2>8. 练习题与项目题</h2>
+      <div class="grid-2">
+        <div class="callout blue">
+          <span class="label">练习 1：显存公式手算</span>
+          <p>选择一个 32 层模型，设 batch、context、kv heads、head dim 和 dtype，分别计算 FP16、FP8、INT4、2bit 的 KV cache 理想显存，再说明 scale、metadata、padding 和 block table 会让真实显存偏离理想值。</p>
+        </div>
+        <div class="callout green">
+          <span class="label green">练习 2：质量评测协议</span>
+          <p>设计一个长上下文评测表，至少包含 needle retrieval、MRCR、代码生成、数学推理和业务样本。每个任务记录 FP16 baseline、FP8、低比特方案的准确率和失败样例。</p>
+        </div>
+        <div class="callout purple">
+          <span class="label purple">练习 3：kernel 代价拆解</span>
+          <p>把一次 decode attention 拆成读取 KV、反量化、QK、softmax、PV、写回输出几段，说明量化节省了哪段 HBM 流量，又在哪段引入了额外计算。</p>
+        </div>
+        <div class="callout orange">
+          <span class="label orange">项目题：量化回滚策略</span>
+          <p>为线上 RAG 服务设计一个回滚策略：当长上下文检索准确率、p95 TPOT、OOM 率或用户质量指标越界时，如何从低比特回滚到 FP8 或 FP16，并保留可审计日志。</p>
+        </div>
+      </div>
+    </section>
+
     <section id="sources">
       <h2>参考资料和配套文件</h2>
       <div class="grid-2">
@@ -1140,6 +1162,20 @@ README = """# KV Cache 量化教程：TurboQuant 与常用方法
 - SKVQ: https://arxiv.org/abs/2405.06219
 - WKVQuant: https://arxiv.org/abs/2402.12065
 - Quantize What Counts: https://arxiv.org/abs/2502.15075
+
+## 练习题
+
+1. 手算一个 32 层、batch=8、context=32k、kv_heads=8、head_dim=128 的 FP16 KV cache 显存，再分别估算 FP8、INT4 和 2bit 的理想压缩上限。
+2. 设计一个评测表格，同时记录 TTFT、TPOT、peak VRAM、最大上下文、needle retrieval accuracy 和困惑度变化。
+3. 选 KIVI、KVQuant、TurboQuant 三种方法，写出它们对 K/V 采用的粒度、scale 保存方式和反量化位置。
+4. 给一个长上下文 RAG 服务设计量化回滚策略：什么指标触发回滚，回滚到 FP8 还是 FP16，如何避免请求中断。
+
+## 面试题
+
+1. 为什么 K cache 和 V cache 的量化敏感性不同？请从 attention score 和 value aggregation 两条路径解释。
+2. FP8 为什么经常是工程默认起点，而不是直接追求 4bit 或 2bit？
+3. TurboQuant 的旋转、norm correction 和 inner-product bias 分别在解决什么误差来源？
+4. 如何判断 KV cache 量化收益来自显存容量提升，还是来自 decode kernel 实际更快？
 """
 
 

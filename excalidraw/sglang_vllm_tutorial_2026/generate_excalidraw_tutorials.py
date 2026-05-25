@@ -455,6 +455,20 @@ def write_readme() -> None:
 - vLLM release notes: https://github.com/vllm-project/vllm/releases
 - vLLM V1 guide: https://docs.vllm.ai/en/stable/usage/v1_guide/
 - vLLM hybrid SSM disaggregation blog: https://vllm.ai/blog/2026-04-21-hybrid-ssm-disagg
+
+## 练习题
+
+1. 画出一次请求从 HTTP/gRPC 入口到 scheduler、KV cache、decode worker、返回 token 的完整路径，并标出 TTFT、TPOT、queueing latency 分别在哪里产生。
+2. 对 SGLang：设计一个 RadixAttention prefix cache 命中实验，分别构造完全命中、部分命中和完全未命中的 prompt 集合。
+3. 对 vLLM：手算 3 个不同长度序列在 PagedAttention block table 中的分配和释放过程，说明它如何降低 KV cache 碎片。
+4. 对比 prefill/decode disaggregation、chunked prefill、continuous batching 三个机制：分别写出它们优化的瓶颈和可能带来的副作用。
+
+## 面试题
+
+1. SGLang 的 RadixAttention 与普通 prefix cache 的核心差异是什么，为什么适合多轮和结构化请求？
+2. vLLM 的 PagedAttention 为什么能提升显存利用率，它和 OS virtual memory 的类比在哪里成立、在哪里不成立？
+3. 服务端 LLM runtime 中，scheduler 需要同时平衡哪些目标：吞吐、尾延迟、公平性、显存和 cache 命中率如何取舍？
+4. 如果线上 decode TPOT 突然恶化，你会按哪些证据顺序排查：队列、KV cache、GPU kernel、通信、batch shape 还是模型配置？
 """
     (OUT_DIR / "README.md").write_text(text, encoding="utf-8")
 

@@ -616,6 +616,20 @@ README = """# TileLang 入门教程与 Excalidraw 图解
 - TVM docs: https://tvm.apache.org/docs/
 
 截至 2026-05-25，TileLang 文档站页面显示版本为 0.1.10，GitHub releases 页面最新稳定标签为 v0.1.9。
+
+## 练习题
+
+1. 把同一个 GEMM tile 分别用 CUDA thread/block、Triton program、TileLang `T.Kernel` 三种语言描述，比较抽象粒度。
+2. 修改 `BM/BN/BK/num_threads/num_stages`，记录 shared memory、寄存器压力和 latency 的变化。
+3. 给一个非整除矩阵 shape，补齐边界保护，并用小 shape 对齐 PyTorch baseline。
+4. 读生成代码或 IR，标出 global -> shared -> fragment -> global 的每一次数据移动。
+
+## 面试题
+
+1. TileLang 为什么强调 tiled dataflow，而不是让用户直接写每个 thread 的计算？
+2. `T.copy`、`T.gemm`、`T.Pipelined` 分别对应 GPU kernel 里的哪些性能关键路径？
+3. TileLang 和 Triton 都能写 GEMM，二者在抽象层、编译基础设施和调优方式上有什么不同？
+4. 如果 TileLang kernel 性能不如预期，你会先检查 tile shape、memory scope、pipeline、生成代码还是 profiler 证据？
 """
 
 

@@ -327,3 +327,38 @@ frontend graph dialect
 - Bufferization: https://mlir.llvm.org/docs/Bufferization/
 - Linalg Dialect: https://mlir.llvm.org/docs/Dialects/Linalg/
 - GPU Dialect: https://mlir.llvm.org/docs/Dialects/GPU/
+
+## 14. 追加练习题
+
+练习 1：IR 读写基本功。
+
+- 写一个包含 module、func.func、scf.for、arith.addf 的最小 `.mlir` 文件。
+- 用 `mlir-opt --verify-diagnostics` 验证错误位置。
+- 用自己的话解释 Operation、Region、Block、Value 的嵌套关系。
+
+练习 2：ODS 和 verifier。
+
+- 定义一个 `mydsl.matmul` op，要求输入是 rank-2 tensor。
+- verifier 检查 M/K/N 维度匹配。
+- 添加一条错误测试，确认 FileCheck 能捕获诊断信息。
+
+练习 3：PatternRewrite。
+
+- 写 `mydsl.relu(mydsl.relu(x)) -> mydsl.relu(x)`。
+- 添加一个会递归触发的错误 rewrite，解释为什么 rewrite 需要收敛条件。
+- 用 pass pipeline 打印 rewrite 前后 IR。
+
+练习 4：Lowering。
+
+- 把 `mydsl.add` lower 到 `linalg.generic`。
+- 把 `mydsl.matmul` lower 到 `linalg.matmul`。
+- 写出 `ConversionTarget` 中合法 dialect 和非法 dialect 的清单。
+
+## 15. 面试速答题
+
+1. MLIR 为什么不是一个固定 IR，而是一套多 dialect IR 基础设施？
+2. Dialect、Op、Type、Attribute、Trait、Interface 分别解决什么扩展点？
+3. Canonicalization、普通 optimization pass、DialectConversion 三者有什么区别？
+4. 为什么 lowering 通常是 partial lowering，而不是一步降到 LLVM？
+5. Bufferization 为什么难，tensor 语义和 memref 语义的核心差异是什么？
+6. 如果一个 pass 输出 IR 看起来合法但结果错了，你会先看 verifier、FileCheck、pass pipeline、还是 op semantics？
