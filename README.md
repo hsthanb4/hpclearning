@@ -9,7 +9,7 @@
 3. 评分为代码 4 分、三个问答各 2 分；达到 8/10 且无关键误解才通过。
 4. `main` 永远只保留题目；`answer` 才包含参考答案。不要在第一次尝试前切到答案分支。
 
-## 六条主线
+## 六条核心主线
 
 | 模块 | 课数 | 核心产出 | 前置 |
 |---|---:|---|---|
@@ -20,12 +20,26 @@
 | [`mlir/`](./mlir/) MLIR 编译器主线 | 8 | 从 SSA/方言到转换、bufferization 与可调 lowering。 | 编译原理基础、C++ 阅读能力 |
 | [`rl/`](./rl/) 强化学习与大模型后训练 | 12 | 从 MDP 到大规模 RLHF/GRPO 系统，面向算法与系统面试。 | Python、概率期望、基本深度学习 |
 
-推荐顺序：`train` 第 1～5 课 → `cuda` → `triton` → `cutlass` → `mlir`；强化学习可在具备 PyTorch 基础后并行学习，最后回到 `train` 第 6～14 课做综合系统设计。
+## 三条 AI Infra 补充线
+
+这三条线是对六条核心主线的压缩补充，不重复 CUDA kernel、训练并行推导或基础强化学习。每条 8 课，共 24 课。
+
+| 模块 | 课数 | 核心产出 | 前置 |
+|---|---:|---|---|
+| [`inference/`](./inference/) 推理服务与量化 | 8 | 能做 KV/容量账本，理解服务调度、量化选择并以 SLO goodput 验证方案。 | `train` 1～5、CUDA/Triton 基础、Transformer |
+| [`runtime/`](./runtime/) 框架运行时、数据与性能 | 8 | 能解释 PyTorch 执行/编译/分布式合同，设计数据流水并基于 trace 排障。 | Python、PyTorch、`train` 1～5、CUDA 基础 |
+| [`platform/`](./platform/) 集群平台、网络存储与可靠性 | 8 | 能从 GPU 节点拓扑推到调度、SLO、容量和故障恢复。 | Linux/网络基础、`runtime`、`train` 分布式章节 |
+
+- `inference`：Prefill/Decode/KV → Continuous Batching → Paged KV/Prefix Cache → Speculative Decoding → 推理并行与 P/D 分离 → 量化基础 → 量化方案选择 → SLO 压测。
+- `runtime`：Dispatcher/Autograd → `torch.compile` → Process Group → Collective 成本与拓扑 → 数据分片/恢复 → 输入流水 → Profiler/Allocator → 可复现性与回归定位。
+- `platform`：节点拓扑 → RDMA/GPUDirect → 存储/Checkpoint → 容器与设备 → Gang/拓扑调度 → 容量/公平/Backfill → 可观测性/SLO → 故障恢复与多租户。
+
+推荐顺序：`train` 第 1～5 课 → `cuda` → `triton` → `cutlass` → `mlir` → `runtime` → `inference` → `platform`；`rl` 可在具备 PyTorch 基础后并行学习，最后回到 `train` 第 6～14 课做综合系统设计。
 
 ## 初始进度
 
 - 学习中：`train/lesson01`
-- 未开始：其余 63 课
+- 未开始：其余 87 课
 - 待验证：CUDA/CUTLASS/Triton/MLIR 专用工具链；仓库内会记录实际完成的代表性远程 GPU 验证，不把静态检查冒充运行结果。
 
 ## 资料原则
@@ -40,3 +54,4 @@
 - Triton：10 课参考脚本已通过 Python 语法检查。远程设备的 Triton 后端要求 `PPU_SDK/irformatter`，当前环境缺失，GPU JIT/数值验证仍待在标准 NVIDIA Triton 环境完成。
 - MLIR：当前本地与远程均无 `mlir-opt/mlir-tblgen`，仅完成文本、类型和 API 静态审查，实际工具链验证待完成。
 - 强化学习：12 课纯 Python 参考实现及断言已逐课运行通过；这里验证的是教学算法，不等同于大规模 RLHF 集群 benchmark。
+- AI Infra 补充线：24 课纯 Python 参考实现及断言已逐课运行通过；这些验证覆盖教学模型与边界检查，不等同于目标 GPU 集群、网络或服务框架的生产 benchmark。
