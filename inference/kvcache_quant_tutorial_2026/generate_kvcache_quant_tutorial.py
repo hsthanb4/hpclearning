@@ -6,7 +6,7 @@ from pathlib import Path
 
 OUT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = OUT_DIR.parent.parent
-HTML_PATH = ROOT_DIR / "kv_cache_quantization_tutorial_2026.html"
+HTML_PATH = ROOT_DIR / "inference" / "kv_cache_quantization_tutorial_2026.html"
 
 
 PALETTE = {
@@ -853,7 +853,7 @@ HTML = """<!doctype html>
       <div class="diagram-shell">
         <div class="diagram-title">
           <span>图 1：KV cache 量化总览</span>
-          <a href="excalidraw/kvcache_quant_tutorial_2026/00_kvcache_quant_overview.excalidraw">打开 Excalidraw 源文件</a>
+          <a href="kvcache_quant_tutorial_2026/00_kvcache_quant_overview.excalidraw">打开 Excalidraw 源文件</a>
         </div>
         <div class="kv-flow" aria-label="KV cache flow diagram">
           <div class="flow-cell"><b>Prompt</b><span>输入 token 进入模型。</span></div>
@@ -922,7 +922,7 @@ HTML = """<!doctype html>
       <div class="diagram-shell">
         <div class="diagram-title">
           <span>图 2：TurboQuant 论文算法与 vLLM 工程实现</span>
-          <a href="excalidraw/kvcache_quant_tutorial_2026/01_turboquant_pipeline.excalidraw">打开 Excalidraw 源文件</a>
+          <a href="kvcache_quant_tutorial_2026/01_turboquant_pipeline.excalidraw">打开 Excalidraw 源文件</a>
         </div>
         <div class="quant-grid">
           <div class="pipeline">
@@ -959,7 +959,7 @@ HTML = """<!doctype html>
       <div class="diagram-shell">
         <div class="diagram-title">
           <span>图 3：方法对比与选型地图</span>
-          <a href="excalidraw/kvcache_quant_tutorial_2026/02_kvcache_quant_methods_comparison.excalidraw">打开 Excalidraw 源文件</a>
+          <a href="kvcache_quant_tutorial_2026/02_kvcache_quant_methods_comparison.excalidraw">打开 Excalidraw 源文件</a>
         </div>
       </div>
 
@@ -1102,9 +1102,9 @@ print(tokenizer.decode(out[0], skip_special_tokens=True))</code></pre>
         <div>
           <h3>配套 Excalidraw</h3>
           <ul>
-            <li><a href="excalidraw/kvcache_quant_tutorial_2026/00_kvcache_quant_overview.excalidraw">00_kvcache_quant_overview.excalidraw</a></li>
-            <li><a href="excalidraw/kvcache_quant_tutorial_2026/01_turboquant_pipeline.excalidraw">01_turboquant_pipeline.excalidraw</a></li>
-            <li><a href="excalidraw/kvcache_quant_tutorial_2026/02_kvcache_quant_methods_comparison.excalidraw">02_kvcache_quant_methods_comparison.excalidraw</a></li>
+            <li><a href="kvcache_quant_tutorial_2026/00_kvcache_quant_overview.excalidraw">00_kvcache_quant_overview.excalidraw</a></li>
+            <li><a href="kvcache_quant_tutorial_2026/01_turboquant_pipeline.excalidraw">01_turboquant_pipeline.excalidraw</a></li>
+            <li><a href="kvcache_quant_tutorial_2026/02_kvcache_quant_methods_comparison.excalidraw">02_kvcache_quant_methods_comparison.excalidraw</a></li>
           </ul>
         </div>
         <div>
@@ -1138,7 +1138,7 @@ README = """# KV Cache 量化教程：TurboQuant 与常用方法
 
 更新时间：2026-05-25
 
-本目录包含 3 张标准 `.excalidraw` 图稿，配合仓库根目录的 `kv_cache_quantization_tutorial_2026.html` 使用。
+本目录包含 3 张标准 `.excalidraw` 图稿，配合 `inference/kv_cache_quantization_tutorial_2026.html` 使用。
 
 ## 文件
 
