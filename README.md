@@ -22,7 +22,7 @@
 | [`cutlass/`](./cutlass/) CUTLASS / CuTe 主线 | 8 | 从 layout algebra 到可验证的 GEMM 分层组合。 | CUDA 线程模型、GEMM、C++ 模板基础 |
 | [`triton/`](./triton/) Triton Kernel 主线 | 10 | 从向量 program 到归约、softmax、transpose、GEMM 与随机算子。 | Python、PyTorch 张量、CUDA 基本线程/内存概念 |
 | [`mlir/`](./mlir/) MLIR 编译器主线 | 8 | 从 SSA/方言到转换、bufferization 与可调 lowering。 | 编译原理基础、C++ 阅读能力 |
-| [`rl/`](./rl/) 强化学习与大模型后训练 | 12 | 从 MDP 到大规模 RLHF/GRPO 系统，面向算法与系统面试。 | Python、概率期望、基本深度学习 |
+| [`rl/`](./rl/) 强化学习与大模型后训练 | 12 | 从 MDP、REINFORCE/RLOO 到 RLHF/RLVR、GRPO 变体及 rollout 数据契约。 | Python、概率期望、基本深度学习 |
 
 ## 三条 AI Infra 补充线
 
@@ -39,6 +39,12 @@
 - `platform`：节点拓扑 → RDMA/GPUDirect → 存储/Checkpoint → 容器与设备 → Gang/拓扑调度 → 容量/公平/Backfill → 可观测性/SLO → 故障恢复与多租户。
 
 推荐顺序：`train` 第 1～5 课 → `cuda` → `triton` → `cutlass` → `mlir` → `runtime` → `inference` → `platform`；`rl` 可在具备 PyTorch 基础后并行学习，最后回到 `train` 第 6～14 课做综合系统设计。
+
+### 强化学习主线的 LLM 阅读路径
+
+第 1 课把 token MDP 与完整回答 bandit 对齐 → 第 3～5 课串起 REINFORCE/RLOO、GAE 与 PPO → 第 9～10 课区分离线 DPO、RLHF/RLVR 和奖励粒度 → 第 11～12 课分析 GRPO 变体、训练/推理分布差异及 Agent 动作 mask。第 2、6～8 课保留通用 RL 基础，不用 LLM 配方替代其他任务的算法。
+
+[Cameron R. Wolfe 的 LLM RL 综述](https://cameronrwolfe.substack.com/p/llm-rl)用于串联阅读：策略梯度是共同骨架；不同方法主要改变学习信号、更新约束与样本权重。课程中的公式与方法边界以各课链接的原论文和官方文档为基线，不把综述中的前沿实验结论当作普遍保证。
 
 ## 初始进度
 
