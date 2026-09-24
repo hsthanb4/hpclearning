@@ -10,7 +10,7 @@ MLIR_LESSONS = {
     "lesson01_ir_ssa.qmd": {
         "title": "第 1 课：IR 层级、SSA 与 Region",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Module["ModuleOp (顶层容器)"]
         subgraph Func["func.func @kernel(%arg0: f32) -> f32"]
@@ -29,7 +29,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 1-1：MLIR 嵌套包含层次 (Operation → Region → Block → Operation) 与 SSA 定值-引用链</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Source["MLIR 文本源码 (.mlir)"] --> Lexer["词法/语法解析 (AsmParser)"]
     Lexer --> OpBuild["Operation 实例构建 & 操作数类型推导"]
@@ -43,7 +43,7 @@ flowchart LR
     "lesson02_dialects_types.qmd": {
         "title": "第 2 课：Dialect、Type、Attribute 与接口",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Dialect["MLIRContext (方言生态)"]
         Builtin["builtin (module, func)"]
@@ -59,7 +59,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 2-1：MLIR 多方言协同拓扑与类型系统共存体系</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Op["Operation 实例"] --> Query{"查询接口 dyn_cast<OpInterface>"}
     Query -->|命中| CallMethod["分发到特定方言 Trait / C++ 虚表实现"]
@@ -72,7 +72,7 @@ flowchart LR
     "lesson03_ods.qmd": {
         "title": "第 3 课：ODS/TableGen 与自定义 Operation",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph ODS["TableGen 定义 (.td 文件)"]
         Def["def My_MatmulOp : My_Op<'matmul', [Pure, SameOperandsAndResultType]>"]
@@ -85,7 +85,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 3-1：ODS 声明式算子规范 (Operation Definition Specification) 元模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     TD["算子定义规范 (*.td)"] -->|mlir-tblgen -gen-op-decls| IncH["算子头文件声明 (*.h.inc)"]
     TD -->|mlir-tblgen -gen-op-defs| IncCpp["算子实现代码 (*.cpp.inc)"]
@@ -98,7 +98,7 @@ flowchart LR
     "lesson04_patterns.qmd": {
         "title": "第 4 课：Pass、PatternRewriter 与贪心重写",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Driver["GreedyPatternRewriteDriver"]
         Queue["待遍历 Operation 工作队列 (Worklist)"]
@@ -112,7 +112,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 4-1：MLIR 贪心模式重写驱动器 (Greedy Pattern Driver) 核心状态机</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Init["初始化 Pass 并在 Op 上启动 Driver"] --> Loop["弹出工作队列顶部 Operation"]
     Loop --> TryPatterns["遍历已注册 RewritePattern 列表"]
@@ -129,7 +129,7 @@ flowchart LR
     "lesson05_conversion.qmd": {
         "title": "第 5 课：Dialect Conversion 与类型转换",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph ConversionFramework["方言转换框架核心三要素"]
         Target["ConversionTarget (合法性定义: Legal / Dynamic / Illegal)"]
@@ -141,7 +141,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 5-1：Dialect Conversion 目标合法性判定与类型映射模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     InputIR["源方言 IR (含 Illegal Op)"] --> TypeMap["TypeConverter 转换函数签名与操作数"]
     TypeMap --> PatternExec["Pattern 逐个生成新合法方言算子"]
@@ -162,7 +162,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Analyze["遍历 AST 构建读写与别名图 (Alias / OpOperand Analysis)"] --> Detect{"存在写后读 (RAW) 冲突且无法重用 buffer?"}
     Detect -->|冲突| Alloc["插入显式内存拷贝 / memref.alloc 分配新缓冲区"]
@@ -182,7 +182,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     MLIR["MLIR (LLVM Dialect)"] --> MLIRTrans["mlir-translate --mlir-to-llvmir"]
     MLIRTrans --> LLVMIR["标准 LLVM IR 模块 (llvm::Module)"]
@@ -195,7 +195,7 @@ flowchart LR
     "lesson08_transform_debug.qmd": {
         "title": "第 8 课：Transform Dialect、Pipeline 调试与面试设计",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph TransformScript["Transform Dialect 脚本"]
         Match["%target = transform.structured.match ops{['linalg.matmul']}"]
@@ -211,7 +211,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 8-1：Transform Dialect 元调度脚本与被变换 Payload IR 的解耦驱动体系</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Bug["Pass 出现崩溃或语义错误"] --> Opt["启动调试: mlir-opt --pass-pipeline=..."]
     Opt --> Print["添加 --mlir-print-ir-after-all 输出各阶段 IR"]

@@ -16,7 +16,7 @@ TRAIN_LESSONS = {
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant F as 前向传播 (Forward)
@@ -45,7 +45,7 @@ sequenceDiagram
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph MicroBatches["梯度累积 Micro-Batch 调度时序"]
         direction TB
@@ -76,7 +76,7 @@ flowchart LR
     "lesson04.qmd": {
         "title": "第 4 课：数据并行 DP 与 DDP",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph DataParallel["数据并行架构 (DDP)"]
         Data["全局 Batch 训练数据"] --> Split1["分片 0 (Rank 0)"]
@@ -95,7 +95,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 4-1：数据并行（DDP）同构副本前向与全量梯度归约架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant B as 反向求导 (Backward Compute)
@@ -132,7 +132,7 @@ sequenceDiagram
     "lesson06.qmd": {
         "title": "第 6 课：张量并行 TP",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph MegatronMLP["Megatron-LM MLP 列行切分架构"]
         direction TB
@@ -149,7 +149,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 6-1：Megatron-LM MLP 模块列分片与行分片矩阵乘法拓扑</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant Input as 输入张量 X
@@ -170,7 +170,7 @@ sequenceDiagram
     "lesson07.qmd": {
         "title": "第 7 课：序列并行 SP",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Comparison["TP vs TP+SP 显存分布对比"]
         subgraph StandardTP["传统 Tensor Parallelism"]
@@ -186,7 +186,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 7-1：序列并行（SP）切分非张量并行区激活值显存分布对比</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     LN["LayerNorm (序列切分 s/TP)"] -->|AllGather 通信| Attn["Attention (全序列 s 进入 Column Linear)"]
     Attn --> OutProj["Output Projection 行分片"]
@@ -198,7 +198,7 @@ flowchart LR
     "lesson08.qmd": {
         "title": "第 8 课：上下文并行 CP",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph CPArchitecture["Context Parallelism (Ring Attention) 数据切分"]
         Seq["超长序列 (如 128k ~ 1M Tokens)"] --> B0["Card 0: Q0, K0, V0 (0~32k)"]
@@ -210,7 +210,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 8-1：上下文并行按序列切块并分配至独立 GPU 拓扑</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant Q as Local Query Block (常驻本地)
@@ -235,7 +235,7 @@ sequenceDiagram
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Schedule["1F1B (One-Forward-One-Backward) 调度时序"]
         Warmup["预热阶段: 连续执行 Forward 填满流水线深度 (F1, F2, F3...)"]
@@ -250,7 +250,7 @@ flowchart TD
     "lesson10.qmd": {
         "title": "第 10 课：专家并行 EP",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     Tokens["输入 Token 序列"] --> Router["Top-K 门控路由网络 (Softmax / Sigmoid)"]
     Router --> E0["专家 0 (Rank 0)"]
@@ -261,7 +261,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 10-1：MoE 门控路由网络与跨 GPU 专家切分架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant T as 本地 Tokens
@@ -282,7 +282,7 @@ sequenceDiagram
     "lesson11.qmd": {
         "title": "第 11 课：5D 并行",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     Cluster["超大规模集群计算拓扑"] --> TP["TP (机内 NVLink 域, TP=4~8)"]
     Cluster --> SP["SP / CP (长上下文序列维度拆分)"]
@@ -294,7 +294,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 11-1：5D 并行维度分解与物理通信层次映射架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Start["开始集群训练配置搜索"] --> C1{"单卡是否装得下?"}
     C1 -->|是| PureDP["纯 DP / ZeRO-1 (通信效率最高)"]
@@ -309,7 +309,7 @@ flowchart TD
     "lesson12.qmd": {
         "title": "第 12 课：配置搜索与性能诊断",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph Roofline["Roofline 性能边界模型"]
         direction TB
@@ -321,7 +321,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 12-1：Roofline 模型算术强度与硬件瓶颈分界图解</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     OOM["训练出现 Out-Of-Memory (OOM) 故障"] --> Check1{"第 1 步还是第 2 步 OOM?"}
     Check1 -->|第 2 步| Reason1["首次 Optimizer Step 产生 Adam FP32 状态或碎片增加"]
@@ -335,7 +335,7 @@ flowchart TD
     "lesson13.qmd": {
         "title": "第 13 课：GPU 内核与 FlashAttention",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph StandardAttn["传统 Attention: O(N^2) 频繁往返 HBM"]
         QKV["Q, K, V (GMEM)"] --> S["S = Q K^T (写入 HBM)"]
@@ -350,7 +350,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 13-1：传统注意力大量读写高带宽内存 vs FlashAttention 片上瓦片融合对比</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Outer["外层循环: 遍历 K, V 分块 (加载至 SRAM)"] --> Inner["内层循环: 遍历 Q 分块 (加载至 SRAM)"]
     Inner --> Kernel["计算局部 S = Q K^T 并执行 Online Softmax 状态更新"]
@@ -363,7 +363,7 @@ flowchart LR
     "lesson14.qmd": {
         "title": "第 14 课：混合精度与综合面试",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph Formats["数值精度格式位数对比"]
         FP32["FP32: 1 符号位 + 8 指数位 + 23 尾数位 (4 Bytes)"]
@@ -375,7 +375,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 14-1：现代深度学习主流浮点数值格式位宽与动态范围对比</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant Net as 网络前向计算 (BF16)

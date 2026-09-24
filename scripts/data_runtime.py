@@ -10,7 +10,7 @@ RUNTIME_LESSONS = {
     "lesson01.qmd": {
         "title": "第 1 课：PyTorch 执行栈、Dispatcher 与 Autograd",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Frontend["Python API 接口层"]
         PyOp["torch.matmul(a, b) / torch.add(x, y)"]
@@ -27,7 +27,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 1-1：PyTorch Dispatcher 调度键分发与执行栈拓扑结构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Loss["标量损失 loss.backward()"] --> Queue["待处理反向节点工作队列 (ReadyQueue)"]
     Queue --> Pop["弹出当前就绪 Node (如 MulBackward0)"]
@@ -49,7 +49,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Call["调用已编译模型 fn(*args)"] --> CheckGuards{"Guard 快速校验是否全部通过?"}
     CheckGuards -->|命中缓存| FastPath["直接执行已编译高性能 Triton 机器码 (极速)"]
@@ -64,7 +64,7 @@ flowchart LR
     "lesson03.qmd": {
         "title": "第 3 课：Process Group、Rendezvous 与 Collective 契约",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Rendezvous["Rendezvous 发现中心 (TCPStore / etcd)"]
         Store["全局键值协调: Master IP:Port, World Size=8"]
@@ -82,7 +82,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 3-1：分布式训练集合通信初始化与 ProcessGroup 物理拓扑映射</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Host["Python 发起 dist.all_reduce(tensor)"] --> Enqueue["向底层 CUDA 通信 Stream 压入 NCCL 内核"]
     Enqueue --> ReturnWork["立即返回异步句柄 (Work Handle) 不阻塞 CPU"]
@@ -103,7 +103,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Msg["待规约报文尺寸 S 与集群卡数 P"] --> Threshold{"S 是否大于环/树分界阈值?"}
     Threshold -->|S 较小 (小包)| SelectTree["选择 Tree / CollNet 算法 (极小化延迟 α)"]
@@ -117,7 +117,7 @@ flowchart TD
     "lesson05.qmd": {
         "title": "第 5 课：数据分片、Shuffle 与精确 Resume",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Dataset["全量训练数据集 (N 条记录)"]
         Raw["Samples [0, 1, 2, ..., N-1]"]
@@ -132,7 +132,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 5-1：分布式数据分片采样与可复现 Shuffle 逻辑映射模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Crash["训练异常中断 / 节点抢占故障"] --> LoadCkpt["加载恢复 Checkpoint 元数据"]
     LoadCkpt --> RestoreState["恢复 Epoch 计数器、随机种子与已消费 Batch 偏移量"]
@@ -145,7 +145,7 @@ flowchart LR
     "lesson06.qmd": {
         "title": "第 6 课：存储→CPU→Pinned Memory→GPU 流水",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     Storage["远端对象存储 / NVMe SSD"] -->|Read/IO| PageCache["操作系统 Page Cache (CPU)"]
     PageCache -->|Decode/Process| PageableRAM["常规 CPU 内存 (可换页分页内存)"]
@@ -155,7 +155,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 6-1：数据从外部介质经锁页内存直达 GPU 的四层物理搬运通道</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph WorkerThreads["DataLoader Background Workers (CPU)"]
         W1["读取下一批原始样本"] --> W2["解码图像/分词张量"]
@@ -177,7 +177,7 @@ flowchart TD
     "lesson07.qmd": {
         "title": "第 7 课：Profiler、Timeline 与 CUDA Allocator",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph CachingAllocator["PyTorch Caching Allocator 双池架构"]
         Large["大块内存池 (Large Pool: >= 1MB) ➔ 容纳激活与大权重"]
@@ -192,7 +192,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 7-1：PyTorch 缓存分配器双池结构与显存切分碎片控制模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     StartTrace["启动 torch.profiler 采集"] --> CPUHook["CPU 端拦截 Python Op 分发并打标 Correlation ID"]
     CPUHook --> CUPTI["CUPTI 驱动层捕获真实 GPU Kernel Launch 与执行时延"]
@@ -205,7 +205,7 @@ flowchart LR
     "lesson08.qmd": {
         "title": "第 8 课：可复现性、回归定位与性能排障",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph JitterSources["训练性能抖动与吞吐下降核心诱因"]
         Straggler["掉队卡 (Straggler): 降频 / ECC 双位错误重试"]
@@ -217,7 +217,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 8-1：分布式集群性能回归与抖动诱因排查矩阵</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Alert["监控报警: 训练 TFLOPS / Step Time 出现异常回归"] --> Step1["抓取全节点 Profiler Timeline 查看 GPU 空闲气泡"]
     Step1 --> CheckBubble{"主要气泡出现在 IO 还是 通信?"}

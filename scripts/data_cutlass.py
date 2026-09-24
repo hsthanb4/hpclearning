@@ -16,7 +16,7 @@ CUTLASS_LESSONS = {
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph MemHierarchy["GEMM 算术强度三级访存层次"]
         GMEM["全局显存 HBM: 容量大 (80GB+), 带宽约 2~3 TB/s"] -->|加载分块 Tile| SMEM["共享内存 SMem: 容量中 (200KB+/SM), 带宽约 15~20 TB/s"]
@@ -36,7 +36,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Coord["逻辑坐标 (m, n)"] --> InnerProduct["坐标与步长做代数内积: offset = m * stride_m + n * stride_n"]
     InnerProduct --> MemOffset["物理内存一维下标 1D Pointer Offset"]
@@ -54,7 +54,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     GlobalTensor["全局张量 Tensor (由指针与 Layout 构成)"] --> Partition["CuTe local_partition(tensor, thr_layout, thread_idx)"]
     Partition --> ThreadLocalTensor["每个线程持有的局部切片视图 Tensor"]
@@ -72,7 +72,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant T as 线程集
@@ -100,7 +100,7 @@ sequenceDiagram
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph ThreeTier["GEMM 三级 Tiling 层次"]
         CTATile["1. CTA 级 Tiling: 分块置于共享内存 (如 128×128)"]
@@ -121,7 +121,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant Stage0 as SMem Stage 0
@@ -147,7 +147,7 @@ sequenceDiagram
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Inputs["低精度输入 (FP8 / BF16)"] --> MMA["Tensor Core 高速矩阵乘"]
     MMA --> Accum["FP32 高精度累加器 (防止下溢与累加误差)"]
@@ -166,7 +166,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Shape["输入 GEMM 形状 (M, N, K)"] --> Heuristic["启发式规则 / 预调优表格"]
     Heuristic --> Config["选定最优 Tile 尺寸与多级流水级数"]

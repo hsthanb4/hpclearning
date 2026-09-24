@@ -10,7 +10,7 @@ PLATFORM_LESSONS = {
     "lesson01.qmd": {
         "title": "第 1 课：GPU 节点拓扑：NUMA、PCIe、NVLink 与 NIC 亲和性",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph NUMA0["NUMA Node 0 (CPU 0)"]
         RAM0["Local RAM 0"]
@@ -30,7 +30,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 1-1：现代 8 卡 GPU 节点拓扑、NVLink 高速网与 NUMA/NIC 亲和性架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Task["调度器绑定 Pod 进程"] --> CheckLoc["检测目标 GPU 物理插槽位置"]
     CheckLoc --> PinCPU["使用 numactl 绑定对应的同侧 NUMA CPU 核心"]
@@ -49,7 +49,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Setup["初始化 InfiniBand 设备与上下文"] --> RegMR["注册内存区域 (ibv_reg_mr 锁定物理页)"]
     RegMR --> CreateQP["创建发送/接收队列对 (Queue Pair: QP)"]
@@ -63,7 +63,7 @@ flowchart TD
     "lesson03.qmd": {
         "title": "第 3 课：存储层级、数据集与 Checkpoint 带宽",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     L1["GPU 显存 (HBM3e: 3~8 TB/s)"] --> L2["Host 内存 (DDR5: 200~400 GB/s)"]
     L2 --> L3["节点本地 NVMe SSD (PCIe Gen5: 10~50 GB/s)"]
@@ -73,7 +73,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 3-1：大模型集群五级存储金字塔层次与带宽特性</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Trigger["触发 Checkpoint 存档"] --> DumpMem["步骤 1: 内存级快照 (GPU -> CPU RAM, ~1秒)"]
     DumpMem --> ResumeTrain["立即恢复训练正反向计算，训练零气泡阻塞"]
@@ -86,7 +86,7 @@ flowchart LR
     "lesson04.qmd": {
         "title": "第 4 课：容器、驱动、Device Plugin 与升级兼容性",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph HostOS["宿主机环境 (Host OS)"]
         Kernel["Linux 内核"]
@@ -107,7 +107,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 4-1：NVIDIA 容器运行时生态与 K8s Device Plugin 分层交互拓扑</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Start["Device Plugin 启动"] --> Query["调用 NVML 查询节点可用物理 GPU 数量"]
     Query --> Report["通过 gRPC ListAndWatch 向 Kubelet 注册 gpu 资源池"]
@@ -121,7 +121,7 @@ flowchart LR
     "lesson05.qmd": {
         "title": "第 5 课：Gang Scheduling 与拓扑感知放置",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph NonGang["传统调度器 (可能引发死锁)"]
         JobA_Part["任务 A: 申请到 4 卡 (等待另外 4 卡)"]
@@ -140,7 +140,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 5-1：分布式训练 All-or-Nothing Gang 调度防死锁核心机制</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Job["新提交分布式作业 (请求 32 卡)"] --> CheckLevel1{"是否有单机柜满足全量卡数?"}
     CheckLevel1 -->|是| PlaceRack["机柜内放置: 极小化跨 ToR 核心交换机流量 (最优)"]
@@ -154,7 +154,7 @@ flowchart TD
     "lesson06.qmd": {
         "title": "第 6 课：容量、配额、公平与 Backfill",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph QuotaPool["集群总资源配额池 (1000 GPUs)"]
         TeamA["部门 A 保证配额 (Guaranteed: 400 GPUs)"]
@@ -169,7 +169,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 6-1：多租户配额保障、弹性突发超售与 DRF 资源公平模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     LargeJob["高优先级大作业等待 64 卡 (预计 30 分钟后到位)"] --> LockTime["调度器计算预留时间窗口 (Reservation Window)"]
     LockTime --> ScanSmall["扫描等待队列中的碎片小作业 (如 4 卡、运行 15 分钟)"]
@@ -183,7 +183,7 @@ flowchart LR
     "lesson07.qmd": {
         "title": "第 7 课：Metrics、Logs、Traces 与 SLO Burn Rate",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph Telemetry["集群可观测性三支柱"]
         M["Metrics (GPU 利用率, 温度, ECC, NCCL 吞吐)"]
@@ -195,7 +195,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 7-1：集群立体化监控度量与 SLO 错误预算 (Burn Rate) 监控模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     MetricStream["时序指标持续采集 (Prometheus + DCGM-Exporter)"] --> EvalWindow["多窗口联合评估: 1小时消耗率 > 14.4x 或 6小时 > 6x"]
     EvalWindow --> Spike{"是否发生急剧突发严重故障?"}
@@ -215,7 +215,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     NodeFault["某计算节点发生 Xid 崩溃或通信断联"] --> Heartbeat["控制面探测器毫秒级发现心跳丢失"]
     Heartbeat --> Cordon["自动隔离污染坏节点 (Cordon & Taint)"]

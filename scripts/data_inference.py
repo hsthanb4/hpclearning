@@ -10,7 +10,7 @@ INFERENCE_LESSONS = {
     "lesson01.qmd": {
         "title": "第 1 课：vLLM V1 源码地图：AsyncLLM、EngineCore 与 Worker",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Frontend["API Server / Frontend"]
         AsyncLLM["AsyncLLM 异步服务接口"]
@@ -30,7 +30,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 1-1：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Req["HTTP 请求到达"] --> Tokenize["分词器编码 Tokens"]
     Tokenize --> PutReq["压入 EngineCore 请求队列"]
@@ -50,7 +50,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     ScheduleStart["进入 step() 调度周期"] --> CheckWaiting["检查等待队列 (Waiting Queue)"]
     CheckWaiting --> MatchPrefix["查询 Prefix Cache 命中已有块"]
@@ -66,7 +66,7 @@ flowchart TD
     "lesson03.qmd": {
         "title": "第 3 课：SGLang SRT 源码地图：Scheduler、ScheduleBatch 与 ModelRunner",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph TokenizerLayer["TokenizerManager (多进程)"]
         Tok["并行 Tokenizer 编解码"]
@@ -84,7 +84,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 3-1：SGLang SRT 运行时分层交互与 ScheduleBatch 容器拓扑</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Req["接收批次请求"] --> RadixMatch["Radix Tree 快速最长前缀检索"]
     RadixMatch --> FormBatch["构造混合批次 (Prefill + Decode ScheduleBatch)"]
@@ -99,7 +99,7 @@ flowchart LR
     "lesson04.qmd": {
         "title": "第 4 课：SGLang RadixAttention、内存池与 Overlap Scheduling",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     Root["根节点: []"] --> S1["[Hello, World] (Len=2, Ref=3)"]
     S1 --> S2["[How are you?] (Len=4, Ref=1)"]
@@ -112,7 +112,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 4-1：SGLang RadixAttention 基数树与 LRU 引用淘汰拓扑机制</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph CPU["CPU 调度线程 (Thread 1)"]
         Prep["Batch N+1: Radix 匹配与显存块分配"] --> Prepare["准备输入张量与元数据"]
@@ -129,7 +129,7 @@ flowchart TD
     "lesson05.qmd": {
         "title": "第 5 课：稀疏推理：权重、MoE、Sparse Attention 与 HiSparse",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph SparsityTech["大模型推理稀疏化四维矩阵"]
         Weight["2:4 结构化稀疏 / 细粒度权重剪枝"]
@@ -141,7 +141,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 5-1：现代大模型端到端稀疏推理优化维度概念架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     TokenIn["Token 激活向量"] --> Router["门控路由网络 Top-K 评分"]
     Router --> Scatter["Token 重排与专家分组 (Permute/Scatter)"]
@@ -161,7 +161,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Act["输入激活 X (FP16/BF16)"] --> DynamicQuant["动态在线量化: X_quant = round(X / scale)"]
     Weight["低比特权重 W_quant (离线预量化)"] --> WeightLoad["从显存高效拉取压缩数据 (带宽翻倍)"]
@@ -181,7 +181,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Eval["比对第 i 个候选 Token"] --> ProbCheck{"生成随机数 u ~ U[0,1] < min(1, p_i / q_i) ?"}
     ProbCheck -->|接受| NextToken["接受候选 x_i，继续校验第 i+1 个 Token"]
@@ -194,7 +194,7 @@ flowchart LR
     "lesson08.qmd": {
         "title": "第 8 课：现代 Speculative Systems：EAGLE-3、MTP、DFlash 与 DSpark",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph EAGLE["EAGLE-3 隐层外推投机"]
         Hidden["前向隐层特征 (Feature Sequence)"] --> Head["自回归轻量预测头"]
@@ -208,7 +208,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 8-1：现代投机加速体系 (EAGLE 隐层特征 vs MTP 多头直出) 拓扑结构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     DraftTree["构建投机 Token 候选树 (Tree Mask)"] --> TargetForward["Target 模型执行一次 Tree Attention 并行验证"]
     TargetForward --> SelectPath["沿最佳拓扑路径选择最长接受前缀"]

@@ -10,7 +10,7 @@ CUDA_LESSONS = {
     "lesson01_vector_add.qmd": {
         "title": "第 1 课：线程映射与 Grid-Stride Loop",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     Grid["Grid 网格 (一维/多维)"] --> Block0["Block 0"]
     Grid --> Block1["Block 1"]
@@ -25,7 +25,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 1-1：GPU 线程层次（Grid/Block/Warp/Thread）与合并访存映射架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Start["线程启动: idx = blockIdx.x * blockDim.x + threadIdx.x"] --> Cond{"idx < N ?"}
     Cond -->|是| Calc["执行计算: c[idx] = a[idx] + b[idx]"]
@@ -45,7 +45,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant T as Block 内各 Warp 线程
@@ -66,7 +66,7 @@ sequenceDiagram
     "lesson03_gemv.qmd": {
         "title": "第 3 课：GEMV 与行级并行",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph Matrix["矩阵 A (M × K)"]
         Row0["Row 0 ➔ 分配给 Warp 0"]
@@ -88,7 +88,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 3-1：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Init["Warp 绑定矩阵第 row 行"] --> Loop["Warp 内各线程跨步读取 A[row, c] 并与 x[c] 做乘积累加"]
     Loop --> Reduce["Warp 内执行 Shuffle 求和归约"]
@@ -100,7 +100,7 @@ flowchart TD
     "lesson04_rmsnorm.qmd": {
         "title": "第 4 课：RMSNorm：统计量与两遍访问",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph RMSNormMath["RMSNorm 核心计算链路"]
         direction TB
@@ -112,7 +112,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 4-1：RMSNorm 均方根归一化与缩放系数计算图</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant T as 线程束 (Threads)
@@ -133,7 +133,7 @@ sequenceDiagram
     "lesson05_layernorm.qmd": {
         "title": "第 5 课：LayerNorm：均值、方差与数值稳定",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Welford["Welford 在线单遍递推算法"]
         Old["上一状态: (count, mean, M2)"] --> In["新样本 x"]
@@ -146,7 +146,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 5-1：Welford 在线数值稳定递推均值与方差架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Read["读入输入 x"] --> WelfordReduce["Warp & Block 级 Welford 结合律树状归约"]
     WelfordReduce --> Broadcast["广播均值 mu 与标准差 1/sqrt(var + eps)"]
@@ -158,7 +158,7 @@ flowchart LR
     "lesson06_softmax_naive.qmd": {
         "title": "第 6 课：稳定 Softmax 与朴素复杂度",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph StableSoftmax["安全防溢出 Softmax 技巧"]
         direction TB
@@ -171,7 +171,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 6-1：数值安全 Softmax 减最大值平移与归一化机制</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant T as 线程集合
@@ -190,7 +190,7 @@ sequenceDiagram
     "lesson07_online_softmax.qmd": {
         "title": "第 7 课：Online Softmax 与可结合状态",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     Input["输入分块 x_i"] --> Max["更新局部最大值: m_new = max(m_old, x_i)"]
     Max --> Scale["修正历史累加和: d_new = d_old * e^(m_old - m_new) + e^(x_i - m_new)"]
@@ -199,7 +199,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 7-1：Online Softmax 可结合状态增量递推配平机制</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Init["初始化状态: m = -INF, d = 0, O = 0"] --> Load["分块加载下一个 Tile 数据"]
     Load --> UpdateM["计算当前块的最大值并比较更新全局 m"]
@@ -215,7 +215,7 @@ flowchart TD
     "lesson08_transpose_naive.qmd": {
         "title": "第 8 课：朴素转置与合并访存",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph Contrast["转置访存冲突对比"]
         subgraph Read["读操作 (合并访存)"]
@@ -229,7 +229,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 8-1：二维矩阵转置合并读与跨步写访存模式冲突图</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Coalesced["输入内存读取: 合并访存利用率 100%"] --> DirectWrite["直接写入转置位置: 内存控制器被散落写入击穿"]
     DirectWrite --> Bottleneck["显存控制器总线效率严重低下 ➔ 必须引入共享内存缓冲"]
@@ -246,7 +246,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant GM_In as 全局内存输入 A
@@ -270,7 +270,7 @@ sequenceDiagram
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     LoadTile["从全局显存加载下一个 A/B 瓦片到 SMem"] --> Sync1["__syncthreads()"]
     Sync1 --> Compute["各线程从 SMem 读入寄存器，执行外积/乘加累加"]
@@ -285,7 +285,7 @@ flowchart LR
     "lesson11_silu.qmd": {
         "title": "第 11 课：SiLU 与算子融合",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph Separate["非融合算子: 3 次往返全局显存"]
         direction TB
@@ -300,7 +300,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 11-1：非融合往返显存带宽瓶颈 vs 融合算子寄存器直出对比</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     In["输入全局内存指针与尺寸 N"] --> Launch["单网格 launch 激活融合 Kernel"]
     Launch --> Reg["float4 向量化加载 4 个 float 进寄存器"]
@@ -313,7 +313,7 @@ flowchart TD
     "lesson12_argmax.qmd": {
         "title": "第 12 课：ArgMax 对归约与确定性",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph Pair["键值对元组结构"]
         Val["val: 浮点极值 (float)"]
@@ -325,7 +325,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 12-1：ArgMax 键值对元组结构与确定性仲裁规则</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 sequenceDiagram
     autonumber
     participant L as Warp 各线程 (Lane 0~31)

@@ -10,7 +10,7 @@ RL_LESSONS = {
     "lesson01_mdp_return.qmd": {
         "title": "第 1 课：MDP、回报与 Bellman 递推",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph MDP["马尔可夫决策过程 (MDP) 状态转移与回报"]
         S["当前状态 s"] -->|执行动作 a ~ π| A["动作 a"]
@@ -22,7 +22,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 1-1：MDP 状态转移五元组与 Bellman 期望方程分解拓扑</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     T["终止时刻 T: G_T = 0"] --> T1["倒数第一步: G_{T-1} = R_{T-1} + γ G_T"]
     T1 --> T2["倒数第二步: G_{T-2} = R_{T-2} + γ G_{T-1}"]
@@ -34,7 +34,7 @@ flowchart LR
     "lesson02_mc_td.qmd": {
         "title": "第 2 课：Monte Carlo、TD 与偏差—方差",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph MC["蒙特卡洛 (MC) 备份"]
         S_mc["状态 S_t"] --> A_mc["完整轨迹采样"] --> End_mc["终止状态 S_T (真实累计 G_t)"]
@@ -46,7 +46,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 2-1：蒙特卡洛全轨迹采样与时间差分单步自举机制对比</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     State["输入当前状态 S_t"] --> Pred["价值网络预测 V(S_t)"]
     State --> EnvStep["环境单步交互得到 R_{t+1}, S_{t+1}"]
@@ -60,7 +60,7 @@ flowchart LR
     "lesson03_policy_gradient.qmd": {
         "title": "第 3 课：策略梯度与基线",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     State["输入观测 s"] --> PolicyNet["策略网络 π_θ(a|s)"]
     PolicyNet --> Sample["采样动作 a ~ π_θ"]
@@ -72,7 +72,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 3-1：策略梯度定理与状态基线 (Baseline) 减方差数据流</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     Init["初始化策略网络 π_θ 与价值基线 V_ϕ"] --> Rollout["收集多条交互轨迹 Episode 集合"]
     Rollout --> ComputeReturn["逆序计算各步累积回报 G_t"]
@@ -92,7 +92,7 @@ flowchart TD
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Last["最后一步: A_T^{GAE} = δ_T"] --> Step["递归计算: A_t = δ_t + γ λ (1 - done_t) A_{t+1}"]
     Step --> Norm["全批次标准化: A_t = (A_t - mean) / (std + 1e-8)"]
@@ -110,7 +110,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     ActorRollout["旧策略 π_old 采样收集轨迹缓冲 (Buffer)"] --> EvalGAE["计算价值标靶与 GAE 标准化优势"]
     EvalGAE --> EpochLoop["多轮 Epoch 小批次 Mini-batch 迭代"]
@@ -126,7 +126,7 @@ flowchart TD
     "lesson06_value_entropy.qmd": {
         "title": "第 6 课：价值损失、熵与多目标优化",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph MultiObjective["Actor-Critic 联合优化损失函数"]
         L_clip["策略损失: L_CLIP(θ) [最大化期望回报]"]
@@ -140,7 +140,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 6-1：策略、价值与信息熵三合一多任务优化空间</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Early["训练前期: 熵权重大 ➔ 探索未知状态空间"] --> Middle["训练中期: 策略趋于稳定 ➔ 熵系数线性衰减"]
     Middle --> Late["训练后期: 价值误差逼近极小 ➔ 确定性微调策略收敛"]
@@ -151,7 +151,7 @@ flowchart LR
     "lesson07_dqn.qmd": {
         "title": "第 7 课：DQN：回放、目标网络与过估计",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph EnvInteraction["环境采样流"]
         Step["(s, a, r, s', done)"] --> Buffer["经验回放缓冲区 (Replay Buffer)"]
@@ -167,7 +167,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 7-1：DQN 经验回放缓冲与目标网络时间解耦架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Sample["从 Replay Buffer 采样 (s, a, r, s', d)"] --> DoubleDQN{"是否使用 Double DQN?"}
     DoubleDQN -->|是| Decouple["在线网络选动作 a* = argmax Q(s', .; θ) ➔ 目标网络算价值 Q(s', a*; θ^-)"]
@@ -182,7 +182,7 @@ flowchart LR
     "lesson08_sac.qmd": {
         "title": "第 8 课：SAC：最大熵与温度",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph MaxEntropy["最大熵目标"]
         J["目标: E[∑ r(s,a) + α H(π(·|s))]"]
@@ -198,7 +198,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 8-1：Soft Actor-Critic (SAC) 最大熵与双 Q 网络架构模型</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     State["状态输入 s"] --> Policy["重参数化采样: a = tanh(μ + σ ⊙ ε)"]
     Policy --> MinQ["双 Q 网络评估当前动作价值"]
@@ -212,7 +212,7 @@ flowchart LR
     "lesson09_offline_rl.qmd": {
         "title": "第 9 课：离线 RL 与分布外动作",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart LR
     subgraph DataDist["行为策略数据集 D (in-distribution)"]
         D_Points["高频覆盖状态与动作流"]
@@ -228,7 +228,7 @@ flowchart LR
 <p class="caption" align="center"><em>图 9-1：离线强化学习分布漂移 (Distribution Shift) 与保守 Q 约束原理</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart TD
     LoadData["静态数据集加载 (s, a, r, s') 无在线探索"] --> EstimateQ["Q 网络评估数据集动作价值"]
     EstimateQ --> SampleOOD["在当前状态采样未知潜在动作 (OOD Actions)"]
@@ -242,7 +242,7 @@ flowchart TD
     "lesson10_rlhf.qmd": {
         "title": "第 10 课：RLHF/RLVR：奖励来源、KL 与 token 对齐",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     Prompt["输入 Prompt x"] --> Actor["生成策略模型 π_θ (Active)"]
     Prompt --> Ref["参考基础模型 π_ref (Frozen)"]
@@ -254,7 +254,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 10-1：大模型对齐 RLHF 四模型拓扑与 Token 级 KL 惩罚锚定</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     PromptBatch["采样 Prompt 批次"] --> VLLM["高性能推理引擎生成候选文本"]
     VLLM --> RMScore["奖励模型打分 / 编译器验证 (RLVR)"]
@@ -274,7 +274,7 @@ flowchart LR
 :::
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     BatchQ["获取一批查询 Questions"] --> Rollout["每个 Query 采样 G 份完整回答"]
     Rollout --> Eval["答案规则匹配 / 单元测试打分 (0/1 或浮点)"]
@@ -288,7 +288,7 @@ flowchart LR
     "lesson12_rl_system.qmd": {
         "title": "第 12 课：大规模 RL 系统：rollout、训练与评测",
         "fig1": """
-```mermaid
+```{mermaid}
 flowchart TD
     subgraph InferenceCluster["Rollout 生成集群 (vLLM / SGLang)"]
         W1["Worker 1 (Prompt 吞吐)"]
@@ -308,7 +308,7 @@ flowchart TD
 <p class="caption" align="center"><em>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构</em></p>
 """,
         "fig2": """
-```mermaid
+```{mermaid}
 flowchart LR
     Gen["Rollout 引擎并发生成轨迹"] --> Put["压入异步 FIFO 轨迹队列"]
     Put --> CheckStaleness{"轨迹延迟 Staleness ≤ 阈值?"}
