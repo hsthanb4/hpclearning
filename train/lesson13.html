@@ -1,0 +1,1658 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.10.18">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>训练系统 · 第 13/14 课：GPU 内核与 FlashAttention – HPC / AI Infra 面试课程</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-5a1953863e1f72ef3b996ef827f01ca7.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+
+
+</head>
+
+<body class="nav-sidebar docked nav-fixed quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="../index.html">
+    <span class="navbar-title">HPC &amp; AI Infra</span>
+    </a>
+  </div>
+            <div id="quarto-search" class="" title="Search"></div>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarCollapse" aria-controls="navbarCollapse" role="menu" aria-expanded="false" aria-label="Toggle navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+  <span class="navbar-toggler-icon"></span>
+</button>
+          <div class="collapse navbar-collapse" id="navbarCollapse">
+            <ul class="navbar-nav navbar-nav-scroll me-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="../index.html"> 
+<span class="menu-text">首页</span></a>
+  </li>  
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu-" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">核心主线</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu-">    
+        <li>
+    <a class="dropdown-item" href="../train/index.html">
+ <span class="dropdown-text">训练系统 (14课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cuda/index.html">
+ <span class="dropdown-text">CUDA Kernel (12课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cutlass/index.html">
+ <span class="dropdown-text">CUTLASS / CuTe (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../triton/index.html">
+ <span class="dropdown-text">Triton Kernel (10课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../mlir/index.html">
+ <span class="dropdown-text">MLIR 编译器 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../rl/index.html">
+ <span class="dropdown-text">强化学习 (12课)</span></a>
+  </li>  
+    </ul>
+  </li>
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu--1" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">补充线</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu--1">    
+        <li>
+    <a class="dropdown-item" href="../inference/index.html">
+ <span class="dropdown-text">推理引擎 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../runtime/index.html">
+ <span class="dropdown-text">框架运行时 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../platform/index.html">
+ <span class="dropdown-text">集群平台 (8课)</span></a>
+  </li>  
+    </ul>
+  </li>
+</ul>
+            <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/hsthanb4/hpclearning"> <i class="bi bi-github" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+</ul>
+          </div> <!-- /navcollapse -->
+            <div class="quarto-navbar-tools">
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+</div>
+      </div> <!-- /container-fluid -->
+    </nav>
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../train/lesson13.html">训练系统 · 第 13/14 课：GPU 内核与 FlashAttention</a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 / Ultra-Scale Playbook</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson01.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 1/14 课：训练流程与显存账本</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson02.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 2/14 课：激活、重计算与梯度累积</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson03.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 3/14 课：分布式通信原语</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson04.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 4/14 课：数据并行 DP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson05.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 5/14 课：ZeRO 与 FSDP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson06.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 6/14 课：张量并行 TP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson07.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 7/14 课：序列并行 SP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson08.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 8/14 课：上下文并行 CP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson09.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 9/14 课：流水线并行 PP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson10.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 10/14 课：专家并行 EP</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson11.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 11/14 课：5D 并行</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson12.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 12/14 课：配置搜索与性能诊断</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson13.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text">训练系统 · 第 13/14 课：GPU 内核与 FlashAttention</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../train/lesson14.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">训练系统 · 第 14/14 课：混合精度与综合面试</span></a>
+  </div>
+</li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">本页目录</h2>
+   
+  <ul>
+  <li><a href="#统一完成标准" id="toc-统一完成标准" class="nav-link active" data-scroll-target="#统一完成标准">统一完成标准</a></li>
+  <li><a href="#第-13-课gpu-内核与-flashattention" id="toc-第-13-课gpu-内核与-flashattention" class="nav-link" data-scroll-target="#第-13-课gpu-内核与-flashattention">第 13 课：GPU 内核与 FlashAttention</a>
+  <ul class="collapse">
+  <li><a href="#本课目标" id="toc-本课目标" class="nav-link" data-scroll-target="#本课目标">本课目标</a></li>
+  <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
+  <ul class="collapse">
+  <li><a href="#gpu-组织教材-primer" id="toc-gpu-组织教材-primer" class="nav-link" data-scroll-target="#gpu-组织教材-primer">1. GPU 组织（教材 primer）</a></li>
+  <li><a href="#三个经典优化" id="toc-三个经典优化" class="nav-link" data-scroll-target="#三个经典优化">2. 三个经典优化</a></li>
+  <li><a href="#工具谱系" id="toc-工具谱系" class="nav-link" data-scroll-target="#工具谱系">3. 工具谱系</a></li>
+  <li><a href="#fused-kernel" id="toc-fused-kernel" class="nav-link" data-scroll-target="#fused-kernel">4. Fused kernel</a></li>
+  <li><a href="#flashattention" id="toc-flashattention" class="nav-link" data-scroll-target="#flashattention">5. FlashAttention</a></li>
+  </ul></li>
+  <li><a href="#具体演示" id="toc-具体演示" class="nav-link" data-scroll-target="#具体演示">具体演示</a></li>
+  <li><a href="#代码填空题" id="toc-代码填空题" class="nav-link" data-scroll-target="#代码填空题">代码填空题</a></li>
+  <li><a href="#三个问答题" id="toc-三个问答题" class="nav-link" data-scroll-target="#三个问答题">三个问答题</a>
+  <ul class="collapse">
+  <li><a href="#q1" id="toc-q1" class="nav-link" data-scroll-target="#q1">Q1</a></li>
+  <li><a href="#q2" id="toc-q2" class="nav-link" data-scroll-target="#q2">Q2</a></li>
+  <li><a href="#q3" id="toc-q3" class="nav-link" data-scroll-target="#q3">Q3</a></li>
+  </ul></li>
+  <li><a href="#检查与通过标准" id="toc-检查与通过标准" class="nav-link" data-scroll-target="#检查与通过标准">检查与通过标准</a></li>
+  <li><a href="#参考答案仅-answer-分支" id="toc-参考答案仅-answer-分支" class="nav-link" data-scroll-target="#参考答案仅-answer-分支">参考答案（仅 answer 分支）</a></li>
+  </ul></li>
+  <li><a href="#第-13-课参考答案复盘用先提交再打开" id="toc-第-13-课参考答案复盘用先提交再打开" class="nav-link" data-scroll-target="#第-13-课参考答案复盘用先提交再打开">第 13 课参考答案（复盘用，先提交再打开）</a>
+  <ul class="collapse">
+  <li><a href="#补全后的代码关键填空处" id="toc-补全后的代码关键填空处" class="nav-link" data-scroll-target="#补全后的代码关键填空处">补全后的代码（关键填空处）</a></li>
+  <li><a href="#三个问答题要点" id="toc-三个问答题要点" class="nav-link" data-scroll-target="#三个问答题要点">三个问答题要点</a>
+  <ul class="collapse">
+  <li><a href="#q1-1" id="toc-q1-1" class="nav-link" data-scroll-target="#q1-1">Q1</a></li>
+  <li><a href="#q2-1" id="toc-q2-1" class="nav-link" data-scroll-target="#q2-1">Q2</a></li>
+  <li><a href="#q3-1" id="toc-q3-1" class="nav-link" data-scroll-target="#q3-1">Q3</a></li>
+  </ul></li>
+  <li><a href="#通过要点" id="toc-通过要点" class="nav-link" data-scroll-target="#通过要点">通过要点</a></li>
+  <li><a href="#官方主参考" id="toc-官方主参考" class="nav-link" data-scroll-target="#官方主参考">官方主参考</a></li>
+  </ul></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<div class="quarto-title-block"><div><h1 class="title">训练系统 · 第 13/14 课：GPU 内核与 FlashAttention</h1><button type="button" class="btn code-tools-button dropdown-toggle" id="quarto-code-tools-menu" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi"></i> Code</button><ul class="dropdown-menu dropdown-menu-end" aria-labelelledby="quarto-code-tools-menu"><li><a id="quarto-show-all-code" class="dropdown-item" href="javascript:void(0)" role="button">Show All Code</a></li><li><a id="quarto-hide-all-code" class="dropdown-item" href="javascript:void(0)" role="button">Hide All Code</a></li><li><hr class="dropdown-divider"></li><li><a id="quarto-view-source" class="dropdown-item" href="javascript:void(0)" role="button">View Source</a></li></ul></div></div>
+<p class="subtitle lead">Ultra-Scale Playbook 训练系统</p>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<blockquote class="blockquote">
+<p>状态：<strong>参考答案版</strong><br>
+一次只完成一课；未通过前不要打开下一课答案。</p>
+</blockquote>
+<section id="统一完成标准" class="level2">
+<h2 class="anchored" data-anchor-id="统一完成标准">统一完成标准</h2>
+<p>代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。</p>
+</section>
+<section id="第-13-课gpu-内核与-flashattention" class="level1">
+<h1>第 13 课：GPU 内核与 FlashAttention</h1>
+<ul>
+<li>对应官方章节：Diving into the GPUs（A primer on GPUs / Improving performance with kernels / Fused kernels / FlashAttention）+ 附录 A1（kernel 剖析）</li>
+<li>前置：第 2 课（激活、softmax 的注意力）、第 8 课（online softmax 概念）</li>
+<li>状态：未开始</li>
+</ul>
+<section id="本课目标" class="level2">
+<h2 class="anchored" data-anchor-id="本课目标">本课目标</h2>
+<p>完成后你需要能够：</p>
+<ul>
+<li>画出 GPU 的层次结构（SM/warp/block、寄存器/共享内存/L1/L2/HBM）并说明带宽差异。</li>
+<li>解释 memory coalescing、tiling、thread coarsening、控制分歧各自解决的问题。</li>
+<li>说明 torch.compile → Triton → CUDA 的工具谱系与取舍。</li>
+<li>用代码实现 FlashAttention 的 online softmax 分块算法并验证与标准实现一致。</li>
+</ul>
+</section>
+<section id="核心概念" class="level2">
+<h2 class="anchored" data-anchor-id="核心概念">核心概念</h2>
+<section id="gpu-组织教材-primer" class="level3">
+<h3 class="anchored" data-anchor-id="gpu-组织教材-primer">1. GPU 组织（教材 primer）</h3>
+<ul>
+<li>计算：GPU = 若干 SM（H100：132 个），每个 SM 有 128 个 core。线程以 <strong>warp（32 线程）</strong> 为单位锁步执行；warp 组成 block（如 512/1024 线程）分配给 SM。</li>
+<li>内存层级：寄存器（线程私有）→ 共享内存 + L1（SM 内共享）→ L2（全芯片共享）→ 全局内存 HBM（最大但最慢）。</li>
+<li>关键事实：HBM 带宽远低于 SRAM 级别的共享内存/寄存器。<strong>很多 kernel 是 memory-bound 而非 compute-bound</strong>。</li>
+</ul>
+</section>
+<section id="三个经典优化" class="level3">
+<h3 class="anchored" data-anchor-id="三个经典优化">2. 三个经典优化</h3>
+<ul>
+<li><strong>Memory coalescing（访存合并）</strong>：DRAM 按突发（burst）返回连续地址。若 warp 内 32 个线程访问连续地址，硬件合并成一次大请求。教材的 naive matmul 例子：线程 (x,y) 映射错位导致 A 的访存不连续，吞吐差 ~10 倍；改 1D block 映射（threadIdx 相邻 → y 相邻）后恢复连续访问。</li>
+<li><strong>Tiling（分块）</strong>：把 A、B 的 tile 先搬进共享内存，块内线程复用，减少对 HBM 的重复访问。教材例子：吞吐 410 GB/s、时间 -43%、~6.6 TFLOPS。</li>
+<li><strong>Thread coarsening（线程粗化）</strong>：每个线程算多个输出元素，减少共享内存指令压力（ncu 里表现为 MIO throttle 停顿）。</li>
+<li><strong>控制分歧</strong>：warp 内 if 分支导致串行化；用 predication 或重排数据避免。</li>
+</ul>
+</section>
+<section id="工具谱系" class="level3">
+<h3 class="anchored" data-anchor-id="工具谱系">3. 工具谱系</h3>
+<ul>
+<li><strong>PyTorch</strong>：易用、慢。</li>
+<li><strong><span class="citation" data-cites="torch.compile">@torch.compile</span></strong>：易用、快、不灵活；<code>TORCH_LOGS=output_code</code> 可以导出生成的 Triton kernel 作为起点。</li>
+<li><strong>Triton</strong>：较快、更灵活（block 级编程，<code>tl.program_id</code>、<code>tl.arange</code>、mask 处理）。</li>
+<li><strong>CUDA</strong>：最快最灵活（共享内存、SM 内调度全部可控），但开发成本最高。</li>
+</ul>
+</section>
+<section id="fused-kernel" class="level3">
+<h3 class="anchored" data-anchor-id="fused-kernel">4. Fused kernel</h3>
+<p>相邻的逐点运算（如 LayerNorm 的多个步骤）若分多个 kernel，中间结果要写回 HBM 再读回。融合成一个 kernel，数据留在 SM 内 → 大幅减少 HBM 往返。FlashAttention 是”融合 + 分块 + online softmax”的集大成者。</p>
+</section>
+<section id="flashattention" class="level3">
+<h3 class="anchored" data-anchor-id="flashattention">5. FlashAttention</h3>
+<p>朴素注意力的问题：物化 S = QKᵀ（n×n）和 P = softmax(S) 到 HBM，长序列时是最大的激活之一（呼应第 2 课公式中的二次项），且 HBM 带宽成为瓶颈。</p>
+<p>FlashAttention 的做法：</p>
+<ul>
+<li>把 Q、K、V 分块，每次只算一块 S_ij（SRAM 内）；</li>
+<li>用 <strong>online softmax</strong>：维护 running max m 与 running sum l，每块到来时重新归一化已算的输出 O；</li>
+<li>不物化 S、P；显存从 O(n²) 降到 O(n)；计算量不变但访存量大幅下降。</li>
+</ul>
+<p>FA-2：减少非 matmul 操作数、按 warp 精细划分工作量；FA-3：面向 Hopper 的 FP8/Tensor Core 优化。限制：只支持特定注意力模式 → FlexAttention。</p>
+</section>
+</section>
+<section id="具体演示" class="level2">
+<h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
+<p>n=4096 的注意力：S 矩阵 4096×4096×2B ≈ 32 MB/层/头——逐层累积后是激活的最大贡献者。FlashAttention 把这块内存需求变成 O(n)，且因为少访存，实际更快。第 8 课的 Ring Attention 用同一套 online softmax 统计量做跨卡分块。</p>
+</section>
+<section id="代码填空题" class="level2">
+<h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
+<p>用 numpy 实现分块 online softmax 注意力，验证与标准实现数值一致。</p>
+<div id="4483d736" class="cell" data-course_role="exercise" data-execution_count="1">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""参照实现：物化 S 和 P。Q,K,V: (n, d)。"""</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> Q.shape[<span class="dv">0</span>]</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> Q <span class="op">@</span> K.T                    <span class="co"># (n, n) —— 长序列下这是内存炸弹</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> S <span class="op">-</span> S.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    P <span class="op">=</span> np.exp(S)</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    P <span class="op">/=</span> P.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> P <span class="op">@</span> V, S</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>                    block_size: <span class="bu">int</span> <span class="op">=</span> <span class="dv">64</span>) <span class="op">-&gt;</span> np.ndarray:</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a><span class="co">    分块实现：不物化完整 S。</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a><span class="co">    对每个 query 块，逐步处理 kv 块，维护每个 query 行的：</span></span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a><span class="co">      m: 见过的分数的 running max</span></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a><span class="co">      l: 见过的 exp(score - m) 之和（softmax 分母）</span></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a><span class="co">      O: 已累加的加权输出</span></span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> Q.shape</span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>    O <span class="op">=</span> np.zeros((n, d))</span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>    l <span class="op">=</span> np.zeros(n)                       <span class="co"># 分母（running sum）</span></span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>    m <span class="op">=</span> np.full(n, <span class="op">-</span>np.inf)               <span class="co"># running max</span></span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>        Qi <span class="op">=</span> Q[i:i <span class="op">+</span> block_size]</span>
+<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>        Oi <span class="op">=</span> O[i:i <span class="op">+</span> block_size]</span>
+<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a>        li <span class="op">=</span> l[i:i <span class="op">+</span> block_size]</span>
+<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>        mi <span class="op">=</span> m[i:i <span class="op">+</span> block_size]</span>
+<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb1-35"><a href="#cb1-35" aria-hidden="true" tabindex="-1"></a>            Kj <span class="op">=</span> K[j:j <span class="op">+</span> block_size]</span>
+<span id="cb1-36"><a href="#cb1-36" aria-hidden="true" tabindex="-1"></a>            Vj <span class="op">=</span> V[j:j <span class="op">+</span> block_size]</span>
+<span id="cb1-37"><a href="#cb1-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-38"><a href="#cb1-38" aria-hidden="true" tabindex="-1"></a>            S_ij <span class="op">=</span> Qi <span class="op">@</span> Kj.T              <span class="co"># 当前块分数 (bs, bs)</span></span>
+<span id="cb1-39"><a href="#cb1-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-40"><a href="#cb1-40" aria-hidden="true" tabindex="-1"></a>            <span class="co"># online softmax 更新：</span></span>
+<span id="cb1-41"><a href="#cb1-41" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 1) 新 running max（把当前块的最大分数并进来）</span></span>
+<span id="cb1-42"><a href="#cb1-42" aria-hidden="true" tabindex="-1"></a>            m_new <span class="op">=</span> ______</span>
+<span id="cb1-43"><a href="#cb1-43" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 2) 旧分母/旧输出都要按 exp(mi - m_new) 缩放，新块贡献 p_ij</span></span>
+<span id="cb1-44"><a href="#cb1-44" aria-hidden="true" tabindex="-1"></a>            scale <span class="op">=</span> ______</span>
+<span id="cb1-45"><a href="#cb1-45" aria-hidden="true" tabindex="-1"></a>            p_ij <span class="op">=</span> np.exp(S_ij <span class="op">-</span> m_new[:, <span class="va">None</span>])   <span class="co"># 新块的"原始"权重</span></span>
+<span id="cb1-46"><a href="#cb1-46" aria-hidden="true" tabindex="-1"></a>            l_new <span class="op">=</span> ______                         <span class="co"># 分母更新：旧项缩放 + 新块和</span></span>
+<span id="cb1-47"><a href="#cb1-47" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 3) 输出更新：旧输出按比例缩放，加上新块贡献</span></span>
+<span id="cb1-48"><a href="#cb1-48" aria-hidden="true" tabindex="-1"></a>            Oi <span class="op">=</span> ______</span>
+<span id="cb1-49"><a href="#cb1-49" aria-hidden="true" tabindex="-1"></a>            mi, li <span class="op">=</span> m_new, l_new</span>
+<span id="cb1-50"><a href="#cb1-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-51"><a href="#cb1-51" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 把块的统计量写回全局数组</span></span>
+<span id="cb1-52"><a href="#cb1-52" aria-hidden="true" tabindex="-1"></a>        O[i:i <span class="op">+</span> block_size] <span class="op">=</span> Oi</span>
+<span id="cb1-53"><a href="#cb1-53" aria-hidden="true" tabindex="-1"></a>        l[i:i <span class="op">+</span> block_size] <span class="op">=</span> li</span>
+<span id="cb1-54"><a href="#cb1-54" aria-hidden="true" tabindex="-1"></a>        m[i:i <span class="op">+</span> block_size] <span class="op">=</span> mi</span>
+<span id="cb1-55"><a href="#cb1-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-56"><a href="#cb1-56" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 最终归一化：O / l（把 running max 移回）</span></span>
+<span id="cb1-57"><a href="#cb1-57" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> O <span class="op">/</span> l[:, <span class="va">None</span>]</span>
+<span id="cb1-58"><a href="#cb1-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-59"><a href="#cb1-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-60"><a href="#cb1-60" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">"__main__"</span>:</span>
+<span id="cb1-61"><a href="#cb1-61" aria-hidden="true" tabindex="-1"></a>    rng <span class="op">=</span> np.random.default_rng(<span class="dv">0</span>)</span>
+<span id="cb1-62"><a href="#cb1-62" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> <span class="dv">256</span>, <span class="dv">32</span></span>
+<span id="cb1-63"><a href="#cb1-63" aria-hidden="true" tabindex="-1"></a>    Q <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb1-64"><a href="#cb1-64" aria-hidden="true" tabindex="-1"></a>    K <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb1-65"><a href="#cb1-65" aria-hidden="true" tabindex="-1"></a>    V <span class="op">=</span> rng.standard_normal((n, d))</span>
+<span id="cb1-66"><a href="#cb1-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-67"><a href="#cb1-67" aria-hidden="true" tabindex="-1"></a>    O_ref, S_ref <span class="op">=</span> standard_attention(Q, K, V)</span>
+<span id="cb1-68"><a href="#cb1-68" aria-hidden="true" tabindex="-1"></a>    O_flash <span class="op">=</span> flash_attention(Q, K, V, block_size<span class="op">=</span><span class="dv">32</span>)</span>
+<span id="cb1-69"><a href="#cb1-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-70"><a href="#cb1-70" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"最大绝对误差:"</span>, np.<span class="bu">abs</span>(O_ref <span class="op">-</span> O_flash).<span class="bu">max</span>())</span>
+<span id="cb1-71"><a href="#cb1-71" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"S 矩阵元素数:"</span>, S_ref.size, <span class="st">"（FlashAttention 不物化它）"</span>)</span>
+<span id="cb1-72"><a href="#cb1-72" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> np.allclose(O_ref, O_flash, atol<span class="op">=</span><span class="fl">1e-6</span>)</span>
+<span id="cb1-73"><a href="#cb1-73" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+</section>
+<section id="三个问答题" class="level2">
+<h2 class="anchored" data-anchor-id="三个问答题">三个问答题</h2>
+<section id="q1" class="level3">
+<h3 class="anchored" data-anchor-id="q1">Q1</h3>
+<p>为什么”先算完整 S = QKᵀ 再 softmax”在长序列下既慢又占内存？请从 HBM 带宽与显存两个角度回答，并把它与第 2 课激活公式中的二次项联系起来。FlashAttention 最终在内存与访存上各省掉了什么？</p>
+</section>
+<section id="q2" class="level3">
+<h3 class="anchored" data-anchor-id="q2">Q2</h3>
+<p>教材的 naive matmul 中，为什么”每个线程算一个输出元素”会导致访存不合并？改成一维 block 映射后为什么吞吐提升约 10 倍？Tiling 为什么能进一步减少 HBM 访问？Thread coarsening 解决的是哪一类停顿（提示：MIO throttle）？</p>
+</section>
+<section id="q3" class="level3">
+<h3 class="anchored" data-anchor-id="q3">Q3</h3>
+<p>请对比 torch.compile、Triton、CUDA 三条写 kernel 的路径（难度/性能/灵活性），并说明什么时候必须离开 Triton 写 CUDA。FA-1 → FA-2 → FA-3 各自改进的重点是什么（各一句话）？</p>
+</section>
+</section>
+<section id="检查与通过标准" class="level2">
+<h2 class="anchored" data-anchor-id="检查与通过标准">检查与通过标准</h2>
+<p>总分 10 分：代码正确 4 分（m_new/l_new/O 更新、归一化、与标准实现一致）、三题各 2 分、通过线 8 分。</p>
+<p>一票否决项：</p>
+<ul>
+<li>认为 FlashAttention 降低了计算量（它降低的是访存与显存）。</li>
+<li>说不出 online softmax 为什么必须维护 running max（数值稳定性）。</li>
+<li>认为”分别 softmax 再拼接”正确。</li>
+<li>分不清 HBM 与共享内存在带宽上的量级差异。</li>
+</ul>
+</section>
+<section id="参考答案仅-answer-分支" class="level2">
+<h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
+<p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
+<div id="485afd5e" class="cell" data-course_role="solution" data-execution_count="2">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""参照实现：物化 S 和 P。Q,K,V: (n, d)。"""</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> Q.shape[<span class="dv">0</span>]</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> Q <span class="op">@</span> K.T                    <span class="co"># (n, n) —— 长序列下这是内存炸弹</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> S <span class="op">-</span> S.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    P <span class="op">=</span> np.exp(S)</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>    P <span class="op">/=</span> P.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> P <span class="op">@</span> V, S</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,</span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>                    block_size: <span class="bu">int</span> <span class="op">=</span> <span class="dv">64</span>) <span class="op">-&gt;</span> np.ndarray:</span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a><span class="co">    分块实现：不物化完整 S。</span></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a><span class="co">    对每个 query 块，逐步处理 kv 块，维护每个 query 行的：</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a><span class="co">      m: 见过的分数的 running max</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a><span class="co">      l: 见过的 exp(score - m) 之和（softmax 分母）</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a><span class="co">      O: 已累加的加权输出</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> Q.shape</span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>    O <span class="op">=</span> np.zeros((n, d))</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>    l <span class="op">=</span> np.zeros(n)                       <span class="co"># 分母（running sum）</span></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>    m <span class="op">=</span> np.full(n, <span class="op">-</span>np.inf)               <span class="co"># running max</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>        Qi <span class="op">=</span> Q[i:i <span class="op">+</span> block_size]</span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        Oi <span class="op">=</span> O[i:i <span class="op">+</span> block_size]</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>        li <span class="op">=</span> l[i:i <span class="op">+</span> block_size]</span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>        mi <span class="op">=</span> m[i:i <span class="op">+</span> block_size]</span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>            Kj <span class="op">=</span> K[j:j <span class="op">+</span> block_size]</span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>            Vj <span class="op">=</span> V[j:j <span class="op">+</span> block_size]</span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>            S_ij <span class="op">=</span> Qi <span class="op">@</span> Kj.T              <span class="co"># 当前块分数 (bs, bs)</span></span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>            <span class="co"># online softmax 更新：</span></span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 1) 新 running max（把当前块的最大分数并进来）</span></span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>            m_new <span class="op">=</span> np.maximum(mi, S_ij.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>))</span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 2) 旧分母/旧输出都要按 exp(mi - m_new) 缩放，新块贡献 p_ij</span></span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>            scale <span class="op">=</span> np.exp(mi <span class="op">-</span> m_new)</span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>            p_ij <span class="op">=</span> np.exp(S_ij <span class="op">-</span> m_new[:, <span class="va">None</span>])   <span class="co"># 新块的"原始"权重</span></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>            l_new <span class="op">=</span> li <span class="op">*</span> scale <span class="op">+</span> p_ij.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>)                         <span class="co"># 分母更新：旧项缩放 + 新块和</span></span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 3) 输出更新：旧输出按比例缩放，加上新块贡献</span></span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>            Oi <span class="op">=</span> Oi <span class="op">*</span> scale[:, <span class="va">None</span>] <span class="op">+</span> p_ij <span class="op">@</span> Vj</span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>            mi, li <span class="op">=</span> m_new, l_new</span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 把块的统计量写回全局数组</span></span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>        O[i:i <span class="op">+</span> block_size] <span class="op">=</span> Oi</span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a>        l[i:i <span class="op">+</span> block_size] <span class="op">=</span> li</span>
+<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>        m[i:i <span class="op">+</span> block_size] <span class="op">=</span> mi</span>
+<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 最终归一化：O / l（把 running max 移回）</span></span>
+<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> O <span class="op">/</span> l[:, <span class="va">None</span>]</span>
+<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">"__main__"</span>:</span>
+<span id="cb2-61"><a href="#cb2-61" aria-hidden="true" tabindex="-1"></a>    rng <span class="op">=</span> np.random.default_rng(<span class="dv">0</span>)</span>
+<span id="cb2-62"><a href="#cb2-62" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> <span class="dv">256</span>, <span class="dv">32</span></span>
+<span id="cb2-63"><a href="#cb2-63" aria-hidden="true" tabindex="-1"></a>    Q <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb2-64"><a href="#cb2-64" aria-hidden="true" tabindex="-1"></a>    K <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb2-65"><a href="#cb2-65" aria-hidden="true" tabindex="-1"></a>    V <span class="op">=</span> rng.standard_normal((n, d))</span>
+<span id="cb2-66"><a href="#cb2-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-67"><a href="#cb2-67" aria-hidden="true" tabindex="-1"></a>    O_ref, S_ref <span class="op">=</span> standard_attention(Q, K, V)</span>
+<span id="cb2-68"><a href="#cb2-68" aria-hidden="true" tabindex="-1"></a>    O_flash <span class="op">=</span> flash_attention(Q, K, V, block_size<span class="op">=</span><span class="dv">32</span>)</span>
+<span id="cb2-69"><a href="#cb2-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-70"><a href="#cb2-70" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"最大绝对误差:"</span>, np.<span class="bu">abs</span>(O_ref <span class="op">-</span> O_flash).<span class="bu">max</span>())</span>
+<span id="cb2-71"><a href="#cb2-71" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"S 矩阵元素数:"</span>, S_ref.size, <span class="st">"（FlashAttention 不物化它）"</span>)</span>
+<span id="cb2-72"><a href="#cb2-72" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> np.allclose(O_ref, O_flash, atol<span class="op">=</span><span class="fl">1e-6</span>)</span>
+<span id="cb2-73"><a href="#cb2-73" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+</section>
+</section>
+<section id="第-13-课参考答案复盘用先提交再打开" class="level1">
+<h1>第 13 课参考答案（复盘用，先提交再打开）</h1>
+<section id="补全后的代码关键填空处" class="level2">
+<h2 class="anchored" data-anchor-id="补全后的代码关键填空处">补全后的代码（关键填空处）</h2>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co"># online softmax 更新</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>            m_new <span class="op">=</span> np.maximum(mi, S_ij.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>))        <span class="co"># 1) 新 running max</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>            scale <span class="op">=</span> np.exp(mi <span class="op">-</span> m_new)                       <span class="co"># 旧输出的缩放因子</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>            p_ij <span class="op">=</span> np.exp(S_ij <span class="op">-</span> m_new[:, <span class="va">None</span>])             <span class="co"># 新块的"原始"权重</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>            l_new <span class="op">=</span> li <span class="op">*</span> scale <span class="op">+</span> p_ij.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>)           <span class="co"># 2) 分母更新</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>            Oi <span class="op">=</span> Oi <span class="op">*</span> scale[:, <span class="va">None</span>] <span class="op">+</span> p_ij <span class="op">@</span> Vj             <span class="co"># 3) 输出更新</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>验证结果：</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>最大绝对误差: <span class="op">~</span><span class="fl">1e-15</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>S 矩阵元素数: <span class="dv">65536</span>（标准实现物化；FlashAttention 不物化）</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="三个问答题要点" class="level2">
+<h2 class="anchored" data-anchor-id="三个问答题要点">三个问答题要点</h2>
+<section id="q1-1" class="level3">
+<h3 class="anchored" data-anchor-id="q1-1">Q1</h3>
+<ul>
+<li>慢：S 与 P 都是 n×n，计算它们要写回 HBM 再读回（每步都要走 HBM 带宽）；n 大时访存时间远超计算（memory-bound）；</li>
+<li>占内存：S 是 O(n²)，正是第 2 课激活公式中 <code>5·n_heads·seq²·bs</code> 项——长序列时是激活最大头，全量重计算也救不了（层边界激活仍随 seq 线性增长，但注意力分数矩阵是二次项）；</li>
+<li>FA 省掉：不物化 S/P（O(n²) → O(n) 内存）；访存量从 O(n²) 次 HBM 读写降到 O(n) 块级读写（每块只进出 SRAM 一次）——计算量不变，但 memory-bound 瓶颈被移除。</li>
+</ul>
+</section>
+<section id="q2-1" class="level3">
+<h3 class="anchored" data-anchor-id="q2-1">Q2</h3>
+<ul>
+<li>naive matmul：线程 (x,y) 都算一个输出元素时，同 warp 的线程 x 相邻但读的是 A 的不同行（行距 = K）→ 不连续 → 无法合并成 DRAM burst；B 的列访问同理；</li>
+<li>一维 block 映射（x = blockIdx·BLOCK + threadIdx/BLOCKSIZE，y = threadIdx%BLOCKSIZE）：warp 内相邻线程的 y 相邻 → 读 B 的连续列（行主序下连续）→ 合并；吞吐提升 ~10 倍；</li>
+<li>Tiling：把 A/B 的 tile 先搬进共享内存，块内所有线程复用 → HBM 访问从”每个线程各读一遍”变成”每 tile 读一次”；</li>
+<li>Thread coarsening：每个线程算多个输出 → 共享内存指令数减少 → 缓解 MIO 指令队列阻塞（ncu 的 mio_throttle 停顿）。</li>
+</ul>
+</section>
+<section id="q3-1" class="level3">
+<h3 class="anchored" data-anchor-id="q3-1">Q3</h3>
+<ul>
+<li>谱系：torch.compile（易用/快/不灵活，可导出 Triton 代码作起点）→ Triton（block 级、较快、较灵活）→ CUDA（最难、最快、完全可控）；</li>
+<li>必须写 CUDA 的场景：需要精细控制共享内存布局、SM 内调度/warp 划分、特殊指令（如 FA-2/FA-3 的 warp 分工与 FP8 Tensor Core 路径），Triton 只暴露 block 级抽象；</li>
+<li>FA-1→2→3：FA-1 确立分块 + online softmax + 融合（内存 O(n)）；FA-2 减少非 matmul 操作、按 warp 精细划分 Q/K/V 工作量（提高利用率）；FA-3 面向 Hopper 优化 FP8/Tensor Core 与异步流水线。</li>
+</ul>
+</section>
+</section>
+<section id="通过要点" class="level2">
+<h2 class="anchored" data-anchor-id="通过要点">通过要点</h2>
+<ul>
+<li>FlashAttention 不降低 FLOPs，降低的是 HBM 访存与显存（O(n²)→O(n)）；</li>
+<li>online softmax 的 running max 是为了数值稳定（防止 exp 溢出），running sum 是为了正确归一化；</li>
+<li>与第 8 课 Ring Attention 共享同一套 online softmax 思想。</li>
+</ul>
+</section>
+<section id="官方主参考" class="level2">
+<h2 class="anchored" data-anchor-id="官方主参考">官方主参考</h2>
+<ul>
+<li><a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a></li>
+<li><a href="https://pytorch.org/docs/stable/distributed.html">PyTorch distributed documentation</a></li>
+</ul>
+
+
+<!-- -->
+
+</section>
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+    const viewSource = window.document.getElementById('quarto-view-source') ||
+                       window.document.getElementById('quarto-code-tools-source');
+    if (viewSource) {
+      const sourceUrl = viewSource.getAttribute("data-quarto-source-url");
+      viewSource.addEventListener("click", function(e) {
+        if (sourceUrl) {
+          // rstudio viewer pane
+          if (/\bcapabilities=\b/.test(window.location)) {
+            window.open(sourceUrl);
+          } else {
+            window.location.href = sourceUrl;
+          }
+        } else {
+          const modal = new bootstrap.Modal(document.getElementById('quarto-embedded-source-code-modal'));
+          modal.show();
+        }
+        return false;
+      });
+    }
+    function toggleCodeHandler(show) {
+      return function(e) {
+        const cellDetails = window.document.querySelectorAll(".cell details.code-fold");
+        for (let i=0; i<cellDetails.length; i++) {
+          const details = cellDetails[i];
+          if (show) {
+            details.open = true;
+          } else {
+            details.removeAttribute("open");
+          }
+        }
+        const cellCodeDivs = window.document.querySelectorAll(".cell div.sourceCode.cell-code");
+        const fromCls = show ? "hidden" : "unhidden";
+        const toCls = show ? "unhidden" : "hidden";
+        for (let i=0; i<cellCodeDivs.length; i++) {
+          const codeDiv = cellCodeDivs[i];
+          if (codeDiv.classList.contains(fromCls)) {
+            codeDiv.classList.remove(fromCls);
+            codeDiv.classList.add(toCls);
+          } 
+        }
+        return false;
+      }
+    }
+    const hideAllCode = window.document.getElementById("quarto-hide-all-code");
+    if (hideAllCode) {
+      hideAllCode.addEventListener("click", toggleCodeHandler(false));
+    }
+    const showAllCode = window.document.getElementById("quarto-show-all-code");
+    if (showAllCode) {
+      showAllCode.addEventListener("click", toggleCodeHandler(true));
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/hsthanb4\.github\.io\/hpclearning\/");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "训练系统 · 第 13/14 课：GPU 内核与 FlashAttention"</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="an">subtitle:</span><span class="co"> "Ultra-Scale Playbook 训练系统"</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 状态：**参考答案版**</span>  </span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 一次只完成一课；未通过前不要打开下一课答案。</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a><span class="fu">## 统一完成标准</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a>代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。</span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a><span class="fu"># 第 13 课：GPU 内核与 FlashAttention</span></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>对应官方章节：Diving into the GPUs（A primer on GPUs / Improving performance with kernels / Fused kernels / FlashAttention）+ 附录 A1（kernel 剖析）</span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>前置：第 2 课（激活、softmax 的注意力）、第 8 课（online softmax 概念）</span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>状态：未开始</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标</span></span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a>完成后你需要能够：</span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-26"><a href="#cb5-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>画出 GPU 的层次结构（SM/warp/block、寄存器/共享内存/L1/L2/HBM）并说明带宽差异。</span>
+<span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>解释 memory coalescing、tiling、thread coarsening、控制分歧各自解决的问题。</span>
+<span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>说明 torch.compile → Triton → CUDA 的工具谱系与取舍。</span>
+<span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>用代码实现 FlashAttention 的 online softmax 分块算法并验证与标准实现一致。</span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念</span></span>
+<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. GPU 组织（教材 primer）</span></span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>计算：GPU = 若干 SM（H100：132 个），每个 SM 有 128 个 core。线程以 **warp（32 线程）** 为单位锁步执行；warp 组成 block（如 512/1024 线程）分配给 SM。</span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>内存层级：寄存器（线程私有）→ 共享内存 + L1（SM 内共享）→ L2（全芯片共享）→ 全局内存 HBM（最大但最慢）。</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>关键事实：HBM 带宽远低于 SRAM 级别的共享内存/寄存器。**很多 kernel 是 memory-bound 而非 compute-bound**。</span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 三个经典优化</span></span>
+<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Memory coalescing（访存合并）**：DRAM 按突发（burst）返回连续地址。若 warp 内 32 个线程访问连续地址，硬件合并成一次大请求。教材的 naive matmul 例子：线程 (x,y) 映射错位导致 A 的访存不连续，吞吐差 ~10 倍；改 1D block 映射（threadIdx 相邻 → y 相邻）后恢复连续访问。</span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Tiling（分块）**：把 A、B 的 tile 先搬进共享内存，块内线程复用，减少对 HBM 的重复访问。教材例子：吞吐 410 GB/s、时间 -43%、~6.6 TFLOPS。</span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Thread coarsening（线程粗化）**：每个线程算多个输出元素，减少共享内存指令压力（ncu 里表现为 MIO throttle 停顿）。</span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**控制分歧**：warp 内 if 分支导致串行化；用 predication 或重排数据避免。</span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 工具谱系</span></span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**PyTorch**：易用、慢。</span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**@torch.compile**：易用、快、不灵活；<span class="in">`TORCH_LOGS=output_code`</span> 可以导出生成的 Triton kernel 作为起点。</span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Triton**：较快、更灵活（block 级编程，<span class="in">`tl.program_id`</span>、<span class="in">`tl.arange`</span>、mask 处理）。</span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CUDA**：最快最灵活（共享内存、SM 内调度全部可控），但开发成本最高。</span>
+<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. Fused kernel</span></span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a>相邻的逐点运算（如 LayerNorm 的多个步骤）若分多个 kernel，中间结果要写回 HBM 再读回。融合成一个 kernel，数据留在 SM 内 → 大幅减少 HBM 往返。FlashAttention 是"融合 + 分块 + online softmax"的集大成者。</span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a><span class="fu">### 5. FlashAttention</span></span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a>朴素注意力的问题：物化 S = QKᵀ（n×n）和 P = softmax(S) 到 HBM，长序列时是最大的激活之一（呼应第 2 课公式中的二次项），且 HBM 带宽成为瓶颈。</span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>FlashAttention 的做法：</span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>把 Q、K、V 分块，每次只算一块 S_ij（SRAM 内）；</span>
+<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>用 **online softmax**：维护 running max m 与 running sum l，每块到来时重新归一化已算的输出 O；</span>
+<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>不物化 S、P；显存从 O(n²) 降到 O(n)；计算量不变但访存量大幅下降。</span>
+<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a>FA-2：减少非 matmul 操作数、按 warp 精细划分工作量；FA-3：面向 Hopper 的 FP8/Tensor Core 优化。限制：只支持特定注意力模式 → FlexAttention。</span>
+<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>n=4096 的注意力：S 矩阵 4096×4096×2B ≈ 32 MB/层/头——逐层累积后是激活的最大贡献者。FlashAttention 把这块内存需求变成 O(n)，且因为少访存，实际更快。第 8 课的 Ring Attention 用同一套 online softmax 统计量做跨卡分块。</span>
+<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a><span class="fu">## 代码填空题</span></span>
+<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a>用 numpy 实现分块 online softmax 注意力，验证与标准实现数值一致。</span>
+<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):</span>
+<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""参照实现：物化 S 和 P。Q,K,V: (n, d)。"""</span></span>
+<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> Q.shape[<span class="dv">0</span>]</span>
+<span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> Q <span class="op">@</span> K.T                    <span class="co"># (n, n) —— 长序列下这是内存炸弹</span></span>
+<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> S <span class="op">-</span> S.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a>    P <span class="op">=</span> np.exp(S)</span>
+<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a>    P <span class="op">/=</span> P.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> P <span class="op">@</span> V, S</span>
+<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,</span>
+<span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a>                    block_size: <span class="bu">int</span> <span class="op">=</span> <span class="dv">64</span>) <span class="op">-&gt;</span> np.ndarray:</span>
+<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a><span class="co">    分块实现：不物化完整 S。</span></span>
+<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a><span class="co">    对每个 query 块，逐步处理 kv 块，维护每个 query 行的：</span></span>
+<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a><span class="co">      m: 见过的分数的 running max</span></span>
+<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a><span class="co">      l: 见过的 exp(score - m) 之和（softmax 分母）</span></span>
+<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a><span class="co">      O: 已累加的加权输出</span></span>
+<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> Q.shape</span>
+<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a>    O <span class="op">=</span> np.zeros((n, d))</span>
+<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a>    l <span class="op">=</span> np.zeros(n)                       <span class="co"># 分母（running sum）</span></span>
+<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a>    m <span class="op">=</span> np.full(n, <span class="op">-</span>np.inf)               <span class="co"># running max</span></span>
+<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a>        Qi <span class="op">=</span> Q[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a>        Oi <span class="op">=</span> O[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a>        li <span class="op">=</span> l[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-112"><a href="#cb5-112" aria-hidden="true" tabindex="-1"></a>        mi <span class="op">=</span> m[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-113"><a href="#cb5-113" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-114"><a href="#cb5-114" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb5-115"><a href="#cb5-115" aria-hidden="true" tabindex="-1"></a>            Kj <span class="op">=</span> K[j:j <span class="op">+</span> block_size]</span>
+<span id="cb5-116"><a href="#cb5-116" aria-hidden="true" tabindex="-1"></a>            Vj <span class="op">=</span> V[j:j <span class="op">+</span> block_size]</span>
+<span id="cb5-117"><a href="#cb5-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-118"><a href="#cb5-118" aria-hidden="true" tabindex="-1"></a>            S_ij <span class="op">=</span> Qi <span class="op">@</span> Kj.T              <span class="co"># 当前块分数 (bs, bs)</span></span>
+<span id="cb5-119"><a href="#cb5-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-120"><a href="#cb5-120" aria-hidden="true" tabindex="-1"></a>            <span class="co"># online softmax 更新：</span></span>
+<span id="cb5-121"><a href="#cb5-121" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 1) 新 running max（把当前块的最大分数并进来）</span></span>
+<span id="cb5-122"><a href="#cb5-122" aria-hidden="true" tabindex="-1"></a>            m_new <span class="op">=</span> ______</span>
+<span id="cb5-123"><a href="#cb5-123" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 2) 旧分母/旧输出都要按 exp(mi - m_new) 缩放，新块贡献 p_ij</span></span>
+<span id="cb5-124"><a href="#cb5-124" aria-hidden="true" tabindex="-1"></a>            scale <span class="op">=</span> ______</span>
+<span id="cb5-125"><a href="#cb5-125" aria-hidden="true" tabindex="-1"></a>            p_ij <span class="op">=</span> np.exp(S_ij <span class="op">-</span> m_new[:, <span class="va">None</span>])   <span class="co"># 新块的"原始"权重</span></span>
+<span id="cb5-126"><a href="#cb5-126" aria-hidden="true" tabindex="-1"></a>            l_new <span class="op">=</span> ______                         <span class="co"># 分母更新：旧项缩放 + 新块和</span></span>
+<span id="cb5-127"><a href="#cb5-127" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 3) 输出更新：旧输出按比例缩放，加上新块贡献</span></span>
+<span id="cb5-128"><a href="#cb5-128" aria-hidden="true" tabindex="-1"></a>            Oi <span class="op">=</span> ______</span>
+<span id="cb5-129"><a href="#cb5-129" aria-hidden="true" tabindex="-1"></a>            mi, li <span class="op">=</span> m_new, l_new</span>
+<span id="cb5-130"><a href="#cb5-130" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-131"><a href="#cb5-131" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 把块的统计量写回全局数组</span></span>
+<span id="cb5-132"><a href="#cb5-132" aria-hidden="true" tabindex="-1"></a>        O[i:i <span class="op">+</span> block_size] <span class="op">=</span> Oi</span>
+<span id="cb5-133"><a href="#cb5-133" aria-hidden="true" tabindex="-1"></a>        l[i:i <span class="op">+</span> block_size] <span class="op">=</span> li</span>
+<span id="cb5-134"><a href="#cb5-134" aria-hidden="true" tabindex="-1"></a>        m[i:i <span class="op">+</span> block_size] <span class="op">=</span> mi</span>
+<span id="cb5-135"><a href="#cb5-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-136"><a href="#cb5-136" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 最终归一化：O / l（把 running max 移回）</span></span>
+<span id="cb5-137"><a href="#cb5-137" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> O <span class="op">/</span> l[:, <span class="va">None</span>]</span>
+<span id="cb5-138"><a href="#cb5-138" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-139"><a href="#cb5-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-140"><a href="#cb5-140" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">"__main__"</span>:</span>
+<span id="cb5-141"><a href="#cb5-141" aria-hidden="true" tabindex="-1"></a>    rng <span class="op">=</span> np.random.default_rng(<span class="dv">0</span>)</span>
+<span id="cb5-142"><a href="#cb5-142" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> <span class="dv">256</span>, <span class="dv">32</span></span>
+<span id="cb5-143"><a href="#cb5-143" aria-hidden="true" tabindex="-1"></a>    Q <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb5-144"><a href="#cb5-144" aria-hidden="true" tabindex="-1"></a>    K <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb5-145"><a href="#cb5-145" aria-hidden="true" tabindex="-1"></a>    V <span class="op">=</span> rng.standard_normal((n, d))</span>
+<span id="cb5-146"><a href="#cb5-146" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-147"><a href="#cb5-147" aria-hidden="true" tabindex="-1"></a>    O_ref, S_ref <span class="op">=</span> standard_attention(Q, K, V)</span>
+<span id="cb5-148"><a href="#cb5-148" aria-hidden="true" tabindex="-1"></a>    O_flash <span class="op">=</span> flash_attention(Q, K, V, block_size<span class="op">=</span><span class="dv">32</span>)</span>
+<span id="cb5-149"><a href="#cb5-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-150"><a href="#cb5-150" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"最大绝对误差:"</span>, np.<span class="bu">abs</span>(O_ref <span class="op">-</span> O_flash).<span class="bu">max</span>())</span>
+<span id="cb5-151"><a href="#cb5-151" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"S 矩阵元素数:"</span>, S_ref.size, <span class="st">"（FlashAttention 不物化它）"</span>)</span>
+<span id="cb5-152"><a href="#cb5-152" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> np.allclose(O_ref, O_flash, atol<span class="op">=</span><span class="fl">1e-6</span>)</span>
+<span id="cb5-153"><a href="#cb5-153" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）"</span>)</span>
+<span id="cb5-154"><a href="#cb5-154" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-155"><a href="#cb5-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-156"><a href="#cb5-156" aria-hidden="true" tabindex="-1"></a><span class="fu">## 三个问答题</span></span>
+<span id="cb5-157"><a href="#cb5-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-158"><a href="#cb5-158" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb5-159"><a href="#cb5-159" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-160"><a href="#cb5-160" aria-hidden="true" tabindex="-1"></a>为什么"先算完整 S = QKᵀ 再 softmax"在长序列下既慢又占内存？请从 HBM 带宽与显存两个角度回答，并把它与第 2 课激活公式中的二次项联系起来。FlashAttention 最终在内存与访存上各省掉了什么？</span>
+<span id="cb5-161"><a href="#cb5-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-162"><a href="#cb5-162" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb5-163"><a href="#cb5-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-164"><a href="#cb5-164" aria-hidden="true" tabindex="-1"></a>教材的 naive matmul 中，为什么"每个线程算一个输出元素"会导致访存不合并？改成一维 block 映射后为什么吞吐提升约 10 倍？Tiling 为什么能进一步减少 HBM 访问？Thread coarsening 解决的是哪一类停顿（提示：MIO throttle）？</span>
+<span id="cb5-165"><a href="#cb5-165" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-166"><a href="#cb5-166" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb5-167"><a href="#cb5-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-168"><a href="#cb5-168" aria-hidden="true" tabindex="-1"></a>请对比 torch.compile、Triton、CUDA 三条写 kernel 的路径（难度/性能/灵活性），并说明什么时候必须离开 Triton 写 CUDA。FA-1 → FA-2 → FA-3 各自改进的重点是什么（各一句话）？</span>
+<span id="cb5-169"><a href="#cb5-169" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-170"><a href="#cb5-170" aria-hidden="true" tabindex="-1"></a><span class="fu">## 检查与通过标准</span></span>
+<span id="cb5-171"><a href="#cb5-171" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-172"><a href="#cb5-172" aria-hidden="true" tabindex="-1"></a>总分 10 分：代码正确 4 分（m_new/l_new/O 更新、归一化、与标准实现一致）、三题各 2 分、通过线 8 分。</span>
+<span id="cb5-173"><a href="#cb5-173" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-174"><a href="#cb5-174" aria-hidden="true" tabindex="-1"></a>一票否决项：</span>
+<span id="cb5-175"><a href="#cb5-175" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-176"><a href="#cb5-176" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>认为 FlashAttention 降低了计算量（它降低的是访存与显存）。</span>
+<span id="cb5-177"><a href="#cb5-177" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>说不出 online softmax 为什么必须维护 running max（数值稳定性）。</span>
+<span id="cb5-178"><a href="#cb5-178" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>认为"分别 softmax 再拼接"正确。</span>
+<span id="cb5-179"><a href="#cb5-179" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>分不清 HBM 与共享内存在带宽上的量级差异。</span>
+<span id="cb5-180"><a href="#cb5-180" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-181"><a href="#cb5-181" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb5-182"><a href="#cb5-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-183"><a href="#cb5-183" aria-hidden="true" tabindex="-1"></a>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</span>
+<span id="cb5-184"><a href="#cb5-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-187"><a href="#cb5-187" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb5-188"><a href="#cb5-188" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb5-189"><a href="#cb5-189" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb5-190"><a href="#cb5-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-191"><a href="#cb5-191" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-192"><a href="#cb5-192" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):</span>
+<span id="cb5-193"><a href="#cb5-193" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""参照实现：物化 S 和 P。Q,K,V: (n, d)。"""</span></span>
+<span id="cb5-194"><a href="#cb5-194" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> Q.shape[<span class="dv">0</span>]</span>
+<span id="cb5-195"><a href="#cb5-195" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> Q <span class="op">@</span> K.T                    <span class="co"># (n, n) —— 长序列下这是内存炸弹</span></span>
+<span id="cb5-196"><a href="#cb5-196" aria-hidden="true" tabindex="-1"></a>    S <span class="op">=</span> S <span class="op">-</span> S.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-197"><a href="#cb5-197" aria-hidden="true" tabindex="-1"></a>    P <span class="op">=</span> np.exp(S)</span>
+<span id="cb5-198"><a href="#cb5-198" aria-hidden="true" tabindex="-1"></a>    P <span class="op">/=</span> P.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-199"><a href="#cb5-199" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> P <span class="op">@</span> V, S</span>
+<span id="cb5-200"><a href="#cb5-200" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-201"><a href="#cb5-201" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-202"><a href="#cb5-202" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,</span>
+<span id="cb5-203"><a href="#cb5-203" aria-hidden="true" tabindex="-1"></a>                    block_size: <span class="bu">int</span> <span class="op">=</span> <span class="dv">64</span>) <span class="op">-&gt;</span> np.ndarray:</span>
+<span id="cb5-204"><a href="#cb5-204" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb5-205"><a href="#cb5-205" aria-hidden="true" tabindex="-1"></a><span class="co">    分块实现：不物化完整 S。</span></span>
+<span id="cb5-206"><a href="#cb5-206" aria-hidden="true" tabindex="-1"></a><span class="co">    对每个 query 块，逐步处理 kv 块，维护每个 query 行的：</span></span>
+<span id="cb5-207"><a href="#cb5-207" aria-hidden="true" tabindex="-1"></a><span class="co">      m: 见过的分数的 running max</span></span>
+<span id="cb5-208"><a href="#cb5-208" aria-hidden="true" tabindex="-1"></a><span class="co">      l: 见过的 exp(score - m) 之和（softmax 分母）</span></span>
+<span id="cb5-209"><a href="#cb5-209" aria-hidden="true" tabindex="-1"></a><span class="co">      O: 已累加的加权输出</span></span>
+<span id="cb5-210"><a href="#cb5-210" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb5-211"><a href="#cb5-211" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> Q.shape</span>
+<span id="cb5-212"><a href="#cb5-212" aria-hidden="true" tabindex="-1"></a>    O <span class="op">=</span> np.zeros((n, d))</span>
+<span id="cb5-213"><a href="#cb5-213" aria-hidden="true" tabindex="-1"></a>    l <span class="op">=</span> np.zeros(n)                       <span class="co"># 分母（running sum）</span></span>
+<span id="cb5-214"><a href="#cb5-214" aria-hidden="true" tabindex="-1"></a>    m <span class="op">=</span> np.full(n, <span class="op">-</span>np.inf)               <span class="co"># running max</span></span>
+<span id="cb5-215"><a href="#cb5-215" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-216"><a href="#cb5-216" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb5-217"><a href="#cb5-217" aria-hidden="true" tabindex="-1"></a>        Qi <span class="op">=</span> Q[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-218"><a href="#cb5-218" aria-hidden="true" tabindex="-1"></a>        Oi <span class="op">=</span> O[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-219"><a href="#cb5-219" aria-hidden="true" tabindex="-1"></a>        li <span class="op">=</span> l[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-220"><a href="#cb5-220" aria-hidden="true" tabindex="-1"></a>        mi <span class="op">=</span> m[i:i <span class="op">+</span> block_size]</span>
+<span id="cb5-221"><a href="#cb5-221" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-222"><a href="#cb5-222" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, n, block_size):</span>
+<span id="cb5-223"><a href="#cb5-223" aria-hidden="true" tabindex="-1"></a>            Kj <span class="op">=</span> K[j:j <span class="op">+</span> block_size]</span>
+<span id="cb5-224"><a href="#cb5-224" aria-hidden="true" tabindex="-1"></a>            Vj <span class="op">=</span> V[j:j <span class="op">+</span> block_size]</span>
+<span id="cb5-225"><a href="#cb5-225" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-226"><a href="#cb5-226" aria-hidden="true" tabindex="-1"></a>            S_ij <span class="op">=</span> Qi <span class="op">@</span> Kj.T              <span class="co"># 当前块分数 (bs, bs)</span></span>
+<span id="cb5-227"><a href="#cb5-227" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-228"><a href="#cb5-228" aria-hidden="true" tabindex="-1"></a>            <span class="co"># online softmax 更新：</span></span>
+<span id="cb5-229"><a href="#cb5-229" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 1) 新 running max（把当前块的最大分数并进来）</span></span>
+<span id="cb5-230"><a href="#cb5-230" aria-hidden="true" tabindex="-1"></a>            m_new <span class="op">=</span> np.maximum(mi, S_ij.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>))</span>
+<span id="cb5-231"><a href="#cb5-231" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 2) 旧分母/旧输出都要按 exp(mi - m_new) 缩放，新块贡献 p_ij</span></span>
+<span id="cb5-232"><a href="#cb5-232" aria-hidden="true" tabindex="-1"></a>            scale <span class="op">=</span> np.exp(mi <span class="op">-</span> m_new)</span>
+<span id="cb5-233"><a href="#cb5-233" aria-hidden="true" tabindex="-1"></a>            p_ij <span class="op">=</span> np.exp(S_ij <span class="op">-</span> m_new[:, <span class="va">None</span>])   <span class="co"># 新块的"原始"权重</span></span>
+<span id="cb5-234"><a href="#cb5-234" aria-hidden="true" tabindex="-1"></a>            l_new <span class="op">=</span> li <span class="op">*</span> scale <span class="op">+</span> p_ij.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>)                         <span class="co"># 分母更新：旧项缩放 + 新块和</span></span>
+<span id="cb5-235"><a href="#cb5-235" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 3) 输出更新：旧输出按比例缩放，加上新块贡献</span></span>
+<span id="cb5-236"><a href="#cb5-236" aria-hidden="true" tabindex="-1"></a>            Oi <span class="op">=</span> Oi <span class="op">*</span> scale[:, <span class="va">None</span>] <span class="op">+</span> p_ij <span class="op">@</span> Vj</span>
+<span id="cb5-237"><a href="#cb5-237" aria-hidden="true" tabindex="-1"></a>            mi, li <span class="op">=</span> m_new, l_new</span>
+<span id="cb5-238"><a href="#cb5-238" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-239"><a href="#cb5-239" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 把块的统计量写回全局数组</span></span>
+<span id="cb5-240"><a href="#cb5-240" aria-hidden="true" tabindex="-1"></a>        O[i:i <span class="op">+</span> block_size] <span class="op">=</span> Oi</span>
+<span id="cb5-241"><a href="#cb5-241" aria-hidden="true" tabindex="-1"></a>        l[i:i <span class="op">+</span> block_size] <span class="op">=</span> li</span>
+<span id="cb5-242"><a href="#cb5-242" aria-hidden="true" tabindex="-1"></a>        m[i:i <span class="op">+</span> block_size] <span class="op">=</span> mi</span>
+<span id="cb5-243"><a href="#cb5-243" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-244"><a href="#cb5-244" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 最终归一化：O / l（把 running max 移回）</span></span>
+<span id="cb5-245"><a href="#cb5-245" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> O <span class="op">/</span> l[:, <span class="va">None</span>]</span>
+<span id="cb5-246"><a href="#cb5-246" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-247"><a href="#cb5-247" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-248"><a href="#cb5-248" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">"__main__"</span>:</span>
+<span id="cb5-249"><a href="#cb5-249" aria-hidden="true" tabindex="-1"></a>    rng <span class="op">=</span> np.random.default_rng(<span class="dv">0</span>)</span>
+<span id="cb5-250"><a href="#cb5-250" aria-hidden="true" tabindex="-1"></a>    n, d <span class="op">=</span> <span class="dv">256</span>, <span class="dv">32</span></span>
+<span id="cb5-251"><a href="#cb5-251" aria-hidden="true" tabindex="-1"></a>    Q <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb5-252"><a href="#cb5-252" aria-hidden="true" tabindex="-1"></a>    K <span class="op">=</span> rng.standard_normal((n, d)) <span class="op">*</span> <span class="fl">0.5</span></span>
+<span id="cb5-253"><a href="#cb5-253" aria-hidden="true" tabindex="-1"></a>    V <span class="op">=</span> rng.standard_normal((n, d))</span>
+<span id="cb5-254"><a href="#cb5-254" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-255"><a href="#cb5-255" aria-hidden="true" tabindex="-1"></a>    O_ref, S_ref <span class="op">=</span> standard_attention(Q, K, V)</span>
+<span id="cb5-256"><a href="#cb5-256" aria-hidden="true" tabindex="-1"></a>    O_flash <span class="op">=</span> flash_attention(Q, K, V, block_size<span class="op">=</span><span class="dv">32</span>)</span>
+<span id="cb5-257"><a href="#cb5-257" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-258"><a href="#cb5-258" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"最大绝对误差:"</span>, np.<span class="bu">abs</span>(O_ref <span class="op">-</span> O_flash).<span class="bu">max</span>())</span>
+<span id="cb5-259"><a href="#cb5-259" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"S 矩阵元素数:"</span>, S_ref.size, <span class="st">"（FlashAttention 不物化它）"</span>)</span>
+<span id="cb5-260"><a href="#cb5-260" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> np.allclose(O_ref, O_flash, atol<span class="op">=</span><span class="fl">1e-6</span>)</span>
+<span id="cb5-261"><a href="#cb5-261" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）"</span>)</span>
+<span id="cb5-262"><a href="#cb5-262" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-263"><a href="#cb5-263" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-264"><a href="#cb5-264" aria-hidden="true" tabindex="-1"></a><span class="fu"># 第 13 课参考答案（复盘用，先提交再打开）</span></span>
+<span id="cb5-265"><a href="#cb5-265" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-266"><a href="#cb5-266" aria-hidden="true" tabindex="-1"></a><span class="fu">## 补全后的代码（关键填空处）</span></span>
+<span id="cb5-267"><a href="#cb5-267" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-268"><a href="#cb5-268" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
+<span id="cb5-269"><a href="#cb5-269" aria-hidden="true" tabindex="-1"></a><span class="co"># online softmax 更新</span></span>
+<span id="cb5-270"><a href="#cb5-270" aria-hidden="true" tabindex="-1"></a>            m_new <span class="op">=</span> np.maximum(mi, S_ij.<span class="bu">max</span>(axis<span class="op">=-</span><span class="dv">1</span>))        <span class="co"># 1) 新 running max</span></span>
+<span id="cb5-271"><a href="#cb5-271" aria-hidden="true" tabindex="-1"></a>            scale <span class="op">=</span> np.exp(mi <span class="op">-</span> m_new)                       <span class="co"># 旧输出的缩放因子</span></span>
+<span id="cb5-272"><a href="#cb5-272" aria-hidden="true" tabindex="-1"></a>            p_ij <span class="op">=</span> np.exp(S_ij <span class="op">-</span> m_new[:, <span class="va">None</span>])             <span class="co"># 新块的"原始"权重</span></span>
+<span id="cb5-273"><a href="#cb5-273" aria-hidden="true" tabindex="-1"></a>            l_new <span class="op">=</span> li <span class="op">*</span> scale <span class="op">+</span> p_ij.<span class="bu">sum</span>(axis<span class="op">=-</span><span class="dv">1</span>)           <span class="co"># 2) 分母更新</span></span>
+<span id="cb5-274"><a href="#cb5-274" aria-hidden="true" tabindex="-1"></a>            Oi <span class="op">=</span> Oi <span class="op">*</span> scale[:, <span class="va">None</span>] <span class="op">+</span> p_ij <span class="op">@</span> Vj             <span class="co"># 3) 输出更新</span></span>
+<span id="cb5-275"><a href="#cb5-275" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-276"><a href="#cb5-276" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-277"><a href="#cb5-277" aria-hidden="true" tabindex="-1"></a>验证结果：</span>
+<span id="cb5-278"><a href="#cb5-278" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-279"><a href="#cb5-279" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
+<span id="cb5-280"><a href="#cb5-280" aria-hidden="true" tabindex="-1"></a>最大绝对误差: <span class="op">~</span><span class="fl">1e-15</span></span>
+<span id="cb5-281"><a href="#cb5-281" aria-hidden="true" tabindex="-1"></a>S 矩阵元素数: <span class="dv">65536</span>（标准实现物化；FlashAttention 不物化）</span>
+<span id="cb5-282"><a href="#cb5-282" aria-hidden="true" tabindex="-1"></a>与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）</span>
+<span id="cb5-283"><a href="#cb5-283" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-284"><a href="#cb5-284" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-285"><a href="#cb5-285" aria-hidden="true" tabindex="-1"></a><span class="fu">## 三个问答题要点</span></span>
+<span id="cb5-286"><a href="#cb5-286" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-287"><a href="#cb5-287" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb5-288"><a href="#cb5-288" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-289"><a href="#cb5-289" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>慢：S 与 P 都是 n×n，计算它们要写回 HBM 再读回（每步都要走 HBM 带宽）；n 大时访存时间远超计算（memory-bound）；</span>
+<span id="cb5-290"><a href="#cb5-290" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>占内存：S 是 O(n²)，正是第 2 课激活公式中 <span class="in">`5·n_heads·seq²·bs`</span> 项——长序列时是激活最大头，全量重计算也救不了（层边界激活仍随 seq 线性增长，但注意力分数矩阵是二次项）；</span>
+<span id="cb5-291"><a href="#cb5-291" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>FA 省掉：不物化 S/P（O(n²) → O(n) 内存）；访存量从 O(n²) 次 HBM 读写降到 O(n) 块级读写（每块只进出 SRAM 一次）——计算量不变，但 memory-bound 瓶颈被移除。</span>
+<span id="cb5-292"><a href="#cb5-292" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-293"><a href="#cb5-293" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb5-294"><a href="#cb5-294" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-295"><a href="#cb5-295" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>naive matmul：线程 (x,y) 都算一个输出元素时，同 warp 的线程 x 相邻但读的是 A 的不同行（行距 = K）→ 不连续 → 无法合并成 DRAM burst；B 的列访问同理；</span>
+<span id="cb5-296"><a href="#cb5-296" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一维 block 映射（x = blockIdx·BLOCK + threadIdx/BLOCKSIZE，y = threadIdx%BLOCKSIZE）：warp 内相邻线程的 y 相邻 → 读 B 的连续列（行主序下连续）→ 合并；吞吐提升 ~10 倍；</span>
+<span id="cb5-297"><a href="#cb5-297" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Tiling：把 A/B 的 tile 先搬进共享内存，块内所有线程复用 → HBM 访问从"每个线程各读一遍"变成"每 tile 读一次"；</span>
+<span id="cb5-298"><a href="#cb5-298" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Thread coarsening：每个线程算多个输出 → 共享内存指令数减少 → 缓解 MIO 指令队列阻塞（ncu 的 mio_throttle 停顿）。</span>
+<span id="cb5-299"><a href="#cb5-299" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-300"><a href="#cb5-300" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb5-301"><a href="#cb5-301" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-302"><a href="#cb5-302" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>谱系：torch.compile（易用/快/不灵活，可导出 Triton 代码作起点）→ Triton（block 级、较快、较灵活）→ CUDA（最难、最快、完全可控）；</span>
+<span id="cb5-303"><a href="#cb5-303" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>必须写 CUDA 的场景：需要精细控制共享内存布局、SM 内调度/warp 划分、特殊指令（如 FA-2/FA-3 的 warp 分工与 FP8 Tensor Core 路径），Triton 只暴露 block 级抽象；</span>
+<span id="cb5-304"><a href="#cb5-304" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>FA-1→2→3：FA-1 确立分块 + online softmax + 融合（内存 O(n)）；FA-2 减少非 matmul 操作、按 warp 精细划分 Q/K/V 工作量（提高利用率）；FA-3 面向 Hopper 优化 FP8/Tensor Core 与异步流水线。</span>
+<span id="cb5-305"><a href="#cb5-305" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-306"><a href="#cb5-306" aria-hidden="true" tabindex="-1"></a><span class="fu">## 通过要点</span></span>
+<span id="cb5-307"><a href="#cb5-307" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-308"><a href="#cb5-308" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>FlashAttention 不降低 FLOPs，降低的是 HBM 访存与显存（O(n²)→O(n)）；</span>
+<span id="cb5-309"><a href="#cb5-309" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>online softmax 的 running max 是为了数值稳定（防止 exp 溢出），running sum 是为了正确归一化；</span>
+<span id="cb5-310"><a href="#cb5-310" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>与第 8 课 Ring Attention 共享同一套 online softmax 思想。</span>
+<span id="cb5-311"><a href="#cb5-311" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-312"><a href="#cb5-312" aria-hidden="true" tabindex="-1"></a><span class="fu">## 官方主参考</span></span>
+<span id="cb5-313"><a href="#cb5-313" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-314"><a href="#cb5-314" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Ultra-Scale Playbook</span><span class="co">](https://huggingface.co/spaces/nanotron/ultrascale-playbook)</span></span>
+<span id="cb5-315"><a href="#cb5-315" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">PyTorch distributed documentation</span><span class="co">](https://pytorch.org/docs/stable/distributed.html)</span></span>
+</code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
+</div></div></div></div></div>
+</div> <!-- /content -->
+
+
+
+
+<footer class="footer"><div class="nav-footer"><div class="nav-footer-center"><div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></div></div></footer><script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>
