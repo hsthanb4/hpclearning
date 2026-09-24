@@ -22,8 +22,7 @@ jupyter: python3
 
 前置：Python、PyTorch、train 第 1～5 课、CUDA 基础。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
 
-## 核心心智模型
-
+## 核心概念与运行机制
 
 ### 核心操作与执行流程图解
 
@@ -50,29 +49,66 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 5-2：断点续训 (Resume) 精确状态恢复与跳步定位工作流</em></p>
 
+### 1. 它是什么，解决什么问题
 
+在万亿 Token 级别的大模型预训练与持续多轮微调中，数据加载流水线（Data Pipeline）并非简单的单机 Python 迭代器，而是直接关系到**模型收敛确定性**与**集群万小时级容灾能力**的核心分布式子系统。
 
-### 它是什么、解决什么问题
+分布式数据流水线必须解决三大核心痛点：
+1. **全局无重复正交分片（Zero-Redundancy Sharding）**：如图 5-1 所示，如何保证数千张卡在同一时刻获取的数据样本互不重叠，且全体样本的并集恰好覆盖全量数据集；
+2. **确定性伪随机可复现（Deterministic Reproducibility）**：在引入分布式 Shuffle 洗牌打乱数据分布的同时，保证多次运行或断点恢复时数据生成的序列严格一致；
+3. **断点精确续训（Exact Resume & Fast-Forward）**：如图 5-2 所示，当集群遭遇硬件损坏或抢占中断时，如何不从头遍历 TB/PB 级数据集，以 $\mathcal{O}(1)$ 的时间复杂度精准跳过已训练样本，实现无缝对齐恢复，杜绝样本重复吞吐与梯度漂移。
 
-先用 `(seed,epoch)` 生成全局顺序，再按 global position 分到 rank；worker 在 rank 内继续切分。resume 至少保存 epoch、全局 cursor、sampler RNG 和数据版本。
+### 2. 它如何工作
 
-### 数据与控制如何流动
+分布式数据分片与精确恢复依托于严格的分层索引映射与状态机持久化设计（如图 5-1 与 图 5-2 所示）：
 
-数据快照和 `(seed, epoch)` 确定全局样本序列；global position 先映射到 rank，再映射到 worker。只有消费提交后才推进可恢复 cursor，checkpoint 把 cursor 与模型状态绑定。
+1. **确定性两级分片映射（图 5-1）**：
+   - **全局置换生成**：`DistributedSampler` 依据固定公式 $\text{Seed}_{\text{epoch}} = \text{seed} + \text{epoch}$ 初始化确定性伪随机数生成器，对大小为 $N$ 的数据集索引生成全局置换数组 $I = [i_0, i_1, \dots, i_{N-1}]$；
+   - **对齐填充约束（Padding Invariant）**：若样本总数 $N$ 不能被集群总卡数 $P$ 整除，采样器必须对尾部补全至 $P$ 的整数倍，以确保所有 Rank 在当前 Epoch 拥有**完全相等的 Batch 步数**，从根本上防止因某张卡少一个 Batch 导致 DDP 全局通信挂起死锁；
+   - **跨卡交织切分（Interleaved Slicing）**：对于 Rank $r \in [0, P-1]$，其分配到的样本子集严格遵循交错步长采样：
+     $$\text{Indices}(r) = \{I[g] \mid g \pmod P == r\}$$
+     全局样本位置 $g$ 与本地样本索引 $l$ 的双向映射为：
+     $$\text{owner}(g) = g \pmod P, \quad \text{local\_idx}(g) = \lfloor g / P \rfloor$$
+2. **多进程 Worker 二级分发**：
+   - 在每个 Rank 内部，PyTorch `DataLoader` 通常启动 $W$ 个工作进程（`num_workers`）。
+   - 本地样本集进一步在多进程间切分，由各 Worker 进程异步执行数据解码、分词（Tokenization）与张量组装，通过共享内存环形队列传递给主进程。
+3. **断点精准快速跳步恢复（图 5-2）**：
+   - 在保存 Checkpoint 时，引擎不仅持久化模型权重与优化器状态，还原子记录**数据进度游标（Data State Cursor）**：`current_epoch`、已完成迭代步数 `global_step`、以及数据加载器的伪随机种子；
+   - 发生故障重启时，采样器重新构建当前 Epoch 的确定性全局置换 $I$；
+   - 随后计算已消费的样本偏移量：$\Delta = \text{global\_step} \times \text{batch\_size} \times P$；
+   - 采样器直接从索引偏移处切片切分（Fast-Forward 切片切分），零 I/O 开销瞬间跳过数百 GB 的已学数据，实现无缝精准恢复。
 
-### 正确性条件与常见误区
+### 3. 正确性条件与常见误区
 
-`DistributedSampler.set_epoch()` 必须每 epoch 调用；IterableDataset 多 worker 需自行分片。world size 变化时按 rank-local cursor 恢复会重复或跳过。
+- **`DistributedSampler.set_epoch(epoch)` 必调契约**：
+  - *致命陷阱*：在每轮 Epoch 训练循环开头忘记显式调用 `sampler.set_epoch(epoch)`；
+  - *底层物理实况*：采样器内部的随机数种子将永久固定在初始值 `seed + 0`。尽管单 Epoch 内各卡数据无重复，但在接下来的数十个 Epoch 中，模型将在完全相同的样本先后顺序和完全相同的局部 Batch 组合下被重复喂养。模型泛化能力严重劣化，过拟合风险剧增，且该 Bug 在单 Epoch 冒烟测试中绝对无法被察觉。
+- **`IterableDataset` 与多 Worker 的“八倍数据重复灾难”**：
+  - *常见误区*：直接将流式数据加载器 `IterableDataset` 配合 `num_workers=8` 启动训练，误以为框架会自动分片；
+  - *实际后果*：在 PyTorch 架构中，`IterableDataset` 默认会在每个 Worker 进程中完整克隆一份实例。若用户未在数据集的 `__iter__` 中通过 `torch.utils.data.get_worker_info()` 主动按 `worker_id` 切分数据流，8 个 Worker 进程将各自从头开始读取完整数据流，导致该卡上的所有样本被完全重复计算 8 次！
+- **弹性伸缩（Elastic Scaling）下的局部 Offset 失效**：
+  - 若将集群规模从 64 卡动态缩容至 32 卡，原先各卡保存的私有局部步数（`local_step`）完全失去拓扑意义。必须依赖**全局不变样本坐标（Global Sample Index / Token Offset）**重新解构分片拓扑。
 
-### 性能、成本与工程取舍
+### 4. 性能与工程取舍
 
-严格不重复恢复需要全局位置和稳定数据快照，状态更复杂；允许少量重复可简化故障恢复，但要评估优化偏差和账单。
+- **Map 索引随机加载 vs. Iterable 流式预取**：
+  - **Map-style Dataset（索引式）**：天然支持 $\mathcal{O}(1)$ 确定性断点跳转与灵活多卡切分；但要求底层存储支持高效随机点查（Random Seek），在千亿级文本的小文件随机读取中会打崩网络文件系统（NFS / Lustre）的元数据服务器；
+  - **IterableDataset（流式打包）**：将数据预先分块打包为大尺寸压缩分卷（如 WebDataset / Tar / Parquet），吞吐逼近物理网卡线速；但断点续训状态维护极其复杂，需要显式持久化文件分卷编号与内部分卷 Byte Offset。
+- **严格零重复保证 vs. 异步预取缓冲丢弃**：
+  - 为了维持 GPU 算力饱和，DataLoader 会在后台预取数个 Batch。当触发 Checkpoint 保存时，预取队列中已出队但未实际前向计算的张量，在恢复时必须被严谨对齐；
+  - 生产中通常采用“按最后提交的已反向 Step”作为物理截断点，在 Resume 时清空后台预取缓冲并从该 Step 精确重启。
 
 ## 具体演示
 
-全局位置 g 按 `g % world_size` 分 rank：world=4 时位置 10 属 rank2。若只保存 rank2 已读 3 条，world 改 8 后语义不再唯一。
-
-请先独立复述“输入 → 状态变化 → 输出/指标”，再开始填空。
+设总卡数 $P = 4$，全局生成了一条确定性置换序列：
+$$I = [\text{idx}_0, \text{idx}_1, \dots, \text{idx}_9, \text{idx}_{10}, \dots]$$
+1. **全局位置 $g = 10$ 的归属判定**：
+   - 宿主卡计算：$\text{owner} = 10 \pmod 4 = 2$（由 Rank 2 消费）；
+   - 该卡内的局部序列索引：$\text{local\_idx} = \lfloor 10 / 4 \rfloor = 2$（该样本是 Rank 2 在该 Epoch 分配到的第 3 个样本，从 0 计）；
+2. **故障断点恢复推演**：
+   - 训练进行到第 2 个 Step 中途崩溃，每个 Step 包含全局 Batch 为 4 个样本（每卡 1 个）；
+   - Checkpoint 读取到最后提交的已完成 Step 为 1（即前 4 个全局样本 $g \in [0, 3]$ 已完全训练）；
+   - 重启时，各卡采样器直接从本地索引 1（即全局位置 4 开始）提取数据，零冗余无缝衔接。
 
 ## 实践任务：唯一代码填空题
 
@@ -139,20 +175,46 @@ assert owner_and_local_index(0, 8) == (0, 0)
 
 ### Q1 参考答案
 
-各 epoch 会重复相同伪随机排列，rank 间仍可能不重叠，但跨 epoch 的 shuffle 没变化，降低数据随机性。不能通过单 epoch 无重复测试发现。
+忘记显式调用 `DistributedSampler.set_epoch(epoch)` 会彻底破坏分布式随机洗牌机制，给模型训练埋下极其隐蔽的收敛隐患：
+1. **伪随机数种子永久冻结（RNG Seed Freezing）**：
+   - `DistributedSampler` 内部的随机置换生成算法严格依赖当前 Epoch 计数：`g = torch.Generator(); g.manual_seed(self.seed + self.epoch)`。若未在每个 Epoch 循环开头调用 `set_epoch(epoch)`，`self.epoch` 将永久保持在默认初始值 `0`；
+2. **训练样本访问轨迹的完全固化（Static Data Trajectory）**：
+   - 尽管在同一个 Epoch 内部，各个 Rank 之间的数据依然保持不重复切分，但在随后的第 2、第 10 甚至第 100 个 Epoch 中，全量数据集生成的全局置换顺序完全相同；
+   - 每张卡在每个 Epoch 获得的数据样本子集及其批次排列顺序被彻底锁死，网络在反复消化完全固定顺序与固定组合的 Mini-batches；
+3. **收敛性劣化与测试隐蔽性**：
+   - 随机梯度下降（SGD）收敛的理论基石要求数据序列具备充分的独立随机性。静态固化的样本轨迹会导致模型对特定样本出现记忆效应，极易引发过拟合与泛化能力断崖式下跌。而该 Bug 在单 Epoch 调试或短周期的冒烟测试中绝对无法被断言拦截，极难排查。
 
 ### Q2 参考答案
 
-每个 worker 拥有 dataset 副本；若 iterator 不根据 worker_info/rank 切数据，每个副本从同一源头开始。DataLoader 无法替用户代码猜测分片语义。
+`IterableDataset` 配合 `num_workers=8` 导致数据被无意重复 8 次，根源在于 PyTorch 多进程数据加载架构对流式迭代器的处理机制：
+1. **独立子进程深拷贝隔离（Process Forking & Memory Independence）**：
+   - 当 `DataLoader` 配置 `num_workers > 0` 时，PyTorch 通过 `multiprocessing` 衍生出 8 个完全独立的操作系统工作进程。每个 Worker 进程在其独立的虚拟地址空间中各自深拷贝并维护一份专属的 `dataset` 实例；
+2. **流式迭代器的“分片盲区”（Stream Iterator Blindness）**：
+   - 对于基于索引的传统 `Dataset`（Map-style），主进程中的 `BatchSampler` 集中掌控全局索引，向各个 Worker 派发互斥的样本索引切片，各 Worker 仅按 Index 读取，天然无冲突；
+   - 而对于流式 `IterableDataset`，数据是由每个 Worker 内部的 `__iter__()` 函数自主生成并推送的。若开发者未在 `__iter__()` 中通过 `torch.utils.data.get_worker_info()` 探测当前 Worker 的 `worker_id` 并主动切分数据流（例如按 Worker ID 划分文件列表或按步长交错切片），8 个子进程将全部从头开始完整遍历相同的数据流；
+3. **最终后果**：8 个子进程各自产出一份完全相同的全量数据并压入共享内存队列，导致单卡内部的数据被机械重复消费了 8 次，不仅浪费了 87.5% 的算力，更彻底破坏了数据集的真实分布。
 
 ### Q3 参考答案
 
-保存稳定数据快照上的全局 cursor/已提交范围，而不是每 rank 私有 offset；重建新分片并从全局边界继续。分布式预取中的未提交样本需要明确 at-least-once 或丢弃策略。
+在弹性训练（Elastic Training）中，当集群发生动态缩容或扩容（如总卡数从 64 卡变更为 32 卡）时，必须通过三项核心机制确保断点续训的零重复与零遗漏：
+1. **持久化全局绝对样本游标（Global Invariant Coordinate）**：
+   - 严禁在 Checkpoint 中仅记录各卡私有的局部步数（`local_step`）。因为 64 卡下的一步对应消费了 64 个全局样本，拓扑缩容到 32 卡后，原先私有的步数坐标完全丧失物理意义；
+   - 必须在 Checkpoint 中统一记录全集群原子提交的**全局样本绝对累积位置（Global Consumed Sample Cursor / Token Count）**：
+     $$G = \text{global\_step} \times \text{batch\_size} \times P_{\text{old}}$$
+2. **基于新拓扑动态重构分片几何（Dynamic Topology Re-sharding）**：
+   - 重启时，各卡读取全局游标 $G$，依据新的总卡数 $P_{\text{new}}$ 与新 Rank ID 重新推导分片规则；
+   - 采样器根据确定性置换序列，直接切除前 $G$ 个已完全提交的全局样本；
+   - 新拓扑下的各个 Rank 严格从全局第 $G$ 个样本之后重新交错切分（$\text{new\_local\_start} = \lfloor G / P_{\text{new}} \rfloor$），确保全体活跃卡的数据并集精确从 $G+1$ 处无缝向后延伸；
+3. **清空异步预取缓冲并严格以已提交 Step 对齐（Drain Prefetch Buffer）**：
+   - 训练崩溃往往发生在 Step 内部，各卡内部的 DataLoader 预取管道中可能残留数个未被前向计算读取的临时 Batch；
+   - Resume 时必须彻底清空所有 Worker 预取流，强制以“最后一次完整执行了 `optimizer.step()` 并成功落盘的全局 Step”作为截断点，实现确定性的严格 Exactly-Once 数据一致性。
 
 ## 参考资料
 
-- [torch.utils.data](https://docs.pytorch.org/docs/stable/data.html)
-- [Distributed Checkpoint](https://docs.pytorch.org/docs/stable/distributed.checkpoint.html)
+- [PyTorch DistributedSampler implementation](https://github.com/pytorch/pytorch/blob/main/torch/utils/data/distributed.py)
+- [PyTorch IterableDataset Multi-Worker Guidelines](https://pytorch.org/docs/stable/data.html#iterable-style-datasets)
+- [PyTorch Distributed Checkpoint (DCP) Design](https://pytorch.org/docs/stable/distributed.checkpoint.html)
+- [Megatron-LM Data Loading & Exact Resume Architecture](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/datasets/megatron_dataset.py)
 
 API 与平台能力会演进；部署前应按目标版本重新核对。
 :::

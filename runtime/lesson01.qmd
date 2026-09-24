@@ -22,8 +22,7 @@ jupyter: python3
 
 前置：Python、PyTorch、train 第 1～5 课、CUDA 基础。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
 
-## 核心心智模型
-
+## 核心概念与运行机制
 
 ### 核心操作与执行流程图解
 
@@ -55,29 +54,71 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 1-2：Autograd 动态计算图反向拓扑遍历与梯度累加工作流</em></p>
 
+### 1. 它是什么，解决什么问题
 
+当我们在 Python 中执行 `torch.matmul(a, b)` 或 `torch.add(x, y)` 时，PyTorch 从 Python 顶层调用到底层硬件发射对应的 CUDA 内核，中间跨越了极其复杂的底层运行时栈（Runtime Stack）。这一调用栈的核心由两大基础设施支撑：**`c10::Dispatcher` 分发器** 与 **Autograd 自动微分引擎**。
 
-### 它是什么、解决什么问题
+1. **`c10::Dispatcher` 动态分发中心**：
+   - 解决的核心问题是**多维度解耦与异构后端的零开销多路复用**。
+   - 一个张量算子在实际执行时，面临着多维度的正交状态：运算在 CPU 还是 CUDA 设备上？数据是 FP32 还是 INT8 量化类型？是否需要记录反向图（Autograd）？是否处于批量矢量化执行模式（`vmap` / `Batched`）？是否处于图编译追踪模式（`Tracer` / `FakeTensor`）？
+   - 如图 1-1 所示，`c10::Dispatcher` 摒弃了在算子内部写死庞大 `if-else` 分支的高耦合设计，采用高效的位图调度键集（`DispatchKeySet`）与函数指针查找表，将分发时延压缩在数十纳秒级别，实现了异构设备、量化、自动求导与编译器的无缝插拔。
+2. **Autograd 动态计算图引擎**：
+   - 解决的核心问题是**深度学习动态网络的前向自动图构建与反向高效链式拓扑求导**。
+   - 无论前向包含多少动态分支（Python `if` / `while` 循环），Autograd 均能以即时执行（Eager Execution）的方式按需生成包含反向梯度算子节点（`Node` / `Function`）的有向无环图（DAG），并在反向调用 `loss.backward()` 时精准完成梯度的多路聚合与叶子节点回传。
 
-PyTorch operator 经 dispatcher 按 device/dtype/backend key 选择实现；启用 grad 时 autograd 记录 Function 节点和 saved tensors，反向按依赖执行。
+### 2. 它如何工作
 
-### 数据与控制如何流动
+PyTorch 运行时的执行流涵盖了从分发器多键解包到反向就绪队列遍历的完整数据流与控制流：
 
-同一 tensor 被多条路径使用时，每条边产生局部梯度，autograd 必须在该节点所有下游贡献到达后累加，再调用其 backward。views、原地版本计数和 stream 语义共同约束正确性。
+1. **Dispatcher 的多键拆包与降级转发（Dispatch Pipeline）**：
+   - 如图 1-1 所示，当 Python 算子被调用时，系统根据输入张量的属性计算出当前的综合键集 `DispatchKeySet`（例如同时包含 `DispatchKey::AutogradCUDA` 与 `DispatchKey::CUDA`）；
+   - Dispatcher 按照严格预设的优先级栈遍历分发键。若张量标记为 `requires_grad=True`，分发器首先命中最顶层的 `AutogradCUDA` 处理函数；
+   - 在该函数内部，Autograd 引擎创建对应的反向节点（如 `AddBackward0`），并将前向计算所需的张量（Saved Tensors）通过钩子打包保存，建立起计算图的边连接关系；
+   - 随后，系统调用 `redispatch` 剥离当前处理过的 Autograd 键，分发器自动降级路由到次高优先级的 `DispatchKey::CUDA`，调用 ATen 底层 C++ 算子 `at::native::add_cuda` 真正发射 GPU 计算内核。
+2. **Autograd 反向动态拓扑遍历与 ReadyQueue（Backward Workflow）**：
+   - 如图 1-2 所示，当用户调用 `loss.backward()` 时，引擎在后台启动一个专用的反向执行引擎（`Engine::execute`），并初始化工作队列 `ReadyQueue`；
+   - 损失函数的根节点首先被推入 `ReadyQueue`；
+   - 调度线程持续从 `ReadyQueue` 中弹出已就绪的 `Node`（例如 `MulBackward0`），解包前向保存的张量，调用其 `apply()` 方法计算输入张量的局部梯度；
+   - 若梯度回传的目标张量是用户定义的模型参数（Leaf Variable），触发 `AccumulateGrad` 算子，原子更新该参数的 `.grad` 属性；
+   - 若梯度流向前驱中间节点，引擎递减该前驱节点的入度依赖计数。只有当前驱节点的所有下游依赖分支全部完成计算且梯度在节点处完成相加汇合时，该前驱节点才正式就绪并被压入 `ReadyQueue`，直至整张图遍历完毕。
 
-### 正确性条件与常见误区
+### 3. 正确性条件与常见误区
 
-叶子 `.grad` 是累加而非自动清零；原地修改 saved tensor 会触发版本错误或破坏梯度。`no_grad`、`inference_mode` 与 `detach` 的语义不同。
+- **版本计数器与原地修改检测（In-Place Modification & Version Counter）**：
+  - *核心设计*：每个 Tensor 底层由 `c10::TensorImpl` 管理，内部维护一个原子递增的整型变量 `version_counter_`；
+  - *安全契约*：若张量被正向算子保存以备反向求导（Saved for Backward），引擎记录其当时的基准版本号（`saved_version`）。若在正向计算之后、反向求导之前，用户对该张量执行了原地修改（In-Place Operation，如 `x += 1`、`x.relu_()` 或切片赋值 `x[0] = 0`），其 `version_counter_` 将发生递增；
+  - 当反向执行到对应算子解包张量时，系统触发严格断言：
+    $$\text{tensor.\_version} == \text{saved\_version}$$
+    若不相等，立即抛出 `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation`，严厉杜绝使用被篡改的数据导致静默数学错误。
+- **叶子节点梯度累加契约（Gradient Accumulation Invariant）**：
+  - 在 Autograd 设计中，参数的 `.grad` 字段在每次反向求导时是**执行原位相加（In-Place Addition）**而非直接覆盖。
+  - 这一契约是支撑大模型分布式显存受限时实现“微批次梯度累加（Gradient Accumulation over Micro-Batches）”的物理根基；但在标准训练循环中，必须在每个 Optimizer Step 之后显式调用 `optimizer.zero_grad(set_to_none=True)`，否则跨 Step 的梯度污染将导致模型发散。
+- **`no_grad()` vs. `inference_mode()` vs. `detach()`**：
+  - `torch.no_grad()`：在上下文内屏蔽 Autograd 调度键，正向不构建图，但保留版本计数器更新机制；
+  - `torch.inference_mode()`：比 `no_grad()` 更激进，完全禁用版本计数器与 View 追踪机制，极大压低开销，但产出的张量禁止离开上下文参与反向；
+  - `tensor.detach()`：创建与原张量共享底层物理 Storage 的新浅拷贝视图，但将 `grad_fn` 置为 `None`，彻底斩断与原计算图的拓扑联系。
 
-### 性能、成本与工程取舍
+### 4. 性能与工程取舍
 
-保存更多中间值降低反向重算，却增加显存；custom autograd 可控但必须通过 gradcheck，并处理非连续、混合精度和高阶梯度。
+- **前向激活保存 vs. 激活重计算（Activation Storing vs. Checkpointing）**：
+  - 全量保存激活：反向无需重复执行正向算子，计算时间最短；但显存占用随序列长度与 Transformer 层数呈线性甚至二次方剧烈膨胀，迅速导致 OOM；
+  - 激活重计算（Activation Checkpointing / Rematerialization）：在正向阶段仅保存层间边界张量，丢弃昂贵的中间注意力激活矩阵；在反向阶段按需重新执行前向算子。以增加约 30%~33% 的前向 FLOPs 为代价，释放高达 70% 的激活显存，是大模型训练不可或缺的工程杠杆。
+- **Eager 模式调度开销 vs. `torch.compile` 图编译**：
+  - 在 Eager 模式下，即便底层 CUDA 内核仅耗时 1 微秒，Python 到 Dispatcher 的多层 C++ 分发与函数指针查表开销也需消耗 1~2 微秒，导致 GPU 计算流频繁遭遇 CPU 调度气泡；
+  - `torch.compile`（基于 TorchDynamo、AOTAutograd 与 Inductor）在图级别捕获计算子图，将多个细粒度算子融合为单个 Triton 内核，完全绕过 Eager Dispatcher 的逐算子发射循环，显著提升算力占空比。
 
 ## 具体演示
 
-若 `y=x²+x³`，x 的梯度来自两条边：2x 和 3x²，必须相加。只保留最后一条会在 x=2 时得到 12 而不是 16。
-
-请先独立复述“输入 → 状态变化 → 输出/指标”，再开始填空。
+设标量损失由两条分支汇合而成：$y = f(x) + g(x) = x^2 + x^3$。
+1. 前向传播：记录计算图，输入 $x$ 同时连接至 $x^2$ 分支与 $x^3$ 分支；
+2. 反向求导链式汇聚：
+   - 沿第一条分支传回局部梯度：$\frac{\partial (x^2)}{\partial x} = 2x$；
+   - 沿第二条分支传回局部梯度：$\frac{\partial (x^3)}{\partial x} = 3x^2$；
+3. 多路梯度在叶子节点 $x$ 处执行拓扑累加：
+   $$\frac{\partial y}{\partial x} = \left.\frac{\partial (x^2)}{\partial x}\right|_{x} + \left.\frac{\partial (x^3)}{\partial x}\right|_{x} = 2x + 3x^2$$
+   设 $x = 2.0$：
+   $$\left.\frac{\partial y}{\partial x}\right|_{x=2} = 2(2) + 3(2^2) = 4 + 12 = 16.0$$
+   若调度系统存在覆盖赋值 Bug（只保留最后一条边），梯度将被错误计算为 $12.0$，导致参数更新彻底偏离最优下降方向。
 
 ## 实践任务：唯一代码填空题
 
@@ -148,20 +189,40 @@ assert accumulate_edge_grads([]) == {}
 
 ### Q1 参考答案
 
-Autograd 的 leaf accumulator 把每次反向产生的贡献累加到 `.grad`，这支持多 loss/梯度累积。训练循环必须在正确边界 `zero_grad(set_to_none=True)` 或清零，否则跨 step 污染。
+调用两次 `loss.backward()` 默认让参数 `.grad` 原位相加而非覆盖，是 PyTorch 运行时架构的原语级核心设计：
+1. **反向图终点算子绑定（AccumulateGrad Invariant）**：在 Autograd 构建的有向无环图中，每一个可求导的模型叶子参数（Leaf Variable，`requires_grad=True` 且 `is_leaf=True`）在图的汇聚端均隐式绑定了一个专用的 `AccumulateGrad` 算子节点。当反向传播计算出的梯度张量流向叶子参数时，`AccumulateGrad` 在 C++ 底层执行的是内存指针层面的原子累加（`grad_tensor.add_(current_grad)`），绝非赋值覆写；
+2. **核心工程场景支撑（Micro-Batch & Multi-Loss Pipelines）**：
+   - **微批次梯度累积（Gradient Accumulation）**：在超大模型训练或大 Batch 场景下，单卡显存无法容纳完整 Batch 的前向激活。系统将大 Batch 拆分为 $K$ 个微批次（Micro-batches），循环执行前向与 `backward()`，依赖原位累加机制在 `.grad` 中隐式完成整批梯度的数学积分，最后仅执行一次 `optimizer.step()`，在零显存膨胀代价下精确等价于超大 Batch 训练；
+   - **多目标与多损失联合优化（Multi-Objective Loss）**：当模型面临多个异构损失函数（例如主任务交叉熵与辅助对比学习损失 `loss_main.backward(retain_graph=True); loss_aux.backward()`），累加机制允许不同计算分支的梯度在叶子节点处安全叠加；
+3. **显式生命周期管理契约**：框架将梯度的重置权完全交还给用户。若不在每个 Optimizer Step 完成后显式调用 `optimizer.zero_grad(set_to_none=True)`，历史步的梯度将跨步累积，导致训练动力学彻底瓦解。
 
 ### Q2 参考答案
 
-backward 依赖 forward 时的数值。版本计数让引擎检测 saved tensor 已被改写，避免悄悄用错误值求导；某些不需要旧值的原地操作可安全，但不能凭结果看似正确判断。
+Autograd 必须维护原子版本计数器（`version_counter_`）以杜绝原地修改带来的隐蔽致命数学错误：
+1. **求导公式对前向状态的刚性依赖（Mathematical Dependency）**：深度学习中绝大多数非线性算子的导数表达式严格依赖前向传播时的局部状态数值。例如：$\text{ReLU}(x)$ 的反向掩码取决于前向时的 $x > 0$；$\text{Softmax}(x)$ 的导数直接依赖于前向生成的输出激活 $y$。Autograd 通过 `save_for_backward` 机制将这些张量的引用保存在反向节点中；
+2. **原地修改的破坏本质（In-Place Mutation Hazard）**：若用户或框架内部执行了原地操作（In-Place Operation，如 `x.add_(1)`、`x.relu_()` 或切片赋值 `x[0] = 5`），张量底层 `Storage` 中的物理数据被直接改写。若没有版本校验，反向传播执行时将直接读取被篡改后的脏数据计算梯度。更危险的是，程序不会抛出任何系统崩溃，而是在输出完全错误的虚假梯度下继续训练，导致模型精度严重衰减或无法收敛；
+3. **版本计数器的闭环防御机制**：每个 Tensor 底层的 `c10::TensorImpl` 均持有一个原子自增整型 `version_counter_`。任何原地修改都会触发版本号自增。反向节点解包张量时强制比对快照版本：若 `current_version != saved_version`，立即 Fail-Fast 抛出 `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation`，确保数学正确性的物理确定性。
 
 ### Q3 参考答案
 
-需要 dispatcher schema/实现注册、autograd 公式或 custom Function、fake/meta kernel 供 shape 推导，并按编译路径提供 decomposition/lowering；还要定义 aliasing/mutation 语义和测试。
+将一个具备 CUDA Kernel 的自定义 C++ 算子无缝接入 PyTorch 并获得 Autograd 及 `torch.compile`（TorchDynamo / Inductor）原生支持，必须完整构建以下四层接口契约：
+1. **C10 Dispatcher 算子声明与后端注册（Schema & CUDA Kernel Registration）**：
+   - 使用 `TORCH_LIBRARY(custom_ops, m)` 定义算子的函数签名与强类型 Schema（如 `custom_ops::my_gemm(Tensor a, Tensor b) -> Tensor`）；
+   - 使用 `TORCH_LIBRARY_IMPL(custom_ops, CUDA, m)` 将底层 C++/CUDA Kernel 绑定到 `DispatchKey::CUDA`，使 Eager 模式能够完成设备分发与张量解包；
+2. **Autograd 自动求导分发绑定（Autograd Function / DispatchKey::Autograd）**：
+   - 若在 Python 侧集成，继承 `torch.autograd.Function` 实现静态 `forward` 与 `backward` 方法，手动管理 `ctx.save_for_backward` 与输入梯度的推导；
+   - 若在 C++ 层面原生集成，使用 `TORCH_LIBRARY_IMPL(custom_ops, AutogradCUDA, m)` 注册专用的反向分发函数，动态构建反向 `Node` 并建立计算图拓扑边；
+3. **Meta / FakeTensor 内核注册（Shape & Dtype Propagation）**：
+   - 使用 `TORCH_LIBRARY_IMPL(custom_ops, Meta, m)` 注册 Meta Kernel。该函数仅依据输入张量的 Shape、Stride 与 Dtype 快速推导出输出张量的几何尺寸与内存布局，不分配任何 GPU 显存也不发射 CUDA Kernel。这是 `torch.compile` 在 AOTAutograd 追踪与符号推演（Symbolic Shape Analysis）阶段的核心先决条件；
+4. **Inductor 编译器 Lowering 与算子解构（Decomposition & Lowering to Triton）**：
+   - 为算子定义分解规则（`register_decomposition`），指示 AOTAutograd 如何将其解构为已有的基础 ATen 原语；或者在 PyTorch Inductor 后端注册专用的 Triton 代码生成模板（`register_lowering`），使编译器能够将该自定义算子与前后的 LayerNorm 或激活函数进行跨算子全局内核融合（Kernel Fusion）。
 
 ## 参考资料
 
 - [PyTorch autograd mechanics](https://docs.pytorch.org/docs/stable/notes/autograd.html)
-- [PyTorch documentation](https://docs.pytorch.org/docs/stable/)
+- [PyTorch C++ Dispatcher internal](https://github.com/pytorch/pytorch/blob/main/c10/core/DispatchKey.h)
+- [PyTorch Custom Operator Registration Guide](https://pytorch.org/tutorials/advanced/torch_script_custom_ops.html)
+- [PyTorch AOTAutograd & Inductor Compiler](https://docs.pytorch.org/docs/stable/torch.compiler.html)
 
 API 与平台能力会演进；部署前应按目标版本重新核对。
 :::
