@@ -1,0 +1,1811 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.10.18">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解 – HPC / AI Infra 面试课程</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-5a1953863e1f72ef3b996ef827f01ca7.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-c23ae8bcde1ab63edce3c632584dd13f.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7381337e273cda72aa4f884aa8562a50.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-c23ae8bcde1ab63edce3c632584dd13f.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+<script src="../site_libs/quarto-diagram/mermaid.min.js"></script>
+<script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
+<link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
+
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
+
+<link rel="stylesheet" href="../styles.css">
+</head>
+
+<body class="nav-sidebar docked nav-fixed quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="../index.html">
+    <span class="navbar-title">HPC &amp; AI Infra</span>
+    </a>
+  </div>
+            <div id="quarto-search" class="" title="Search"></div>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarCollapse" aria-controls="navbarCollapse" role="menu" aria-expanded="false" aria-label="Toggle navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+  <span class="navbar-toggler-icon"></span>
+</button>
+          <div class="collapse navbar-collapse" id="navbarCollapse">
+            <ul class="navbar-nav navbar-nav-scroll me-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="../index.html"> 
+<span class="menu-text">首页</span></a>
+  </li>  
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu-" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">核心主线</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu-">    
+        <li>
+    <a class="dropdown-item" href="../train/index.html">
+ <span class="dropdown-text">训练系统 (14课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cuda/index.html">
+ <span class="dropdown-text">CUDA Kernel (14课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cutlass/index.html">
+ <span class="dropdown-text">CUTLASS / CuTe (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../triton/index.html">
+ <span class="dropdown-text">Triton Kernel (10课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../mlir/index.html">
+ <span class="dropdown-text">MLIR 编译器 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../rl/index.html">
+ <span class="dropdown-text">强化学习 (12课)</span></a>
+  </li>  
+    </ul>
+  </li>
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu--1" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">补充线</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu--1">    
+        <li>
+    <a class="dropdown-item" href="../inference/index.html">
+ <span class="dropdown-text">推理引擎 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../runtime/index.html">
+ <span class="dropdown-text">框架运行时 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../platform/index.html">
+ <span class="dropdown-text">集群平台 (8课)</span></a>
+  </li>  
+    </ul>
+  </li>
+</ul>
+            <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/hsthanb4/hpclearning"> <i class="bi bi-github" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+</ul>
+          </div> <!-- /navcollapse -->
+            <div class="quarto-navbar-tools">
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+</div>
+      </div> <!-- /container-fluid -->
+    </nav>
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../cuda/lesson13_deepgemm.html">第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解</a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">CUDA Kernel 面试主线</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson01_vector_add.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 1 课：线程映射与 Grid-Stride Loop</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson02_reduce_sum.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 2 课：Warp/Block 归约与两阶段求和</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson03_gemv.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 3 课：GEMV 与行级并行</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson04_rmsnorm.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 4 课：RMSNorm：统计量与两遍访问</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson05_layernorm.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 5 课：LayerNorm：均值、方差与数值稳定</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson06_softmax_naive.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 6 课：稳定 Softmax 与朴素复杂度</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson07_online_softmax.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 7 课：Online Softmax 与可结合状态</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson08_transpose_naive.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 8 课：朴素转置与合并访存</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson09_transpose_tiled.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 9 课：共享内存转置与 Bank Conflict</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson10_gemm_tiled.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 10 课：共享内存 Tiled GEMM</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson11_silu.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 11 课：SiLU 与算子融合</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson12_argmax.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 12 课：ArgMax 对归约与确定性</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson13_deepgemm.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text">第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson14_deepep.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 14 课：DeepSeek DeepEP 核心架构与 MoE 专家并行通信算子拆解</span></a>
+  </div>
+</li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">本页目录</h2>
+   
+  <ul>
+  <li><a href="#本课目标与完成标准" id="toc-本课目标与完成标准" class="nav-link active" data-scroll-target="#本课目标与完成标准">本课目标与完成标准</a></li>
+  <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
+  <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
+  <ul class="collapse">
+  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
+  <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
+  <li><a href="#hopper-sm90-硬件微架构机制剖析" id="toc-hopper-sm90-硬件微架构机制剖析" class="nav-link" data-scroll-target="#hopper-sm90-硬件微架构机制剖析">2. Hopper (SM90) 硬件微架构机制剖析</a></li>
+  <li><a href="#deepgemm-核心代码架构逐行拆解" id="toc-deepgemm-核心代码架构逐行拆解" class="nav-link" data-scroll-target="#deepgemm-核心代码架构逐行拆解">3. DeepGEMM 核心代码架构逐行拆解</a></li>
+  </ul></li>
+  <li><a href="#实践任务唯一代码填空题" id="toc-实践任务唯一代码填空题" class="nav-link" data-scroll-target="#实践任务唯一代码填空题">实践任务：唯一代码填空题</a>
+  <ul class="collapse">
+  <li><a href="#练习说明" id="toc-练习说明" class="nav-link" data-scroll-target="#练习说明">练习说明</a></li>
+  <li><a href="#检查方法" id="toc-检查方法" class="nav-link" data-scroll-target="#检查方法">检查方法</a></li>
+  <li><a href="#q1" id="toc-q1" class="nav-link" data-scroll-target="#q1">Q1</a></li>
+  <li><a href="#q2" id="toc-q2" class="nav-link" data-scroll-target="#q2">Q2</a></li>
+  <li><a href="#q3" id="toc-q3" class="nav-link" data-scroll-target="#q3">Q3</a></li>
+  </ul></li>
+  <li><a href="#评分与通过规则" id="toc-评分与通过规则" class="nav-link" data-scroll-target="#评分与通过规则">评分与通过规则</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<div class="quarto-title-block"><div><h1 class="title">第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解</h1><button type="button" class="btn code-tools-button dropdown-toggle" id="quarto-code-tools-menu" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi"></i> Code</button><ul class="dropdown-menu dropdown-menu-end" aria-labelelledby="quarto-code-tools-menu"><li><a id="quarto-show-all-code" class="dropdown-item" href="javascript:void(0)" role="button">Show All Code</a></li><li><a id="quarto-hide-all-code" class="dropdown-item" href="javascript:void(0)" role="button">Hide All Code</a></li><li><hr class="dropdown-divider"></li><li><a id="quarto-view-source" class="dropdown-item" href="javascript:void(0)" role="button">View Source</a></li></ul></div></div>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-simple callout-note">
+<div class="callout-body d-flex">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-body-container">
+<p><strong>参考答案版</strong>：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</p>
+</div>
+</div>
+</div>
+<section id="本课目标与完成标准" class="level2">
+<h2 class="anchored" data-anchor-id="本课目标与完成标准">本课目标与完成标准</h2>
+<p>学完后你应能： - 深入推演 DeepSeek-V3 核心算子库 DeepGEMM 的设计动机，说清其相比传统 CUTLASS 3.x / cuBLASLt 的架构取舍； - 掌握 Hopper 架构（SM90）的核心指令级原语：Tensor Memory Accelerator (TMA)、Warp-Group MMA (<code>wgmma.mma_async</code>) 与 <code>mbarrier</code> 硬件事务屏障； - 彻底理清 Fine-grained Block-wise FP8 量化（<span class="math inline">\(1 \times 128\)</span> 细粒度分块缩放）的数学原理与高效 Epilogue 反量化实现； - 掌握 MoE 场景下 Contiguous Grouped GEMM 与 Masked Grouped GEMM 的调度机制及其与 DeepEP 通信库的协同。</p>
+<p>通过必须同时满足： - 独立补齐本课唯一的代码填空题（Hopper WGMMA + 细粒度反量化分块模拟内核），并通过给定测试断言； - 三个问答题均说明因果链与硬件微架构状态迁移，而不是只报术语； - 能指出至少一个正确性边界和一个性能瓶颈取舍； - 总分不低于 8/10，且没有一票否决级概念错误。</p>
+</section>
+<section id="前置关系" class="level2">
+<h2 class="anchored" data-anchor-id="前置关系">前置关系</h2>
+<ul>
+<li>课程前置：<a href="../cuda/lesson10_gemm_tiled.html">第 10 课：共享内存 Tiled GEMM</a>、CUDA 异步拷贝机制、计算机体系结构（SM/Shared Memory/Tensor Core）。</li>
+<li>本课在路线中的作用：作为算子核心主线的现代化高阶实战课，将经典的 Shared Memory Tiling 跨越升级到现代 Hopper (SM90) / Blackwell (SM100) 的无寄存器搬运异步流水线与 MoE 定制 Grouped GEMM。</li>
+</ul>
+</section>
+<section id="核心心智模型" class="level2">
+<h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
+<section id="核心操作与执行流程图解" class="level3">
+<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart TD
+    subgraph HopperPipeline["DeepGEMM Hopper (SM90) 异步生产者-消费者流水线"]
+        direction TB
+        subgraph Producer["生产者：1 个 TMA Warp Group (128 线程)"]
+            TMA_A["TMA 异步批量读取 Matrix A&lt;br&gt;(cp.async.bulk.tensor)"]
+            TMA_B["TMA 异步批量读取 Matrix B&lt;br&gt;(cp.async.bulk.tensor)"]
+            TMA_SF["TMA 异步加载 1x128 缩放因子 Scale Factors"]
+            MBarrier_Tx["mbarrier.arrive.expect_tx&lt;br&gt;(向硬件事务屏障注册字节数)"]
+            TMA_A &amp; TMA_B &amp; TMA_SF --&gt; MBarrier_Tx
+        end
+
+        subgraph SMEM["片上共享内存 (SMEM 多级循环缓冲区: kNumStages = 3~4)"]
+            Smem_A["SMem A Tile [BLOCK_M, 128] FP8"]
+            Smem_B["SMem B Tile [BLOCK_N, 128] FP8"]
+            Smem_SF["SMem Scale Factors FP32"]
+        end
+
+        subgraph Consumer["消费者：Math Warp Groups (128/256 线程)"]
+            MBarrier_Wait["mbarrier.try_wait.parity&lt;br&gt;(非阻塞硬件轮询事务完成)"]
+            WGMMA["wgmma.mma_async&lt;br&gt;(Tensor Core 直接从 SMEM 读入 A/B, 累加至 FP32 寄存器)"]
+            Epilogue["细粒度反量化 Epilogue:&lt;br&gt;Reg D = D * SF_A * SF_B -&gt; BF16 写回 GMEM"]
+            MBarrier_Wait --&gt; WGMMA --&gt; Epilogue
+        end
+
+        Producer --&gt;|硬件异步直通写入| SMEM
+        SMEM --&gt;|SS 模式零寄存器开销| Consumer
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 13-1：DeepGEMM 在 Hopper 架构下的 TMA 硬件直连与 WGMMA 异步多级流水线架构</em>
+</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart LR
+    subgraph MoELayouts["DeepGEMM MoE 分组矩阵乘（Grouped GEMM）两类执行模式"]
+        direction TB
+        subgraph Contiguous["Contiguous Layout (训练 Forward/Backward &amp; 推理 Prefill)"]
+            Tokens["动态 Token 按 Expert 拼接 (M 维不规则)"] --&gt; Align["M 维按 Tile 对齐 (M-alignment)"]
+            Align --&gt; KContig["K-Grouped TN / M-Grouped NT 算子执行"]
+        end
+
+        subgraph Masked["Masked Layout (推理 Decoding + CUDA Graph)"]
+            FixedBuf["固定最大容量静态显存缓冲 (Zero-Allocation)"] --&gt; MaskTensor["掩码张量 (Valid Mask Tensor)"]
+            MaskTensor --&gt; DeepEP_In["接收 DeepEP 低延迟通信产物"]
+            DeepEP_In --&gt; MaskedKernel["m_grouped_fp8_gemm_nt_masked 仅计算有效 Token"]
+        end
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 13-2：DeepGEMM 面向 MoE 的 Contiguous 与 Masked 两大布局设计对比</em>
+</p>
+</section>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p><strong>DeepGEMM</strong> 是 DeepSeek 专为大语言模型（特别是 DeepSeek-V3 / V2.5 / R1 等超大规模 MoE 模型）研发的开源超高性能 Tensor Core GEMM 算子库。</p>
+<section id="为什么现有开源库cutlass-3.x-cublaslt不够用" class="level4">
+<h4 class="anchored" data-anchor-id="为什么现有开源库cutlass-3.x-cublaslt不够用">(1) 为什么现有开源库（CUTLASS 3.x / cuBLASLt）不够用？</h4>
+<ol type="1">
+<li><strong>CUTLASS 3.x 极其庞大的 C++ 模板膨胀与编译噩梦</strong>：
+<ul>
+<li>传统 CUTLASS 依赖极深的模板嵌套与代数表达（Layout、Tile、Iterator、Collective Builder），仅编译一组 GEMM 内核通常需要数分钟乃至数十分钟；</li>
+<li>工业级二次开发、定制特殊访存或微架构调优时，工程师深陷模板推导黑洞，调试门槛极高。</li>
+</ul></li>
+<li><strong>DeepSeek-V3 细粒度分块量化（<span class="math inline">\(1 \times 128\)</span> Block-wise FP8）缺乏原生极致优化</strong>：
+<ul>
+<li>常规 TensorRT-LLM 或 cuBLASLt 主要面向 <strong>Tensor-wise（整张量单标量缩放）</strong> 或 <strong>Channel-wise（逐通道缩放）</strong>；</li>
+<li>DeepSeek-V3 为了在 FP8 下保持与 BF16 无损的数学精度，提出了 <strong><span class="math inline">\(1 \times 128\)</span> 的 Block-wise Fine-grained Scaling</strong>：矩阵在 <span class="math inline">\(K\)</span> 维度每 128 个元素划分为一个独立 Block，拥有专属的 FP32/UE8M0 缩放系数。这要求 GEMM 内核的 Epilogue 必须在极短时间内完成多维缩放反量化，cuBLASLt 无法原生内联融合。</li>
+</ul></li>
+<li><strong>MoE 解码（Decoding）与 CUDA Graph 的静态分配冲突</strong>：
+<ul>
+<li>在推理 Decode 阶段，各 Expert 分配到的 Token 数量极小且每步动态变化；</li>
+<li>若使用传统变长 Grouped GEMM，CPU 必须每步重新统计各专家 Token 偏移量并下发 Kernel 参数，<strong>彻底打破 CUDA Graph 捕获机制</strong>，带来沉重的 CPU Launch 延迟。</li>
+</ul></li>
+</ol>
+</section>
+<section id="deepgemm-的破局设计" class="level4">
+<h4 class="anchored" data-anchor-id="deepgemm-的破局设计">(2) DeepGEMM 的破局设计</h4>
+<ul>
+<li><strong>Radical KISS 原则</strong>：完全摒弃 CUTLASS 繁重的类层次结构，精炼出不到数千行的自包含代码，通过轻量级 C++ JIT（即时编译）模块在运行时极速加载，免去安装时的预编译开销；</li>
+<li><strong>原生拥抱 Hopper 硬件原语</strong>：深度利用 SM90 硬件级 TMA（张量内存加速器）与 WGMMA 指令，在 H800/H100 上跑出高达 <strong>1550 TFLOPS（逼近硬件理论极限的 85%~90%）</strong>；</li>
+<li><strong>双模 MoE Grouped GEMM 支持</strong>：
+<ul>
+<li><code>Contiguous</code>：用于训练前向/反向与推理 Prefill，连续内存拼接，算力利用率最大化；</li>
+<li><code>Masked</code>：用于推理 Decode，配合 DeepEP 零 CPU 开销静态捕获，以 Mask 标记有效 Token，完全兼容 CUDA Graph。</li>
+</ul></li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="hopper-sm90-硬件微架构机制剖析" class="level3">
+<h3 class="anchored" data-anchor-id="hopper-sm90-硬件微架构机制剖析">2. Hopper (SM90) 硬件微架构机制剖析</h3>
+<p>要真正看懂 DeepGEMM 的源码，必须理解 Hopper 架构相对于 Ampere 架构发生的三大革命性跃迁：</p>
+<section id="tma-tensor-memory-accelerator异步硬件批量搬运" class="level4">
+<h4 class="anchored" data-anchor-id="tma-tensor-memory-accelerator异步硬件批量搬运">(1) TMA (Tensor Memory Accelerator)：异步硬件批量搬运</h4>
+<ul>
+<li><strong>Ampere 痛点</strong>：在 Ampere（SM80）中，虽然引入了 <code>cp.async</code>，但每个线程仍需显式计算地址偏移，执行指令发射。</li>
+<li><strong>Hopper 创新</strong>：TMA 是片上独立的专用硬件单元。线程只需配置一个 <code>cute::TmaDescriptor</code>（包含张量基地址、形状、跨度、分块尺寸及 Swizzle 模式），随后仅需由单个线程发起一条 <code>cp.async.bulk.tensor</code> 指令，硬件直接将多维张量瓦片从全局显存（Global Memory）搬运至共享内存（Shared Memory），<strong>全程完全不占用 SM 通用寄存器和 ALU 算力</strong>！</li>
+</ul>
+</section>
+<section id="wgmma-wgmma.mma_asyncwarp-group-级异步矩阵乘" class="level4">
+<h4 class="anchored" data-anchor-id="wgmma-wgmma.mma_asyncwarp-group-级异步矩阵乘">(2) WGMMA (<code>wgmma.mma_async</code>)：Warp-Group 级异步矩阵乘</h4>
+<ul>
+<li><strong>Ampere 痛点</strong>：<code>mma.sync</code> 是 Warp 级同步指令，线程必须先从 SMEM 把数据显式 <code>ldmatrix</code> 加载到通用寄存器（Register File），消耗大量寄存器配额，极易导致寄存器溢出（Spilling）而降低 Occupancy。</li>
+<li><strong>Hopper 创新</strong>：WGMMA 提升至 <strong>Warp-Group（4 个 Warp，共 128 个线程）</strong> 协同粒度。更关键的是，它支持 <strong>SS（Shared-Shared）寻址模式</strong>：Tensor Core 直接从 Shared Memory 读取矩阵 A 与矩阵 B 的切片执行点积，<strong>中间完全跳过通用寄存器</strong>！仅输出累加矩阵 <span class="math inline">\(D\)</span> 保存在 FP32 寄存器中，极大节省了片上寄存器开销。</li>
+</ul>
+</section>
+<section id="生产者-消费者解耦producer-consumer-splitting与-mbarrier" class="level4">
+<h4 class="anchored" data-anchor-id="生产者-消费者解耦producer-consumer-splitting与-mbarrier">(3) 生产者-消费者解耦（Producer-Consumer Splitting）与 <code>mbarrier</code></h4>
+<p>DeepGEMM 将一个 ThreadBlock（例如 256 或 384 线程）进行角色解耦： - <strong>生产者（TMA Warp-Group，128 线程）</strong>：负责调度 TMA 硬件发起下一阶段的 A、B 及 Scale Factor 数据预取，并在硬件事务屏障（<code>ClusterTransactionBarrier</code>）上注册预期传输字节数（<code>expect_tx</code>）； - <strong>消费者（Math Warp-Groups，128 或 256 线程）</strong>：通过 <code>mbarrier.try_wait.parity</code> 轮询硬件屏障。一旦 TMA 数据到位，立即执行 <code>wgmma.mma_async</code>，实现极致的多级流水掩盖（<span class="math inline">\(k\text{NumStages} = 3 \sim 4\)</span>）。</p>
+<hr>
+</section>
+</section>
+<section id="deepgemm-核心代码架构逐行拆解" class="level3">
+<h3 class="anchored" data-anchor-id="deepgemm-核心代码架构逐行拆解">3. DeepGEMM 核心代码架构逐行拆解</h3>
+<p>以下代码节选自 DeepGEMM 核心源码 <a href="file:///Users/wujie/hpclearning/cuda/DeepGEMM/deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh"><code>sm90_fp8_gemm_1d1d.cuh</code></a>，展现其关键骨架：</p>
+<pre class="cuda"><code>// DeepGEMM: TMA 与 WGMMA 核心主循环骨架
+#pragma once
+#include &lt;deep_gemm/ptx/tma.cuh&gt;
+#include &lt;deep_gemm/ptx/wgmma.cuh&gt;
+
+template &lt;uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumStages&gt;
+__device__ void gemm_loop(
+    const cute::TmaDescriptor&amp; tensor_map_a,
+    const cute::TmaDescriptor&amp; tensor_map_b,
+    float* smem_sfa, float* smem_sfb,
+    uint32_t k_tiles) {
+
+    // 1. 硬件事务屏障初始化
+    extern __shared__ char smem_raw[];
+    auto* barriers = reinterpret_cast&lt;cutlass::arch::ClusterTransactionBarrier*&gt;(smem_raw);
+
+    // 2. 区分生产者（TMA）与消费者（Math）
+    const uint32_t warp_group_idx = threadIdx.x / 128;
+    const bool is_producer = (warp_group_idx == 0);
+
+    #pragma unroll 1
+    for (uint32_t k = 0; k &lt; k_tiles; ++k) {
+        uint32_t stage = k % kNumStages;
+
+        if (is_producer &amp;&amp; threadIdx.x == 0) {
+            // 生产者主线程：设置本阶段期望接收的 TMA 字节数
+            uint32_t tx_bytes = (BLOCK_M * BLOCK_K + BLOCK_N * BLOCK_K) * sizeof(__nv_fp8_e4m3);
+            ptx::mbarrier_arrive_and_set_tx(&amp;barriers[stage], tx_bytes);
+
+            // 发起 TMA 异步多维拷贝
+            ptx::tma_copy_2d(tensor_map_a, &amp;barriers[stage], stage, k);
+            ptx::tma_copy_2d(tensor_map_b, &amp;barriers[stage], stage, k);
+        }
+
+        if (!is_producer) {
+            // 消费者：等待当前 Stage 数据加载完毕（硬件屏障就绪）
+            ptx::mbarrier_wait(&amp;barriers[stage], k / kNumStages);
+
+            // 消费者：发射 WGMMA 指令（SS 模式：直接自 SMEM 计算并累加到寄存器 D）
+            wgmma::FP8MMA&lt;BLOCK_N&gt;::wgmma(
+                desc_a[stage], desc_b[stage], accum_d, /*scale_d=*/(k != 0)
+            );
+        }
+    }
+}</code></pre>
+<hr>
+</section>
+</section>
+<section id="实践任务唯一代码填空题" class="level2">
+<h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
+<section id="练习说明" class="level3">
+<h3 class="anchored" data-anchor-id="练习说明">练习说明</h3>
+<p>在不支持真实 Hopper 物理 GPU 的模拟环境或静态代码审查中，我们需要深刻理解其<strong>分块细粒度反量化逻辑</strong>与<strong>算子数值等价性</strong>。</p>
+<p>请实现一个<strong>细粒度分块量化 GEMM 模拟器（Block-wise FP8 GEMM with 1x128 Fine-grained Dequantization）</strong>： - 输入矩阵 <span class="math inline">\(A \in \mathbb{R}^{M \times K}\)</span> 与矩阵 <span class="math inline">\(B \in \mathbb{R}^{N \times K}\)</span> 采用 FP8 E4M3 数值格式（在练习中用低精度浮点模拟）； - <span class="math inline">\(K\)</span> 维度按 <span class="math inline">\(128\)</span> 元素切分成若干 Block。每个 Block 拥有一个对应的缩放因子 <span class="math inline">\(S_A \in \mathbb{R}^{M \times (K/128)}\)</span> 与 <span class="math inline">\(S_B \in \mathbb{R}^{N \times (K/128)}\)</span>； - 真实数学计算：对于分块 <span class="math inline">\(b \in [0, K/128 - 1]\)</span>，子块点积结果累加后，需乘上对应的缩放标量：<span class="math inline">\(S_A[i, b] \times S_B[j, b]\)</span>； - 请补齐缺失的循环步进与反量化数学逻辑。</p>
+<p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
+<div id="deepgemm_exercise" class="cell" data-course_role="exercise" data-execution_count="1">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fine_grained_block_gemm_simulation(A_fp8, B_fp8, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>):</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="co">    模拟 DeepGEMM 的 1x128 细粒度 Block-wise FP8 GEMM 计算流</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="co">    A_fp8: [M, K]  (E4M3 量化整型或低精度模拟)</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="co">    B_fp8: [N, K]  (E4M3 量化整型或低精度模拟，注意 B 为 Transposed 存储)</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="co">    S_A:   [M, K // block_k]  (FP32 缩放因子)</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="co">    S_B:   [N, K // block_k]  (FP32 缩放因子)</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="co">    return: D [M, N] FP32 结果</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> A_fp8.shape</span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>    N, K_b <span class="op">=</span> B_fp8.shape</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">==</span> K_b, <span class="st">"K dimension mismatch"</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">%</span> block_k <span class="op">==</span> <span class="dv">0</span>, <span class="st">"K must be divisible by block_k"</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> K <span class="op">//</span> block_k</span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>    D <span class="op">=</span> np.zeros((M, N), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 模拟 Hopper 内核外层循环：逐个 Block_K 推进并进行细粒度反量化累加</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(num_blocks):</span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>        k_start <span class="op">=</span> b <span class="op">*</span> block_k</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>        k_end <span class="op">=</span> ______</span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 提取当前 128-channel 瓦片</span></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>        A_tile <span class="op">=</span> A_fp8[:, k_start:k_end]  <span class="co"># [M, block_k]</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>        B_tile <span class="op">=</span> B_fp8[:, k_start:k_end]  <span class="co"># [N, block_k]</span></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 1. 执行片上 Tile 点积累加: Tile_Acc = A_tile @ B_tile.T  -&gt; [M, N]</span></span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        tile_acc <span class="op">=</span> np.matmul(A_tile, B_tile.T)</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 2. 提取当前 Block 的缩放因子外积: scale_tile = S_A[:, b:b+1] * S_B[:, b:b+1].T -&gt; [M, N]</span></span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>        scale_tile <span class="op">=</span> ______</span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 3. 将反量化后的局部瓦片累加至全局输出矩阵 D</span></span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>        D <span class="op">+=</span> ______</span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> D</span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a><span class="co"># 测试用例验证</span></span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>np.random.seed(<span class="dv">42</span>)</span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>M, N, K <span class="op">=</span> <span class="dv">128</span>, <span class="dv">64</span>, <span class="dv">256</span></span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>block_k <span class="op">=</span> <span class="dv">128</span></span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a><span class="co"># 构造模拟输入</span></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>A_sim <span class="op">=</span> np.random.randint(<span class="op">-</span><span class="dv">10</span>, <span class="dv">10</span>, size<span class="op">=</span>(M, K)).astype(np.float32)</span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>B_sim <span class="op">=</span> np.random.randint(<span class="op">-</span><span class="dv">10</span>, <span class="dv">10</span>, size<span class="op">=</span>(N, K)).astype(np.float32)</span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>S_A <span class="op">=</span> np.random.uniform(<span class="fl">0.01</span>, <span class="fl">0.05</span>, size<span class="op">=</span>(M, K <span class="op">//</span> block_k)).astype(np.float32)</span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>S_B <span class="op">=</span> np.random.uniform(<span class="fl">0.01</span>, <span class="fl">0.05</span>, size<span class="op">=</span>(N, K <span class="op">//</span> block_k)).astype(np.float32)</span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a><span class="co"># 正确标准数学对照</span></span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>ref_D <span class="op">=</span> np.zeros((M, N), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(K <span class="op">//</span> block_k):</span>
+<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>    A_sub <span class="op">=</span> A_sim[:, b<span class="op">*</span>block_k : (b<span class="op">+</span><span class="dv">1</span>)<span class="op">*</span>block_k] <span class="op">*</span> S_A[:, b:b<span class="op">+</span><span class="dv">1</span>]</span>
+<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a>    B_sub <span class="op">=</span> B_sim[:, b<span class="op">*</span>block_k : (b<span class="op">+</span><span class="dv">1</span>)<span class="op">*</span>block_k] <span class="op">*</span> S_B[:, b:b<span class="op">+</span><span class="dv">1</span>]</span>
+<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>    ref_D <span class="op">+=</span> np.matmul(A_sub, B_sub.T)</span>
+<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>out_D <span class="op">=</span> fine_grained_block_gemm_simulation(A_sim, B_sim, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>)</span>
+<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(out_D, ref_D, atol<span class="op">=</span><span class="fl">1e-5</span>), <span class="ss">f"Max difference: </span><span class="sc">{</span>np<span class="sc">.</span><span class="bu">max</span>(np.<span class="bu">abs</span>(out_D <span class="op">-</span> ref_D))<span class="sc">}</span><span class="ss">"</span></span>
+<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"DeepGEMM 细粒度分块量化模拟测试通过！"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+</section>
+<section id="检查方法" class="level3">
+<h3 class="anchored" data-anchor-id="检查方法">检查方法</h3>
+<p>运行脚本验证断言通过；核对 <code>num_blocks</code> 累加与数学基准的一致性。</p>
+</section>
+<section id="q1" class="level3">
+<h3 class="anchored" data-anchor-id="q1">Q1</h3>
+<p>为什么 DeepSeek-V3 选择 <span class="math inline">\(1 \times 128\)</span> 的 Block-wise FP8 量化，而不是直接沿用整个 Tensor 共享一个 Scale（Tensor-wise）？这对 Hopper WGMMA 硬件执行提出了什么挑战？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+<section id="q2" class="level3">
+<h3 class="anchored" data-anchor-id="q2">Q2</h3>
+<p>在 Hopper 架构中，WGMMA 指令的“SS（Shared-to-Shared）”模式与 Ampere 架构下的 <code>ldmatrix</code> + <code>mma.sync</code> 相比，消除了哪些微架构开销？为什么能大幅提升寄存器利用率和算子性能？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+<section id="q3" class="level3">
+<h3 class="anchored" data-anchor-id="q3">Q3</h3>
+<p>在 MoE 推理的 Decoding 阶段，DeepGEMM 为什么专门设计了 <code>m_grouped_fp8_gemm_nt_masked</code> 算子？为什么变长 Contiguous Grouped GEMM 无法与 CUDA Graph 协同工作？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+</section>
+<section id="评分与通过规则" class="level2">
+<h2 class="anchored" data-anchor-id="评分与通过规则">评分与通过规则</h2>
+<ul>
+<li>代码 4 分：正确填补 <code>k_end</code>、<code>scale_tile</code> 与 <code>D</code> 累加逻辑并通过断言；</li>
+<li>Q1～Q3 各 2 分：必须从算子精度下溢、寄存器/访存层次、CUDA Graph 静态内存模型等本质因果链回答；</li>
+<li>一票否决：无法讲清 WGMMA 与 TMA 的分工，或混淆 Tensor-wise 与 Block-wise 量化。</li>
+</ul>
+<div class="callout callout-style-default callout-tip no-icon callout-titled" title="💡 点击展开参考答案与详细代码实现">
+<div class="callout-header d-flex align-content-center collapsed" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon no-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>💡 点击展开参考答案与详细代码实现
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-1" class="callout-1-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<section id="参考答案仅-answer-分支" class="level2">
+<h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
+<div id="deepgemm_solution" class="cell" data-course_role="solution" data-execution_count="2">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fine_grained_block_gemm_simulation(A_fp8, B_fp8, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>):</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> A_fp8.shape</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    N, K_b <span class="op">=</span> B_fp8.shape</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">==</span> K_b, <span class="st">"K dimension mismatch"</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">%</span> block_k <span class="op">==</span> <span class="dv">0</span>, <span class="st">"K must be divisible by block_k"</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> K <span class="op">//</span> block_k</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    D <span class="op">=</span> np.zeros((M, N), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(num_blocks):</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>        k_start <span class="op">=</span> b <span class="op">*</span> block_k</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>        k_end <span class="op">=</span> (b <span class="op">+</span> <span class="dv">1</span>) <span class="op">*</span> block_k</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 提取当前 128-channel 瓦片</span></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>        A_tile <span class="op">=</span> A_fp8[:, k_start:k_end]  <span class="co"># [M, block_k]</span></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>        B_tile <span class="op">=</span> B_fp8[:, k_start:k_end]  <span class="co"># [N, block_k]</span></span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 1. 执行片上 Tile 点积累加</span></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>        tile_acc <span class="op">=</span> np.matmul(A_tile, B_tile.T)</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 2. 提取当前 Block 的缩放因子外积 (利用广播生成 [M, N])</span></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        scale_tile <span class="op">=</span> S_A[:, b:b<span class="op">+</span><span class="dv">1</span>] <span class="op">*</span> S_B[:, b:b<span class="op">+</span><span class="dv">1</span>].T</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 3. 反量化并累加</span></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>        D <span class="op">+=</span> tile_acc <span class="op">*</span> scale_tile</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> D</span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="co"># 执行验证</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>out_D <span class="op">=</span> fine_grained_block_gemm_simulation(A_sim, B_sim, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>)</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(out_D, ref_D, atol<span class="op">=</span><span class="fl">1e-5</span>)</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"答案执行验证 100% 通过！"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+<section id="q1-参考答案" class="level3">
+<h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
+<ol type="1">
+<li><strong>数值精度与动态范围（Dynamic Range）</strong>： FP8（E4M3 格式）的有效动态范围极小（仅 8 个指数位与尾数位，绝对值最大仅 448，精度显著低于 BF16/FP16）。大模型各激活通道间存在严重的离群值（Outliers）。若采用 Tensor-wise 单一缩放因子，为了容纳极大离群值，缩放系数必须非常大，导致绝大多数正常数值下溢变为 0，引起灾难性精度崩塌。<span class="math inline">\(1 \times 128\)</span> 细粒度分块量化将缩放局限在 128 个 Channel 内部，实现了极高的局部信噪比。</li>
+<li><strong>对 Hopper WGMMA 的挑战</strong>： 标准 WGMMA 的累加器工作在数学上的连续点积模式。在 <span class="math inline">\(1 \times 128\)</span> 模式下，点积不能无休止地在一个循环内跨 Block 累加，或者必须在 Epilogue 阶段将乘积拆解。DeepGEMM 的极致优化在于：将 <span class="math inline">\(K\)</span> 维分块瓦片大小（<code>BLOCK_K</code>）精准绑定为 <span class="math inline">\(128\)</span>。每个 WGMMA 刚好计算完这 128 个元素后，由消费者线程直接在寄存器中乘以对应的 <code>Scale_A * Scale_B</code>，使得点积累加与反量化严格同步，杜绝了中间精度的溢出。</li>
+</ol>
+</section>
+<section id="q2-参考答案" class="level3">
+<h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
+<ol type="1">
+<li><strong>彻底消除寄存器往返搬运（Zero Register Allocation for Operands）</strong>： Ampere 的流程是：<code>Global Memory -&gt; (cp.async) -&gt; SMEM -&gt; (ldmatrix) -&gt; Registers -&gt; (mma.sync) -&gt; Registers</code>。A 和 B 矩阵必须同时常驻在寄存器堆中，每个线程需要几十甚至上百个寄存器存放输入操作数。 Hopper WGMMA 的 SS 模式是：<code>Global Memory -&gt; (TMA) -&gt; SMEM -&gt; (wgmma.mma_async) -&gt; Registers(仅存放累加器 D)</code>。矩阵 A 和 B 的输入操作数永远停留在 SMEM，Tensor Core 直接通过硬件总线并发抓取 SMEM 数据进行 FMA。</li>
+<li><strong>性能与 Occupancy 飞跃</strong>： 寄存器占用量骤降 60% 以上，使得每个 SM 可以容纳更多并发活跃的 ThreadBlock（提升 Occupancy）。同时完全消除了 <code>ldmatrix</code> 指令的发射开销，解除了 Warp Scheduler 的指令发射槽瓶颈。</li>
+</ol>
+</section>
+<section id="q3-参考答案" class="level3">
+<h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
+<ol type="1">
+<li><strong>CUDA Graph 核心不变性原理</strong>： CUDA Graph 依赖“静态执行图”消除 CPU Launch 开销。在 Graph 捕获期间，所有 Kernel 的 Launch 参数、输入输出指针、Grid/Block 维度必须完全固化，执行期不得发起任何主机端动态内存分配或 CPU-GPU 间的同步（如根据各专家实际 Token 偏移重算元数据）。</li>
+<li><strong>Masked 布局解决动态偏移</strong>： 在 Decode 阶段，每个 GPU 每步分配给各个 Expert 的 Token 数完全动态不可预知。<code>m_grouped_fp8_gemm_nt_masked</code> 预先分配满足最大并发 Token 长度的静态 Buffer。通信库 DeepEP 将收到的数据直接散列在固定 Slot 中，并生成一份 0/1 Mask 张量。Kernel 在执行时遍历固定网格，仅在 <code>mask[token] == 1</code> 时执行真实计算，跳过无效分块，在完全不打断 CUDA Graph 静态回放的前提下完美适配 MoE 动态路由。</li>
+</ol>
+</section>
+</section>
+<section id="面试高频追问与工业级优化扩展" class="level2">
+<h2 class="anchored" data-anchor-id="面试高频追问与工业级优化扩展">面试高频追问与工业级优化扩展</h2>
+<ul>
+<li><strong>追问 1：TMA 的 Multicast 广播特性在 GEMM 中如何使用？</strong>
+<ul>
+<li><em>回答要点</em>：Hopper 引入了 Cluster 概念（最多 8 个 SM 组成硬件集群）。当多个 SM 负责计算相同 <span class="math inline">\(M\)</span> 或相同 <span class="math inline">\(N\)</span> 维度的矩阵瓦片时，A 或 B 矩阵数据完全相同。TMA 支持 Cluster Multicast：一个 SM 发起 TMA 读取，硬件可将数据自动多播并发写入集群内其他多个 SM 的 Shared Memory 中，将 L2 Cache 和显存带宽压力直接骤降数倍！</li>
+</ul></li>
+<li><strong>追问 2：为什么 DeepGEMM 坚决不用 NVRTC 而是自研 C++ JIT 编译系统？</strong>
+<ul>
+<li><em>回答要点</em>：早期版本尝试过 NVRTC，但发现 NVRTC 针对 Hopper SM90 高级 PTX（如 WGMMA、TMA 事务屏障）的代码生成效率和指令交织优化远不如最新的标准 NVCC 驱动编译器。DeepGEMM 开发了轻量级的 C++ JIT 运行时，直接调用主机端 NVCC 缓存二进制产物，实现了亚秒级冷启动与极低运行时调用开销。</li>
+</ul></li>
+</ul>
+</section>
+<section id="源码参考与延伸阅读" class="level2">
+<h2 class="anchored" data-anchor-id="源码参考与延伸阅读">源码参考与延伸阅读</h2>
+<ul>
+<li><a href="https://github.com/deepseek-ai/DeepGEMM">DeepSeek DeepGEMM 官方开源仓库</a></li>
+<li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/">NVIDIA PTX ISA 8.5: WGMMA &amp; TMA Specifications</a></li>
+<li><a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report: Multi-head Latent Attention and DeepSeekMoE FP8 Training</a></li>
+</ul>
+</section>
+</div>
+</div>
+</div>
+
+
+<!-- -->
+
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+    const viewSource = window.document.getElementById('quarto-view-source') ||
+                       window.document.getElementById('quarto-code-tools-source');
+    if (viewSource) {
+      const sourceUrl = viewSource.getAttribute("data-quarto-source-url");
+      viewSource.addEventListener("click", function(e) {
+        if (sourceUrl) {
+          // rstudio viewer pane
+          if (/\bcapabilities=\b/.test(window.location)) {
+            window.open(sourceUrl);
+          } else {
+            window.location.href = sourceUrl;
+          }
+        } else {
+          const modal = new bootstrap.Modal(document.getElementById('quarto-embedded-source-code-modal'));
+          modal.show();
+        }
+        return false;
+      });
+    }
+    function toggleCodeHandler(show) {
+      return function(e) {
+        const cellDetails = window.document.querySelectorAll(".cell details.code-fold");
+        for (let i=0; i<cellDetails.length; i++) {
+          const details = cellDetails[i];
+          if (show) {
+            details.open = true;
+          } else {
+            details.removeAttribute("open");
+          }
+        }
+        const cellCodeDivs = window.document.querySelectorAll(".cell div.sourceCode.cell-code");
+        const fromCls = show ? "hidden" : "unhidden";
+        const toCls = show ? "unhidden" : "hidden";
+        for (let i=0; i<cellCodeDivs.length; i++) {
+          const codeDiv = cellCodeDivs[i];
+          if (codeDiv.classList.contains(fromCls)) {
+            codeDiv.classList.remove(fromCls);
+            codeDiv.classList.add(toCls);
+          } 
+        }
+        return false;
+      }
+    }
+    const hideAllCode = window.document.getElementById("quarto-hide-all-code");
+    if (hideAllCode) {
+      hideAllCode.addEventListener("click", toggleCodeHandler(false));
+    }
+    const showAllCode = window.document.getElementById("quarto-show-all-code");
+    if (showAllCode) {
+      showAllCode.addEventListener("click", toggleCodeHandler(true));
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/hsthanb4\.github\.io\/hpclearning\/");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解"</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>深入推演 DeepSeek-V3 核心算子库 DeepGEMM 的设计动机，说清其相比传统 CUTLASS 3.x / cuBLASLt 的架构取舍；</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>掌握 Hopper 架构（SM90）的核心指令级原语：Tensor Memory Accelerator (TMA)、Warp-Group MMA (<span class="in">`wgmma.mma_async`</span>) 与 <span class="in">`mbarrier`</span> 硬件事务屏障；</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>彻底理清 Fine-grained Block-wise FP8 量化（$1 \times 128$ 细粒度分块缩放）的数学原理与高效 Epilogue 反量化实现；</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>掌握 MoE 场景下 Contiguous Grouped GEMM 与 Masked Grouped GEMM 的调度机制及其与 DeepEP 通信库的协同。</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题（Hopper WGMMA + 细粒度反量化分块模拟内核），并通过给定测试断言；</span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链与硬件微架构状态迁移，而不是只报术语；</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能瓶颈取舍；</span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：<span class="co">[</span><span class="ot">第 10 课：共享内存 Tiled GEMM</span><span class="co">](lesson10_gemm_tiled.qmd)</span>、CUDA 异步拷贝机制、计算机体系结构（SM/Shared Memory/Tensor Core）。</span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：作为算子核心主线的现代化高阶实战课，将经典的 Shared Memory Tiling 跨越升级到现代 Hopper (SM90) / Blackwell (SM100) 的无寄存器搬运异步流水线与 MoE 定制 Grouped GEMM。</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>    subgraph HopperPipeline[<span class="ot">"</span><span class="st">DeepGEMM Hopper (SM90) 异步生产者-消费者流水线</span><span class="ot">"</span>]</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>        subgraph Producer[<span class="ot">"</span><span class="st">生产者：1 个 TMA Warp Group (128 线程)</span><span class="ot">"</span>]</span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>            TMA_A[<span class="ot">"</span><span class="st">TMA 异步批量读取 Matrix A&lt;br&gt;(cp.async.bulk.tensor)</span><span class="ot">"</span>]</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a>            TMA_B[<span class="ot">"</span><span class="st">TMA 异步批量读取 Matrix B&lt;br&gt;(cp.async.bulk.tensor)</span><span class="ot">"</span>]</span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>            TMA_SF[<span class="ot">"</span><span class="st">TMA 异步加载 1x128 缩放因子 Scale Factors</span><span class="ot">"</span>]</span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>            MBarrier_Tx[<span class="ot">"</span><span class="st">mbarrier.arrive.expect_tx&lt;br&gt;(向硬件事务屏障注册字节数)</span><span class="ot">"</span>]</span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>            TMA_A &amp; TMA_B &amp; TMA_SF --&gt; MBarrier_Tx</span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a>        subgraph SMEM[<span class="ot">"</span><span class="st">片上共享内存 (SMEM 多级循环缓冲区: kNumStages = 3~4)</span><span class="ot">"</span>]</span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>            Smem_A[<span class="ot">"</span><span class="st">SMem A Tile [BLOCK_M, 128] FP8</span><span class="ot">"</span>]</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>            Smem_B[<span class="ot">"</span><span class="st">SMem B Tile [BLOCK_N, 128] FP8</span><span class="ot">"</span>]</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>            Smem_SF[<span class="ot">"</span><span class="st">SMem Scale Factors FP32</span><span class="ot">"</span>]</span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a>        subgraph Consumer[<span class="ot">"</span><span class="st">消费者：Math Warp Groups (128/256 线程)</span><span class="ot">"</span>]</span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>            MBarrier_Wait[<span class="ot">"</span><span class="st">mbarrier.try_wait.parity&lt;br&gt;(非阻塞硬件轮询事务完成)</span><span class="ot">"</span>]</span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a>            WGMMA[<span class="ot">"</span><span class="st">wgmma.mma_async&lt;br&gt;(Tensor Core 直接从 SMEM 读入 A/B, 累加至 FP32 寄存器)</span><span class="ot">"</span>]</span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a>            Epilogue[<span class="ot">"</span><span class="st">细粒度反量化 Epilogue:&lt;br&gt;Reg D = D * SF_A * SF_B -&gt; BF16 写回 GMEM</span><span class="ot">"</span>]</span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a>            MBarrier_Wait --&gt; WGMMA --&gt; Epilogue</span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a>        Producer --&gt;|硬件异步直通写入| SMEM</span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a>        SMEM --&gt;|SS 模式零寄存器开销| Consumer</span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 13-1：DeepGEMM 在 Hopper 架构下的 TMA 硬件直连与 WGMMA 异步多级流水线架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>    subgraph MoELayouts[<span class="ot">"</span><span class="st">DeepGEMM MoE 分组矩阵乘（Grouped GEMM）两类执行模式</span><span class="ot">"</span>]</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a>        subgraph Contiguous[<span class="ot">"</span><span class="st">Contiguous Layout (训练 Forward/Backward &amp; 推理 Prefill)</span><span class="ot">"</span>]</span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a>            Tokens[<span class="ot">"</span><span class="st">动态 Token 按 Expert 拼接 (M 维不规则)</span><span class="ot">"</span>] --&gt; Align[<span class="ot">"</span><span class="st">M 维按 Tile 对齐 (M-alignment)</span><span class="ot">"</span>]</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>            Align --&gt; KContig[<span class="ot">"</span><span class="st">K-Grouped TN / M-Grouped NT 算子执行</span><span class="ot">"</span>]</span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a>        subgraph Masked[<span class="ot">"</span><span class="st">Masked Layout (推理 Decoding + CUDA Graph)</span><span class="ot">"</span>]</span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>            FixedBuf[<span class="ot">"</span><span class="st">固定最大容量静态显存缓冲 (Zero-Allocation)</span><span class="ot">"</span>] --&gt; MaskTensor[<span class="ot">"</span><span class="st">掩码张量 (Valid Mask Tensor)</span><span class="ot">"</span>]</span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a>            MaskTensor --&gt; DeepEP_In[<span class="ot">"</span><span class="st">接收 DeepEP 低延迟通信产物</span><span class="ot">"</span>]</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a>            DeepEP_In --&gt; MaskedKernel[<span class="ot">"</span><span class="st">m_grouped_fp8_gemm_nt_masked 仅计算有效 Token</span><span class="ot">"</span>]</span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 13-2：DeepGEMM 面向 MoE 的 Contiguous 与 Masked 两大布局设计对比<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a>**DeepGEMM** 是 DeepSeek 专为大语言模型（特别是 DeepSeek-V3 / V2.5 / R1 等超大规模 MoE 模型）研发的开源超高性能 Tensor Core GEMM 算子库。</span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 为什么现有开源库（CUTLASS 3.x / cuBLASLt）不够用？</span></span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**CUTLASS 3.x 极其庞大的 C++ 模板膨胀与编译噩梦**：</span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>传统 CUTLASS 依赖极深的模板嵌套与代数表达（Layout、Tile、Iterator、Collective Builder），仅编译一组 GEMM 内核通常需要数分钟乃至数十分钟；</span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>工业级二次开发、定制特殊访存或微架构调优时，工程师深陷模板推导黑洞，调试门槛极高。</span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**DeepSeek-V3 细粒度分块量化（$1 \times 128$ Block-wise FP8）缺乏原生极致优化**：</span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>常规 TensorRT-LLM 或 cuBLASLt 主要面向 **Tensor-wise（整张量单标量缩放）** 或 **Channel-wise（逐通道缩放）**；</span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>DeepSeek-V3 为了在 FP8 下保持与 BF16 无损的数学精度，提出了 **$1 \times 128$ 的 Block-wise Fine-grained Scaling**：矩阵在 $K$ 维度每 128 个元素划分为一个独立 Block，拥有专属的 FP32/UE8M0 缩放系数。这要求 GEMM 内核的 Epilogue 必须在极短时间内完成多维缩放反量化，cuBLASLt 无法原生内联融合。</span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**MoE 解码（Decoding）与 CUDA Graph 的静态分配冲突**：</span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>在推理 Decode 阶段，各 Expert 分配到的 Token 数量极小且每步动态变化；</span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若使用传统变长 Grouped GEMM，CPU 必须每步重新统计各专家 Token 偏移量并下发 Kernel 参数，**彻底打破 CUDA Graph 捕获机制**，带来沉重的 CPU Launch 延迟。</span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) DeepGEMM 的破局设计</span></span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Radical KISS 原则**：完全摒弃 CUTLASS 繁重的类层次结构，精炼出不到数千行的自包含代码，通过轻量级 C++ JIT（即时编译）模块在运行时极速加载，免去安装时的预编译开销；</span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**原生拥抱 Hopper 硬件原语**：深度利用 SM90 硬件级 TMA（张量内存加速器）与 WGMMA 指令，在 H800/H100 上跑出高达 **1550 TFLOPS（逼近硬件理论极限的 85%~90%）**；</span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**双模 MoE Grouped GEMM 支持**：</span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span><span class="in">`Contiguous`</span>：用于训练前向/反向与推理 Prefill，连续内存拼接，算力利用率最大化；</span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span><span class="in">`Masked`</span>：用于推理 Decode，配合 DeepEP 零 CPU 开销静态捕获，以 Mask 标记有效 Token，完全兼容 CUDA Graph。</span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Hopper (SM90) 硬件微架构机制剖析</span></span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a>要真正看懂 DeepGEMM 的源码，必须理解 Hopper 架构相对于 Ampere 架构发生的三大革命性跃迁：</span>
+<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) TMA (Tensor Memory Accelerator)：异步硬件批量搬运</span></span>
+<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Ampere 痛点**：在 Ampere（SM80）中，虽然引入了 <span class="in">`cp.async`</span>，但每个线程仍需显式计算地址偏移，执行指令发射。</span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Hopper 创新**：TMA 是片上独立的专用硬件单元。线程只需配置一个 `cute::TmaDescriptor`（包含张量基地址、形状、跨度、分块尺寸及 Swizzle 模式），随后仅需由单个线程发起一条 `cp.async.bulk.tensor` 指令，硬件直接将多维张量瓦片从全局显存（Global Memory）搬运至共享内存（Shared Memory），**全程完全不占用 SM 通用寄存器和 ALU 算力**！</span>
+<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) WGMMA (`wgmma.mma_async`)：Warp-Group 级异步矩阵乘</span></span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Ampere 痛点**：<span class="in">`mma.sync`</span> 是 Warp 级同步指令，线程必须先从 SMEM 把数据显式 <span class="in">`ldmatrix`</span> 加载到通用寄存器（Register File），消耗大量寄存器配额，极易导致寄存器溢出（Spilling）而降低 Occupancy。</span>
+<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Hopper 创新**：WGMMA 提升至 **Warp-Group（4 个 Warp，共 128 个线程）** 协同粒度。更关键的是，它支持 **SS（Shared-Shared）寻址模式**：Tensor Core 直接从 Shared Memory 读取矩阵 A 与矩阵 B 的切片执行点积，**中间完全跳过通用寄存器**！仅输出累加矩阵 $D$ 保存在 FP32 寄存器中，极大节省了片上寄存器开销。</span>
+<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (3) 生产者-消费者解耦（Producer-Consumer Splitting）与 `mbarrier`</span></span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a>DeepGEMM 将一个 ThreadBlock（例如 256 或 384 线程）进行角色解耦：</span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**生产者（TMA Warp-Group，128 线程）**：负责调度 TMA 硬件发起下一阶段的 A、B 及 Scale Factor 数据预取，并在硬件事务屏障（<span class="in">`ClusterTransactionBarrier`</span>）上注册预期传输字节数（<span class="in">`expect_tx`</span>）；</span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**消费者（Math Warp-Groups，128 或 256 线程）**：通过 <span class="in">`mbarrier.try_wait.parity`</span> 轮询硬件屏障。一旦 TMA 数据到位，立即执行 <span class="in">`wgmma.mma_async`</span>，实现极致的多级流水掩盖（$k\text{NumStages} = 3 \sim 4$）。</span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. DeepGEMM 核心代码架构逐行拆解</span></span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a>以下代码节选自 DeepGEMM 核心源码 <span class="co">[</span><span class="ot">`sm90_fp8_gemm_1d1d.cuh`</span><span class="co">](file:///Users/wujie/hpclearning/cuda/DeepGEMM/deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh)</span>，展现其关键骨架：</span>
+<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a><span class="in">```cuda</span></span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a><span class="co">// DeepGEMM: TMA 与 WGMMA 核心主循环骨架</span></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a><span class="pp">#pragma once</span></span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a><span class="pp">#include </span><span class="im">&lt;deep_gemm/ptx/tma.cuh&gt;</span></span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a><span class="pp">#include </span><span class="im">&lt;deep_gemm/ptx/wgmma.cuh&gt;</span></span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="dt">uint32_t</span> BLOCK_M<span class="op">,</span> <span class="dt">uint32_t</span> BLOCK_N<span class="op">,</span> <span class="dt">uint32_t</span> BLOCK_K<span class="op">,</span> <span class="dt">uint32_t</span> kNumStages<span class="op">&gt;</span></span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a>__device__ <span class="dt">void</span> gemm_loop<span class="op">(</span></span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a>    <span class="at">const</span> cute<span class="op">::</span>TmaDescriptor<span class="op">&amp;</span> tensor_map_a<span class="op">,</span></span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a>    <span class="at">const</span> cute<span class="op">::</span>TmaDescriptor<span class="op">&amp;</span> tensor_map_b<span class="op">,</span></span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a>    <span class="dt">float</span><span class="op">*</span> smem_sfa<span class="op">,</span> <span class="dt">float</span><span class="op">*</span> smem_sfb<span class="op">,</span></span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a>    <span class="dt">uint32_t</span> k_tiles<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a>    <span class="co">// 1. 硬件事务屏障初始化</span></span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a>    <span class="at">extern</span> __shared__ <span class="dt">char</span> smem_raw<span class="op">[];</span></span>
+<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a>    <span class="kw">auto</span><span class="op">*</span> barriers <span class="op">=</span> <span class="kw">reinterpret_cast</span><span class="op">&lt;</span>cutlass<span class="op">::</span>arch<span class="op">::</span>ClusterTransactionBarrier<span class="op">*&gt;(</span>smem_raw<span class="op">);</span></span>
+<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a>    <span class="co">// 2. 区分生产者（TMA）与消费者（Math）</span></span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a>    <span class="at">const</span> <span class="dt">uint32_t</span> warp_group_idx <span class="op">=</span> threadIdx<span class="op">.</span>x <span class="op">/</span> <span class="dv">128</span><span class="op">;</span></span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a>    <span class="at">const</span> <span class="dt">bool</span> is_producer <span class="op">=</span> <span class="op">(</span>warp_group_idx <span class="op">==</span> <span class="dv">0</span><span class="op">);</span></span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a>    <span class="pp">#pragma unroll 1</span></span>
+<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> <span class="op">(</span><span class="dt">uint32_t</span> k <span class="op">=</span> <span class="dv">0</span><span class="op">;</span> k <span class="op">&lt;</span> k_tiles<span class="op">;</span> <span class="op">++</span>k<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a>        <span class="dt">uint32_t</span> stage <span class="op">=</span> k <span class="op">%</span> kNumStages<span class="op">;</span></span>
+<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="op">(</span>is_producer <span class="op">&amp;&amp;</span> threadIdx<span class="op">.</span>x <span class="op">==</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a>            <span class="co">// 生产者主线程：设置本阶段期望接收的 TMA 字节数</span></span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a>            <span class="dt">uint32_t</span> tx_bytes <span class="op">=</span> <span class="op">(</span>BLOCK_M <span class="op">*</span> BLOCK_K <span class="op">+</span> BLOCK_N <span class="op">*</span> BLOCK_K<span class="op">)</span> <span class="op">*</span> <span class="kw">sizeof</span><span class="op">(</span>__nv_fp8_e4m3<span class="op">);</span></span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a>            ptx<span class="op">::</span>mbarrier_arrive_and_set_tx<span class="op">(&amp;</span>barriers<span class="op">[</span>stage<span class="op">],</span> tx_bytes<span class="op">);</span></span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a>            <span class="co">// 发起 TMA 异步多维拷贝</span></span>
+<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a>            ptx<span class="op">::</span>tma_copy_2d<span class="op">(</span>tensor_map_a<span class="op">,</span> <span class="op">&amp;</span>barriers<span class="op">[</span>stage<span class="op">],</span> stage<span class="op">,</span> k<span class="op">);</span></span>
+<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a>            ptx<span class="op">::</span>tma_copy_2d<span class="op">(</span>tensor_map_b<span class="op">,</span> <span class="op">&amp;</span>barriers<span class="op">[</span>stage<span class="op">],</span> stage<span class="op">,</span> k<span class="op">);</span></span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="op">(!</span>is_producer<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a>            <span class="co">// 消费者：等待当前 Stage 数据加载完毕（硬件屏障就绪）</span></span>
+<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a>            ptx<span class="op">::</span>mbarrier_wait<span class="op">(&amp;</span>barriers<span class="op">[</span>stage<span class="op">],</span> k <span class="op">/</span> kNumStages<span class="op">);</span></span>
+<span id="cb4-176"><a href="#cb4-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-177"><a href="#cb4-177" aria-hidden="true" tabindex="-1"></a>            <span class="co">// 消费者：发射 WGMMA 指令（SS 模式：直接自 SMEM 计算并累加到寄存器 D）</span></span>
+<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a>            wgmma<span class="op">::</span>FP8MMA<span class="op">&lt;</span>BLOCK_N<span class="op">&gt;::</span>wgmma<span class="op">(</span></span>
+<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a>                desc_a<span class="op">[</span>stage<span class="op">],</span> desc_b<span class="op">[</span>stage<span class="op">],</span> accum_d<span class="op">,</span> <span class="co">/*scale_d=*/</span><span class="op">(</span>k <span class="op">!=</span> <span class="dv">0</span><span class="op">)</span></span>
+<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a>            <span class="op">);</span></span>
+<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb4-183"><a href="#cb4-183" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a><span class="fu">### 练习说明</span></span>
+<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a>在不支持真实 Hopper 物理 GPU 的模拟环境或静态代码审查中，我们需要深刻理解其**分块细粒度反量化逻辑**与**算子数值等价性**。</span>
+<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a>请实现一个**细粒度分块量化 GEMM 模拟器（Block-wise FP8 GEMM with 1x128 Fine-grained Dequantization）**：</span>
+<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>输入矩阵 $A \in \mathbb{R}^{M \times K}$ 与矩阵 $B \in \mathbb{R}^{N \times K}$ 采用 FP8 E4M3 数值格式（在练习中用低精度浮点模拟）；</span>
+<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>$K$ 维度按 $128$ 元素切分成若干 Block。每个 Block 拥有一个对应的缩放因子 $S_A \in \mathbb{R}^{M \times (K/128)}$ 与 $S_B \in \mathbb{R}^{N \times (K/128)}$；</span>
+<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>真实数学计算：对于分块 $b \in <span class="co">[</span><span class="ot">0, K/128 - 1</span><span class="co">]</span>$，子块点积结果累加后，需乘上对应的缩放标量：$S_A<span class="co">[</span><span class="ot">i, b</span><span class="co">]</span> \times S_B<span class="co">[</span><span class="ot">j, b</span><span class="co">]</span>$；</span>
+<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>请补齐缺失的循环步进与反量化数学逻辑。</span>
+<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a>只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 位置，不得删除断言或放宽通过条件。</span>
+<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a>::: {#deepgemm_exercise .cell course_role='exercise' execution_count=1}</span>
+<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a><span class="in">``` {.python .cell-code}</span></span>
+<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fine_grained_block_gemm_simulation(A_fp8, B_fp8, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>):</span>
+<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a><span class="co">    模拟 DeepGEMM 的 1x128 细粒度 Block-wise FP8 GEMM 计算流</span></span>
+<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a><span class="co">    A_fp8: [M, K]  (E4M3 量化整型或低精度模拟)</span></span>
+<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a><span class="co">    B_fp8: [N, K]  (E4M3 量化整型或低精度模拟，注意 B 为 Transposed 存储)</span></span>
+<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a><span class="co">    S_A:   [M, K // block_k]  (FP32 缩放因子)</span></span>
+<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a><span class="co">    S_B:   [N, K // block_k]  (FP32 缩放因子)</span></span>
+<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a><span class="co">    return: D [M, N] FP32 结果</span></span>
+<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> A_fp8.shape</span>
+<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a>    N, K_b <span class="op">=</span> B_fp8.shape</span>
+<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">==</span> K_b, <span class="st">"K dimension mismatch"</span></span>
+<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">%</span> block_k <span class="op">==</span> <span class="dv">0</span>, <span class="st">"K must be divisible by block_k"</span></span>
+<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> K <span class="op">//</span> block_k</span>
+<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a>    D <span class="op">=</span> np.zeros((M, N), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb4-222"><a href="#cb4-222" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-223"><a href="#cb4-223" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 模拟 Hopper 内核外层循环：逐个 Block_K 推进并进行细粒度反量化累加</span></span>
+<span id="cb4-224"><a href="#cb4-224" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(num_blocks):</span>
+<span id="cb4-225"><a href="#cb4-225" aria-hidden="true" tabindex="-1"></a>        k_start <span class="op">=</span> b <span class="op">*</span> block_k</span>
+<span id="cb4-226"><a href="#cb4-226" aria-hidden="true" tabindex="-1"></a>        k_end <span class="op">=</span> ______</span>
+<span id="cb4-227"><a href="#cb4-227" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-228"><a href="#cb4-228" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 提取当前 128-channel 瓦片</span></span>
+<span id="cb4-229"><a href="#cb4-229" aria-hidden="true" tabindex="-1"></a>        A_tile <span class="op">=</span> A_fp8[:, k_start:k_end]  <span class="co"># [M, block_k]</span></span>
+<span id="cb4-230"><a href="#cb4-230" aria-hidden="true" tabindex="-1"></a>        B_tile <span class="op">=</span> B_fp8[:, k_start:k_end]  <span class="co"># [N, block_k]</span></span>
+<span id="cb4-231"><a href="#cb4-231" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-232"><a href="#cb4-232" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 1. 执行片上 Tile 点积累加: Tile_Acc = A_tile @ B_tile.T  -&gt; [M, N]</span></span>
+<span id="cb4-233"><a href="#cb4-233" aria-hidden="true" tabindex="-1"></a>        tile_acc <span class="op">=</span> np.matmul(A_tile, B_tile.T)</span>
+<span id="cb4-234"><a href="#cb4-234" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-235"><a href="#cb4-235" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 2. 提取当前 Block 的缩放因子外积: scale_tile = S_A[:, b:b+1] * S_B[:, b:b+1].T -&gt; [M, N]</span></span>
+<span id="cb4-236"><a href="#cb4-236" aria-hidden="true" tabindex="-1"></a>        scale_tile <span class="op">=</span> ______</span>
+<span id="cb4-237"><a href="#cb4-237" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-238"><a href="#cb4-238" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 3. 将反量化后的局部瓦片累加至全局输出矩阵 D</span></span>
+<span id="cb4-239"><a href="#cb4-239" aria-hidden="true" tabindex="-1"></a>        D <span class="op">+=</span> ______</span>
+<span id="cb4-240"><a href="#cb4-240" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-241"><a href="#cb4-241" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> D</span>
+<span id="cb4-242"><a href="#cb4-242" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-243"><a href="#cb4-243" aria-hidden="true" tabindex="-1"></a><span class="co"># 测试用例验证</span></span>
+<span id="cb4-244"><a href="#cb4-244" aria-hidden="true" tabindex="-1"></a>np.random.seed(<span class="dv">42</span>)</span>
+<span id="cb4-245"><a href="#cb4-245" aria-hidden="true" tabindex="-1"></a>M, N, K <span class="op">=</span> <span class="dv">128</span>, <span class="dv">64</span>, <span class="dv">256</span></span>
+<span id="cb4-246"><a href="#cb4-246" aria-hidden="true" tabindex="-1"></a>block_k <span class="op">=</span> <span class="dv">128</span></span>
+<span id="cb4-247"><a href="#cb4-247" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-248"><a href="#cb4-248" aria-hidden="true" tabindex="-1"></a><span class="co"># 构造模拟输入</span></span>
+<span id="cb4-249"><a href="#cb4-249" aria-hidden="true" tabindex="-1"></a>A_sim <span class="op">=</span> np.random.randint(<span class="op">-</span><span class="dv">10</span>, <span class="dv">10</span>, size<span class="op">=</span>(M, K)).astype(np.float32)</span>
+<span id="cb4-250"><a href="#cb4-250" aria-hidden="true" tabindex="-1"></a>B_sim <span class="op">=</span> np.random.randint(<span class="op">-</span><span class="dv">10</span>, <span class="dv">10</span>, size<span class="op">=</span>(N, K)).astype(np.float32)</span>
+<span id="cb4-251"><a href="#cb4-251" aria-hidden="true" tabindex="-1"></a>S_A <span class="op">=</span> np.random.uniform(<span class="fl">0.01</span>, <span class="fl">0.05</span>, size<span class="op">=</span>(M, K <span class="op">//</span> block_k)).astype(np.float32)</span>
+<span id="cb4-252"><a href="#cb4-252" aria-hidden="true" tabindex="-1"></a>S_B <span class="op">=</span> np.random.uniform(<span class="fl">0.01</span>, <span class="fl">0.05</span>, size<span class="op">=</span>(N, K <span class="op">//</span> block_k)).astype(np.float32)</span>
+<span id="cb4-253"><a href="#cb4-253" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-254"><a href="#cb4-254" aria-hidden="true" tabindex="-1"></a><span class="co"># 正确标准数学对照</span></span>
+<span id="cb4-255"><a href="#cb4-255" aria-hidden="true" tabindex="-1"></a>ref_D <span class="op">=</span> np.zeros((M, N), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb4-256"><a href="#cb4-256" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(K <span class="op">//</span> block_k):</span>
+<span id="cb4-257"><a href="#cb4-257" aria-hidden="true" tabindex="-1"></a>    A_sub <span class="op">=</span> A_sim[:, b<span class="op">*</span>block_k : (b<span class="op">+</span><span class="dv">1</span>)<span class="op">*</span>block_k] <span class="op">*</span> S_A[:, b:b<span class="op">+</span><span class="dv">1</span>]</span>
+<span id="cb4-258"><a href="#cb4-258" aria-hidden="true" tabindex="-1"></a>    B_sub <span class="op">=</span> B_sim[:, b<span class="op">*</span>block_k : (b<span class="op">+</span><span class="dv">1</span>)<span class="op">*</span>block_k] <span class="op">*</span> S_B[:, b:b<span class="op">+</span><span class="dv">1</span>]</span>
+<span id="cb4-259"><a href="#cb4-259" aria-hidden="true" tabindex="-1"></a>    ref_D <span class="op">+=</span> np.matmul(A_sub, B_sub.T)</span>
+<span id="cb4-260"><a href="#cb4-260" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-261"><a href="#cb4-261" aria-hidden="true" tabindex="-1"></a>out_D <span class="op">=</span> fine_grained_block_gemm_simulation(A_sim, B_sim, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>)</span>
+<span id="cb4-262"><a href="#cb4-262" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(out_D, ref_D, atol<span class="op">=</span><span class="fl">1e-5</span>), <span class="ss">f"Max difference: </span><span class="sc">{</span>np<span class="sc">.</span><span class="bu">max</span>(np.<span class="bu">abs</span>(out_D <span class="op">-</span> ref_D))<span class="sc">}</span><span class="ss">"</span></span>
+<span id="cb4-263"><a href="#cb4-263" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"DeepGEMM 细粒度分块量化模拟测试通过！"</span>)</span>
+<span id="cb4-264"><a href="#cb4-264" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-265"><a href="#cb4-265" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-266"><a href="#cb4-266" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-267"><a href="#cb4-267" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-268"><a href="#cb4-268" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb4-269"><a href="#cb4-269" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-270"><a href="#cb4-270" aria-hidden="true" tabindex="-1"></a>运行脚本验证断言通过；核对 <span class="in">`num_blocks`</span> 累加与数学基准的一致性。</span>
+<span id="cb4-271"><a href="#cb4-271" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-272"><a href="#cb4-272" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb4-273"><a href="#cb4-273" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-274"><a href="#cb4-274" aria-hidden="true" tabindex="-1"></a>为什么 DeepSeek-V3 选择 $1 \times 128$ 的 Block-wise FP8 量化，而不是直接沿用整个 Tensor 共享一个 Scale（Tensor-wise）？这对 Hopper WGMMA 硬件执行提出了什么挑战？</span>
+<span id="cb4-275"><a href="#cb4-275" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-276"><a href="#cb4-276" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-277"><a href="#cb4-277" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-278"><a href="#cb4-278" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb4-279"><a href="#cb4-279" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-280"><a href="#cb4-280" aria-hidden="true" tabindex="-1"></a>在 Hopper 架构中，WGMMA 指令的“SS（Shared-to-Shared）”模式与 Ampere 架构下的 <span class="in">`ldmatrix`</span> + <span class="in">`mma.sync`</span> 相比，消除了哪些微架构开销？为什么能大幅提升寄存器利用率和算子性能？</span>
+<span id="cb4-281"><a href="#cb4-281" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-282"><a href="#cb4-282" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-283"><a href="#cb4-283" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-284"><a href="#cb4-284" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb4-285"><a href="#cb4-285" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-286"><a href="#cb4-286" aria-hidden="true" tabindex="-1"></a>在 MoE 推理的 Decoding 阶段，DeepGEMM 为什么专门设计了 <span class="in">`m_grouped_fp8_gemm_nt_masked`</span> 算子？为什么变长 Contiguous Grouped GEMM 无法与 CUDA Graph 协同工作？</span>
+<span id="cb4-287"><a href="#cb4-287" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-288"><a href="#cb4-288" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-289"><a href="#cb4-289" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-290"><a href="#cb4-290" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb4-291"><a href="#cb4-291" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-292"><a href="#cb4-292" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正确填补 <span class="in">`k_end`</span>、<span class="in">`scale_tile`</span> 与 <span class="in">`D`</span> 累加逻辑并通过断言；</span>
+<span id="cb4-293"><a href="#cb4-293" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分：必须从算子精度下溢、寄存器/访存层次、CUDA Graph 静态内存模型等本质因果链回答；</span>
+<span id="cb4-294"><a href="#cb4-294" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：无法讲清 WGMMA 与 TMA 的分工，或混淆 Tensor-wise 与 Block-wise 量化。</span>
+<span id="cb4-295"><a href="#cb4-295" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-296"><a href="#cb4-296" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-297"><a href="#cb4-297" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb4-298"><a href="#cb4-298" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-299"><a href="#cb4-299" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-300"><a href="#cb4-300" aria-hidden="true" tabindex="-1"></a>::: {#deepgemm_solution .cell course_role='solution' execution_count=2}</span>
+<span id="cb4-301"><a href="#cb4-301" aria-hidden="true" tabindex="-1"></a><span class="in">``` {.python .cell-code}</span></span>
+<span id="cb4-302"><a href="#cb4-302" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fine_grained_block_gemm_simulation(A_fp8, B_fp8, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>):</span>
+<span id="cb4-303"><a href="#cb4-303" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> A_fp8.shape</span>
+<span id="cb4-304"><a href="#cb4-304" aria-hidden="true" tabindex="-1"></a>    N, K_b <span class="op">=</span> B_fp8.shape</span>
+<span id="cb4-305"><a href="#cb4-305" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">==</span> K_b, <span class="st">"K dimension mismatch"</span></span>
+<span id="cb4-306"><a href="#cb4-306" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> K <span class="op">%</span> block_k <span class="op">==</span> <span class="dv">0</span>, <span class="st">"K must be divisible by block_k"</span></span>
+<span id="cb4-307"><a href="#cb4-307" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> K <span class="op">//</span> block_k</span>
+<span id="cb4-308"><a href="#cb4-308" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-309"><a href="#cb4-309" aria-hidden="true" tabindex="-1"></a>    D <span class="op">=</span> np.zeros((M, N), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb4-310"><a href="#cb4-310" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-311"><a href="#cb4-311" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(num_blocks):</span>
+<span id="cb4-312"><a href="#cb4-312" aria-hidden="true" tabindex="-1"></a>        k_start <span class="op">=</span> b <span class="op">*</span> block_k</span>
+<span id="cb4-313"><a href="#cb4-313" aria-hidden="true" tabindex="-1"></a>        k_end <span class="op">=</span> (b <span class="op">+</span> <span class="dv">1</span>) <span class="op">*</span> block_k</span>
+<span id="cb4-314"><a href="#cb4-314" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-315"><a href="#cb4-315" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 提取当前 128-channel 瓦片</span></span>
+<span id="cb4-316"><a href="#cb4-316" aria-hidden="true" tabindex="-1"></a>        A_tile <span class="op">=</span> A_fp8[:, k_start:k_end]  <span class="co"># [M, block_k]</span></span>
+<span id="cb4-317"><a href="#cb4-317" aria-hidden="true" tabindex="-1"></a>        B_tile <span class="op">=</span> B_fp8[:, k_start:k_end]  <span class="co"># [N, block_k]</span></span>
+<span id="cb4-318"><a href="#cb4-318" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-319"><a href="#cb4-319" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 1. 执行片上 Tile 点积累加</span></span>
+<span id="cb4-320"><a href="#cb4-320" aria-hidden="true" tabindex="-1"></a>        tile_acc <span class="op">=</span> np.matmul(A_tile, B_tile.T)</span>
+<span id="cb4-321"><a href="#cb4-321" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-322"><a href="#cb4-322" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 2. 提取当前 Block 的缩放因子外积 (利用广播生成 [M, N])</span></span>
+<span id="cb4-323"><a href="#cb4-323" aria-hidden="true" tabindex="-1"></a>        scale_tile <span class="op">=</span> S_A[:, b:b<span class="op">+</span><span class="dv">1</span>] <span class="op">*</span> S_B[:, b:b<span class="op">+</span><span class="dv">1</span>].T</span>
+<span id="cb4-324"><a href="#cb4-324" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-325"><a href="#cb4-325" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 3. 反量化并累加</span></span>
+<span id="cb4-326"><a href="#cb4-326" aria-hidden="true" tabindex="-1"></a>        D <span class="op">+=</span> tile_acc <span class="op">*</span> scale_tile</span>
+<span id="cb4-327"><a href="#cb4-327" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-328"><a href="#cb4-328" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> D</span>
+<span id="cb4-329"><a href="#cb4-329" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-330"><a href="#cb4-330" aria-hidden="true" tabindex="-1"></a><span class="co"># 执行验证</span></span>
+<span id="cb4-331"><a href="#cb4-331" aria-hidden="true" tabindex="-1"></a>out_D <span class="op">=</span> fine_grained_block_gemm_simulation(A_sim, B_sim, S_A, S_B, block_k<span class="op">=</span><span class="dv">128</span>)</span>
+<span id="cb4-332"><a href="#cb4-332" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(out_D, ref_D, atol<span class="op">=</span><span class="fl">1e-5</span>)</span>
+<span id="cb4-333"><a href="#cb4-333" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"答案执行验证 100% 通过！"</span>)</span>
+<span id="cb4-334"><a href="#cb4-334" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-335"><a href="#cb4-335" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-336"><a href="#cb4-336" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-337"><a href="#cb4-337" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb4-338"><a href="#cb4-338" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-339"><a href="#cb4-339" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**数值精度与动态范围（Dynamic Range）**：</span>
+<span id="cb4-340"><a href="#cb4-340" aria-hidden="true" tabindex="-1"></a>   FP8（E4M3 格式）的有效动态范围极小（仅 8 个指数位与尾数位，绝对值最大仅 448，精度显著低于 BF16/FP16）。大模型各激活通道间存在严重的离群值（Outliers）。若采用 Tensor-wise 单一缩放因子，为了容纳极大离群值，缩放系数必须非常大，导致绝大多数正常数值下溢变为 0，引起灾难性精度崩塌。$1 \times 128$ 细粒度分块量化将缩放局限在 128 个 Channel 内部，实现了极高的局部信噪比。</span>
+<span id="cb4-341"><a href="#cb4-341" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**对 Hopper WGMMA 的挑战**：</span>
+<span id="cb4-342"><a href="#cb4-342" aria-hidden="true" tabindex="-1"></a>   标准 WGMMA 的累加器工作在数学上的连续点积模式。在 $1 \times 128$ 模式下，点积不能无休止地在一个循环内跨 Block 累加，或者必须在 Epilogue 阶段将乘积拆解。DeepGEMM 的极致优化在于：将 $K$ 维分块瓦片大小（<span class="in">`BLOCK_K`</span>）精准绑定为 $128$。每个 WGMMA 刚好计算完这 128 个元素后，由消费者线程直接在寄存器中乘以对应的 <span class="in">`Scale_A * Scale_B`</span>，使得点积累加与反量化严格同步，杜绝了中间精度的溢出。</span>
+<span id="cb4-343"><a href="#cb4-343" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-344"><a href="#cb4-344" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb4-345"><a href="#cb4-345" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-346"><a href="#cb4-346" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**彻底消除寄存器往返搬运（Zero Register Allocation for Operands）**：</span>
+<span id="cb4-347"><a href="#cb4-347" aria-hidden="true" tabindex="-1"></a>   Ampere 的流程是：<span class="in">`Global Memory -&gt; (cp.async) -&gt; SMEM -&gt; (ldmatrix) -&gt; Registers -&gt; (mma.sync) -&gt; Registers`</span>。A 和 B 矩阵必须同时常驻在寄存器堆中，每个线程需要几十甚至上百个寄存器存放输入操作数。</span>
+<span id="cb4-348"><a href="#cb4-348" aria-hidden="true" tabindex="-1"></a>   Hopper WGMMA 的 SS 模式是：<span class="in">`Global Memory -&gt; (TMA) -&gt; SMEM -&gt; (wgmma.mma_async) -&gt; Registers(仅存放累加器 D)`</span>。矩阵 A 和 B 的输入操作数永远停留在 SMEM，Tensor Core 直接通过硬件总线并发抓取 SMEM 数据进行 FMA。</span>
+<span id="cb4-349"><a href="#cb4-349" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**性能与 Occupancy 飞跃**：</span>
+<span id="cb4-350"><a href="#cb4-350" aria-hidden="true" tabindex="-1"></a>   寄存器占用量骤降 60% 以上，使得每个 SM 可以容纳更多并发活跃的 ThreadBlock（提升 Occupancy）。同时完全消除了 <span class="in">`ldmatrix`</span> 指令的发射开销，解除了 Warp Scheduler 的指令发射槽瓶颈。</span>
+<span id="cb4-351"><a href="#cb4-351" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-352"><a href="#cb4-352" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb4-353"><a href="#cb4-353" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-354"><a href="#cb4-354" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**CUDA Graph 核心不变性原理**：</span>
+<span id="cb4-355"><a href="#cb4-355" aria-hidden="true" tabindex="-1"></a>   CUDA Graph 依赖“静态执行图”消除 CPU Launch 开销。在 Graph 捕获期间，所有 Kernel 的 Launch 参数、输入输出指针、Grid/Block 维度必须完全固化，执行期不得发起任何主机端动态内存分配或 CPU-GPU 间的同步（如根据各专家实际 Token 偏移重算元数据）。</span>
+<span id="cb4-356"><a href="#cb4-356" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**Masked 布局解决动态偏移**：</span>
+<span id="cb4-357"><a href="#cb4-357" aria-hidden="true" tabindex="-1"></a>   在 Decode 阶段，每个 GPU 每步分配给各个 Expert 的 Token 数完全动态不可预知。<span class="in">`m_grouped_fp8_gemm_nt_masked`</span> 预先分配满足最大并发 Token 长度的静态 Buffer。通信库 DeepEP 将收到的数据直接散列在固定 Slot 中，并生成一份 0/1 Mask 张量。Kernel 在执行时遍历固定网格，仅在 <span class="in">`mask[token] == 1`</span> 时执行真实计算，跳过无效分块，在完全不打断 CUDA Graph 静态回放的前提下完美适配 MoE 动态路由。</span>
+<span id="cb4-358"><a href="#cb4-358" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-359"><a href="#cb4-359" aria-hidden="true" tabindex="-1"></a><span class="fu">## 面试高频追问与工业级优化扩展</span></span>
+<span id="cb4-360"><a href="#cb4-360" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-361"><a href="#cb4-361" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**追问 1：TMA 的 Multicast 广播特性在 GEMM 中如何使用？**</span>
+<span id="cb4-362"><a href="#cb4-362" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*回答要点*：Hopper 引入了 Cluster 概念（最多 8 个 SM 组成硬件集群）。当多个 SM 负责计算相同 $M$ 或相同 $N$ 维度的矩阵瓦片时，A 或 B 矩阵数据完全相同。TMA 支持 Cluster Multicast：一个 SM 发起 TMA 读取，硬件可将数据自动多播并发写入集群内其他多个 SM 的 Shared Memory 中，将 L2 Cache 和显存带宽压力直接骤降数倍！</span>
+<span id="cb4-363"><a href="#cb4-363" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**追问 2：为什么 DeepGEMM 坚决不用 NVRTC 而是自研 C++ JIT 编译系统？**</span>
+<span id="cb4-364"><a href="#cb4-364" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*回答要点*：早期版本尝试过 NVRTC，但发现 NVRTC 针对 Hopper SM90 高级 PTX（如 WGMMA、TMA 事务屏障）的代码生成效率和指令交织优化远不如最新的标准 NVCC 驱动编译器。DeepGEMM 开发了轻量级的 C++ JIT 运行时，直接调用主机端 NVCC 缓存二进制产物，实现了亚秒级冷启动与极低运行时调用开销。</span>
+<span id="cb4-365"><a href="#cb4-365" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-366"><a href="#cb4-366" aria-hidden="true" tabindex="-1"></a><span class="fu">## 源码参考与延伸阅读</span></span>
+<span id="cb4-367"><a href="#cb4-367" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-368"><a href="#cb4-368" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">DeepSeek DeepGEMM 官方开源仓库</span><span class="co">](https://github.com/deepseek-ai/DeepGEMM)</span></span>
+<span id="cb4-369"><a href="#cb4-369" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">NVIDIA PTX ISA 8.5: WGMMA &amp; TMA Specifications</span><span class="co">](https://docs.nvidia.com/cuda/parallel-thread-execution/)</span></span>
+<span id="cb4-370"><a href="#cb4-370" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">DeepSeek-V3 Technical Report: Multi-head Latent Attention and DeepSeekMoE FP8 Training</span><span class="co">](https://arxiv.org/abs/2412.19437)</span></span>
+<span id="cb4-371"><a href="#cb4-371" aria-hidden="true" tabindex="-1"></a>:::</span>
+</code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
+</div></div></div></div></div>
+</div> <!-- /content -->
+
+
+
+
+<footer class="footer"><div class="nav-footer"><div class="nav-footer-center"><div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></div></div></footer><script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>

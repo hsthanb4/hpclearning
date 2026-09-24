@@ -1,0 +1,1881 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.10.18">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>第 14 课：DeepSeek DeepEP 核心架构与 MoE 专家并行通信算子拆解 – HPC / AI Infra 面试课程</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-5a1953863e1f72ef3b996ef827f01ca7.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-c23ae8bcde1ab63edce3c632584dd13f.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7381337e273cda72aa4f884aa8562a50.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-c23ae8bcde1ab63edce3c632584dd13f.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+<script src="../site_libs/quarto-diagram/mermaid.min.js"></script>
+<script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
+<link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
+
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
+
+<link rel="stylesheet" href="../styles.css">
+</head>
+
+<body class="nav-sidebar docked nav-fixed quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="../index.html">
+    <span class="navbar-title">HPC &amp; AI Infra</span>
+    </a>
+  </div>
+            <div id="quarto-search" class="" title="Search"></div>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarCollapse" aria-controls="navbarCollapse" role="menu" aria-expanded="false" aria-label="Toggle navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+  <span class="navbar-toggler-icon"></span>
+</button>
+          <div class="collapse navbar-collapse" id="navbarCollapse">
+            <ul class="navbar-nav navbar-nav-scroll me-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="../index.html"> 
+<span class="menu-text">首页</span></a>
+  </li>  
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu-" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">核心主线</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu-">    
+        <li>
+    <a class="dropdown-item" href="../train/index.html">
+ <span class="dropdown-text">训练系统 (14课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cuda/index.html">
+ <span class="dropdown-text">CUDA Kernel (14课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cutlass/index.html">
+ <span class="dropdown-text">CUTLASS / CuTe (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../triton/index.html">
+ <span class="dropdown-text">Triton Kernel (10课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../mlir/index.html">
+ <span class="dropdown-text">MLIR 编译器 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../rl/index.html">
+ <span class="dropdown-text">强化学习 (12课)</span></a>
+  </li>  
+    </ul>
+  </li>
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu--1" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">补充线</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu--1">    
+        <li>
+    <a class="dropdown-item" href="../inference/index.html">
+ <span class="dropdown-text">推理引擎 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../runtime/index.html">
+ <span class="dropdown-text">框架运行时 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../platform/index.html">
+ <span class="dropdown-text">集群平台 (8课)</span></a>
+  </li>  
+    </ul>
+  </li>
+</ul>
+            <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/hsthanb4/hpclearning"> <i class="bi bi-github" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+</ul>
+          </div> <!-- /navcollapse -->
+            <div class="quarto-navbar-tools">
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+</div>
+      </div> <!-- /container-fluid -->
+    </nav>
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../cuda/lesson14_deepep.html">第 14 课：DeepSeek DeepEP 核心架构与 MoE 专家并行通信算子拆解</a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">CUDA Kernel 面试主线</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson01_vector_add.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 1 课：线程映射与 Grid-Stride Loop</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson02_reduce_sum.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 2 课：Warp/Block 归约与两阶段求和</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson03_gemv.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 3 课：GEMV 与行级并行</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson04_rmsnorm.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 4 课：RMSNorm：统计量与两遍访问</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson05_layernorm.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 5 课：LayerNorm：均值、方差与数值稳定</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson06_softmax_naive.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 6 课：稳定 Softmax 与朴素复杂度</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson07_online_softmax.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 7 课：Online Softmax 与可结合状态</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson08_transpose_naive.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 8 课：朴素转置与合并访存</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson09_transpose_tiled.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 9 课：共享内存转置与 Bank Conflict</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson10_gemm_tiled.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 10 课：共享内存 Tiled GEMM</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson11_silu.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 11 课：SiLU 与算子融合</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson12_argmax.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 12 课：ArgMax 对归约与确定性</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson13_deepgemm.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../cuda/lesson14_deepep.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text">第 14 课：DeepSeek DeepEP 核心架构与 MoE 专家并行通信算子拆解</span></a>
+  </div>
+</li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">本页目录</h2>
+   
+  <ul>
+  <li><a href="#本课目标与完成标准" id="toc-本课目标与完成标准" class="nav-link active" data-scroll-target="#本课目标与完成标准">本课目标与完成标准</a></li>
+  <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
+  <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
+  <ul class="collapse">
+  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
+  <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
+  <li><a href="#deepep-核心微架构与算法剖析" id="toc-deepep-核心微架构与算法剖析" class="nav-link" data-scroll-target="#deepep-核心微架构与算法剖析">2. DeepEP 核心微架构与算法剖析</a></li>
+  <li><a href="#核心代码架构解析dispatch-与-combine-原语" id="toc-核心代码架构解析dispatch-与-combine-原语" class="nav-link" data-scroll-target="#核心代码架构解析dispatch-与-combine-原语">3. 核心代码架构解析：Dispatch 与 Combine 原语</a></li>
+  </ul></li>
+  <li><a href="#实践任务唯一代码填空题" id="toc-实践任务唯一代码填空题" class="nav-link" data-scroll-target="#实践任务唯一代码填空题">实践任务：唯一代码填空题</a>
+  <ul class="collapse">
+  <li><a href="#练习说明" id="toc-练习说明" class="nav-link" data-scroll-target="#练习说明">练习说明</a></li>
+  <li><a href="#检查方法" id="toc-检查方法" class="nav-link" data-scroll-target="#检查方法">检查方法</a></li>
+  <li><a href="#q1" id="toc-q1" class="nav-link" data-scroll-target="#q1">Q1</a></li>
+  <li><a href="#q2" id="toc-q2" class="nav-link" data-scroll-target="#q2">Q2</a></li>
+  <li><a href="#q3" id="toc-q3" class="nav-link" data-scroll-target="#q3">Q3</a></li>
+  </ul></li>
+  <li><a href="#评分与通过规则" id="toc-评分与通过规则" class="nav-link" data-scroll-target="#评分与通过规则">评分与通过规则</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<div class="quarto-title-block"><div><h1 class="title">第 14 课：DeepSeek DeepEP 核心架构与 MoE 专家并行通信算子拆解</h1><button type="button" class="btn code-tools-button dropdown-toggle" id="quarto-code-tools-menu" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi"></i> Code</button><ul class="dropdown-menu dropdown-menu-end" aria-labelelledby="quarto-code-tools-menu"><li><a id="quarto-show-all-code" class="dropdown-item" href="javascript:void(0)" role="button">Show All Code</a></li><li><a id="quarto-hide-all-code" class="dropdown-item" href="javascript:void(0)" role="button">Hide All Code</a></li><li><hr class="dropdown-divider"></li><li><a id="quarto-view-source" class="dropdown-item" href="javascript:void(0)" role="button">View Source</a></li></ul></div></div>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-simple callout-note">
+<div class="callout-body d-flex">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-body-container">
+<p><strong>参考答案版</strong>：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</p>
+</div>
+</div>
+</div>
+<section id="本课目标与完成标准" class="level2">
+<h2 class="anchored" data-anchor-id="本课目标与完成标准">本课目标与完成标准</h2>
+<p>学完后你应能： - 深刻理解大模型 MoE（Mixture of Experts）在集群规模扩展下的通信瓶颈（All-to-All Dispatch &amp; Combine）； - 掌握 DeepSeek 开源 MoE 通信库 <strong>DeepEP</strong> 的核心架构与设计哲学，说清其颠覆传统 NCCL 的技术关键； - 剖析 DeepEP 的两大核心引擎：<strong>高吞吐普通模式（High-Throughput Normal Mode）</strong> 与 <strong>低延迟推理模式（Low-Latency Mode）</strong>； - 掌握 SM 算力分区（SM Resource Partitioning）与“计算-通信完全重叠”（Mega-MoE Overlapping）的实现机理； - 理解跨机分层调度（Hierarchical All-to-All：NVLink 节点内 + RDMA 节点间）与 CUDA Graph 零开销静态绑定的精髓。</p>
+<p>通过必须同时满足： - 独立补齐本课唯一的代码填空题（MoE 专家路由分发 Dispatch 与加权合并 Combine 核心算子模拟），并通过测试断言； - 三个问答题均说明因果链与硬件交互逻辑，拒绝空洞术语； - 能讲清至少一个通信正确性边界与性能权衡（如 SM 占用量与 GEMM 算力竞争）； - 总分不低于 8/10，且无一票否决级概念错误。</p>
+</section>
+<section id="前置关系" class="level2">
+<h2 class="anchored" data-anchor-id="前置关系">前置关系</h2>
+<ul>
+<li>课程前置：<a href="../cuda/lesson10_gemm_tiled.html">第 10 课：共享内存 Tiled GEMM</a>、<a href="../cuda/lesson13_deepgemm.html">第 13 课：DeepSeek DeepGEMM 核心架构</a>、分布式通信基础（AllReduce/All-to-All、RDMA、NVLink）。</li>
+<li>本课在路线中的作用：与第 13 课 DeepGEMM 形成“算子+通信”合力，完整拼齐 DeepSeek-V3 / R1 核心分布式系统的底层基石。</li>
+</ul>
+</section>
+<section id="核心心智模型" class="level2">
+<h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
+<section id="核心操作与执行流程图解" class="level3">
+<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart TD
+    subgraph DeepEPArch["DeepEP MoE 专家并行端到端通信与重叠架构"]
+        direction TB
+        subgraph Dispatch["1. Token 分发阶段 (Dispatch Phase)"]
+            TokenIn["输入隐藏状态 Tokens [Batch, Hidden]"] --&gt; TopK["Gate 网络选出 Top-K 专家及权重"]
+            TopK --&gt; SM_Part["SM 硬件分区: 分配 20~24 SMs 专职通信"]
+            SM_Part --&gt;|节点内高速直写| NVLink["NVLink P2P (900 GB/s) 直接搬运"]
+            SM_Part --&gt;|跨节点 RDMA| IB["InfiniBand / RoCE GPUDirect RDMA"]
+            NVLink &amp; IB --&gt; ExpertBuf["目标卡专家接收缓冲区 (对齐至 DeepGEMM 输入)"]
+        end
+
+        subgraph Compute["2. 专家计算阶段 (Expert GEMM Phase)"]
+            ExpertBuf --&gt; GroupedGEMM["DeepGEMM Grouped FP8 GEMM (占用剩余 100+ SMs)"]
+            GroupedGEMM --&gt; ExpertOut["本地专家前向输出张量"]
+        end
+
+        subgraph Combine["3. 结果合并阶段 (Combine Phase)"]
+            ExpertOut --&gt; ScatterBack["沿反向链路回传至源卡 (NVLink / RDMA)"]
+            ScatterBack --&gt; WeightedSum["按 Top-K 门控权重 (Gating Weights) 浮点加权求和"]
+            WeightedSum --&gt; FinalOut["恢复原始序列顺序的输出张量 [Batch, Hidden]"]
+        end
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 14-1：DeepEP 在 MoE 专家并行中的 Dispatch、计算与 Combine 数据链路全景</em>
+</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart LR
+    subgraph OverlapScheme["DeepEP Mega-MoE 计算与通信完全重叠流水线 (Compute-Comm Overlapping)"]
+        direction TB
+        subgraph StreamComm["通信流 (专用 20 SMs，异步执行)"]
+            CommDispatch["MoE Layer L: 路由 Dispatch 通信"]
+            CommCombine["MoE Layer L: 专家 Combine 通信"]
+        end
+
+        subgraph StreamComp["计算流 (独占 110 SMs，全速推进)"]
+            CompShared["MoE Layer L: 共享专家 GEMM / Dense Attention"]
+            CompNext["MoE Layer L+1: 预处理 LayerNorm / QKV 投影 GEMM"]
+        end
+
+        CommDispatch -.-&gt;|时间窗口完全重叠| CompShared
+        CommCombine -.-&gt;|时间窗口完全重叠| CompNext
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 14-2：DeepEP 专用通信 SM 与主计算流在时间轴上的无气泡重叠机理</em>
+</p>
+</section>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p><strong>DeepEP</strong> 是 DeepSeek 专门为超大规模混合专家模型（MoE，如 DeepSeek-V3 / R1 / V2）打造的<strong>首个开源专用 EP（Expert Parallelism）通信库</strong>。</p>
+<section id="传统-moe-分布式训练与推理的通信灾难" class="level4">
+<h4 class="anchored" data-anchor-id="传统-moe-分布式训练与推理的通信灾难">(1) 传统 MoE 分布式训练与推理的通信灾难</h4>
+<p>DeepSeek-V3 拥有 671B 参数，采用了极度细粒度的路由机制：总共 <strong>256 个路由专家 + 1 个共享专家</strong>，每个 Token 动态激活 <strong>Top-8 个专家</strong>。当集群规模达到数百乃至数千张 GPU 时，专家被切分在不同物理节点上： 1. <strong>NCCL <code>all_to_allv</code> 的巨大延迟开销</strong>： - NCCL 作为通用通信原语，依赖 Host 端 CPU 发起，每次 Launch 开销高达 <span class="math inline">\(10 \sim 20\,\mu\text{s}\)</span>； - 在推理 Decoding 阶段（Batch 较小，每个 Token 仅几十微秒的 GEMM 计算），通信 Launch 开销甚至超过了计算本身，导致 GPU 发生大量同步空转。 2. <strong>动态 Token 数量破坏 CUDA Graph 捕获</strong>： - 每个 Expert 接收到的 Token 数因数据分布动态变化。传统做法需要 CPU 介入统计偏移行数并重新下发变长张量，<strong>彻底摧毁了推理引擎的 CUDA Graph 静态执行图</strong>。 3. <strong>节点内 NVLink 与跨机 RDMA 无法高效分层流水</strong>： - 扁平的 All-to-All 使得跨机网络带宽与卡间 NVLink 带宽发生拥塞短板效应，无法跑满硬件物理上限。</p>
+</section>
+<section id="deepep-的革命性突破" class="level4">
+<h4 class="anchored" data-anchor-id="deepep-的革命性突破">(2) DeepEP 的革命性突破</h4>
+<ul>
+<li><strong>纯 GPU SM 驱动的低延迟内核（Low-Latency Kernel）</strong>：完全绕过 CPU 与 NCCL。GPU 线程直接发起 NVLink 内存读写和 GPUDirect RDMA 网络事务，将通信延迟压至<strong>微秒级（<span class="math inline">\(&lt; 10\,\mu\text{s}\)</span>）</strong>！</li>
+<li><strong>CUDA Graph 原生兼容（零 CPU 介入）</strong>：在解码阶段通过预分配静态缓冲区与掩码标记，全流程由 GPU 硬件自主完成路由寻址与同步，完美与 CUDA Graph 融为一体；</li>
+<li><strong>非对称 SM 分区（SM Partitioning）</strong>：精确固定占用 20 个左右的 SM 执行通信，其余 100+ 个 SM 持续全速计算，奠定了 DeepSeek-V3 惊艳业界的 <strong>Mega-MoE 零通信开销掩盖</strong>。</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="deepep-核心微架构与算法剖析" class="level3">
+<h3 class="anchored" data-anchor-id="deepep-核心微架构与算法剖析">2. DeepEP 核心微架构与算法剖析</h3>
+<section id="双模引擎设计dual-engine-architecture" class="level4">
+<h4 class="anchored" data-anchor-id="双模引擎设计dual-engine-architecture">(1) 双模引擎设计（Dual-Engine Architecture）</h4>
+<p>DeepEP 针对训练与推理的不同吞吐特征，实现了两套独立的算子流水线：</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">维度</th>
+<th style="text-align: left;">普通高吞吐模式（Normal Mode）</th>
+<th style="text-align: left;">低延迟模式（Low-Latency Mode）</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><strong>主要应用场景</strong></td>
+<td style="text-align: left;">离线训练（Training）与推理首字填充（Prefill）</td>
+<td style="text-align: left;">推理逐字生成（Decoding）与低延迟服务</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>数据吞吐特征</strong></td>
+<td style="text-align: left;">大 Batch、长序列、Token 吞吐量巨大</td>
+<td style="text-align: left;">小 Batch（1~128 tokens）、对时延极端敏感</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>底层硬件通道</strong></td>
+<td style="text-align: left;">显存 Buffer + NVLink / 跨机 RDMA 大包多通道并发</td>
+<td style="text-align: left;">纯 SM 寄存器/SMem 直写 NVLink P2P + 硬件原子操作</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>CPU 介入度</strong></td>
+<td style="text-align: left;">极小（异步流水调度）</td>
+<td style="text-align: left;"><strong>绝对零介入（Pure GPU Hardware-Driven）</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>CUDA Graph 支持</strong></td>
+<td style="text-align: left;">支持静态变体</td>
+<td style="text-align: left;"><strong>100% 静态兼容，无动态分配</strong></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="低延迟引擎low-latency-engine微架构细节" class="level4">
+<h4 class="anchored" data-anchor-id="低延迟引擎low-latency-engine微架构细节">(2) 低延迟引擎（Low-Latency Engine）微架构细节</h4>
+<p>在 Low-Latency 模式下，GPU 节点间的 NVLink 充当了一块“全局统一编址内存（Unified Memory Fabric）”： - <strong>P2P 硬件原子标记</strong>：源 GPU 的 SM 在向目标 GPU 的全局显存写入 Token 字节流后，利用 NVLink 远程原子指令（<code>atomicAdd</code> 或带 release 语义的 memory fence）在目标卡上的控制槽位加 1； - <strong>目标卡自旋等待（Spinning Barrier）</strong>：目标卡上的消费者 SM 直接在 L2 Cache / SMem 级别对控制槽位进行自旋轮询（<code>ld.volatile</code>），一旦数据到达即刻启动计算，<strong>延迟降低到不可思议的 <span class="math inline">\(3 \sim 5\,\mu\text{s}\)</span></strong>！</p>
+</section>
+<section id="分层-all-to-allhierarchical-all-to-all与两跳路由" class="level4">
+<h4 class="anchored" data-anchor-id="分层-all-to-allhierarchical-all-to-all与两跳路由">(3) 分层 All-to-All（Hierarchical All-to-All）与两跳路由</h4>
+<p>对于跨节点集群（例如 8 卡/节点）： - <strong>节点内（Intra-node）</strong>：具备高达 <span class="math inline">\(900\,\text{GB/s}\)</span> 双向带宽的 NVLink； - <strong>节点间（Inter-node）</strong>：受限于网卡带宽（如 <span class="math inline">\(400\,\text{Gbps} \approx 50\,\text{GB/s}\)</span>）。 - <strong>两跳代理路由机制</strong>：DeepEP 将发往同一远程节点的跨机 Token 先在本地节点内通过 NVLink 汇总到特定的网卡代理卡（Proxy Rank），由网卡高效打包发起 RDMA 发送；到达目标节点后，再经由目标节点内部的 NVLink 广播至相应专家卡，彻底消除远端跨机网卡的随机散落小包，打满网络吞吐。</p>
+<hr>
+</section>
+</section>
+<section id="核心代码架构解析dispatch-与-combine-原语" class="level3">
+<h3 class="anchored" data-anchor-id="核心代码架构解析dispatch-与-combine-原语">3. 核心代码架构解析：Dispatch 与 Combine 原语</h3>
+<p>以下代码展示了 DeepEP 核心通信算子的逻辑骨架与调用接口：</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="co"># DeepEP Python 核心 API 规范</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> deep_ep</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. 初始化低延迟通信缓冲（支持 CUDA Graph）</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="bu">buffer</span> <span class="op">=</span> deep_ep.Buffer(</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    group<span class="op">=</span>dist_group, </span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    num_nvl_bytes<span class="op">=</span><span class="dv">128</span> <span class="op">*</span> <span class="dv">1024</span> <span class="op">*</span> <span class="dv">1024</span>,  <span class="co"># NVLink 环形缓冲区</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    num_rdma_bytes<span class="op">=</span><span class="dv">256</span> <span class="op">*</span> <span class="dv">1024</span> <span class="op">*</span> <span class="dv">1024</span>  <span class="co"># RDMA 跨机缓冲区</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a><span class="co"># 2. 低延迟 Token 分发（Dispatch）</span></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a><span class="co"># topk_idx: [num_tokens, num_topk] 各 Token 选中的全局专家索引</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="co"># x:        [num_tokens, hidden_dim] 输入激活值</span></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens <span class="op">=</span> <span class="bu">buffer</span>.low_latency_dispatch(</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    x<span class="op">=</span>x,</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>    topk_idx<span class="op">=</span>topk_idx,</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    topk_weights<span class="op">=</span>topk_weights,</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>    num_max_dispatch_tokens_per_rank<span class="op">=</span>max_capacity,</span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    is_async<span class="op">=</span><span class="va">True</span>  <span class="co"># 异步非阻塞发射，释放主计算流</span></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a><span class="co"># 3. 本地专家执行计算（调用 DeepGEMM Masked 算子）</span></span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>expert_out <span class="op">=</span> deep_gemm.m_grouped_fp8_gemm_nt_masked(</span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>    recv_x, expert_weights, mask<span class="op">=</span>recv_mask</span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a><span class="co"># 4. 专家输出合并汇聚（Combine）</span></span>
+<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a><span class="co"># 将各专家计算出的隐藏状态拉回源卡，并完成 Top-K 权重乘加</span></span>
+<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>final_hidden_states <span class="op">=</span> <span class="bu">buffer</span>.low_latency_combine(</span>
+<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a>    x<span class="op">=</span>expert_out,</span>
+<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>    topk_idx<span class="op">=</span>topk_idx,</span>
+<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a>    topk_weights<span class="op">=</span>topk_weights,</span>
+<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>    is_async<span class="op">=</span><span class="va">False</span></span>
+<span id="cb1-35"><a href="#cb1-35" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<hr>
+</section>
+</section>
+<section id="实践任务唯一代码填空题" class="level2">
+<h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
+<section id="练习说明" class="level3">
+<h3 class="anchored" data-anchor-id="练习说明">练习说明</h3>
+<p>请实现一个<strong>自包含的 MoE 专家并行路由与加权合并算子模拟器（MoE Token Dispatch &amp; Combine Simulator）</strong>： - 输入 <span class="math inline">\(N\)</span> 个 Token，每个 Token 拥有隐藏维度 <span class="math inline">\(H=4\)</span>； - 每个 Token 路由到 Top-<span class="math inline">\(K\)</span>（<span class="math inline">\(K=2\)</span>）个专家，共有 <span class="math inline">\(E=4\)</span> 个专家，每个专家有归属的虚拟 Rank； - <strong>Dispatch 阶段</strong>：按照专家索引将 Token 数据打包，分发到对应专家的待处理队列中； - <strong>Expert Compute 阶段</strong>：专家对接收到的 Token 执行简单的前向映射（仿 GEMM 运算：<span class="math inline">\(y = x \cdot W_e\)</span>）； - <strong>Combine 阶段</strong>：将计算结果拉回原 Token 位置，<strong>并严格按照 Gating 权重执行归一化加权求和</strong>。</p>
+<p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
+<div id="deepep_exercise" class="cell" data-course_role="exercise" data-execution_count="1">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_dispatch(tokens, topk_idx, num_experts):</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="co">    模拟 DeepEP Dispatch 阶段：将 Token 打包分配给各 Expert</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="co">    tokens:   [N, H]</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="co">    topk_idx: [N, K] (每个 token 选中的 expert 编号)</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="co">    返回:</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="co">      expert_inputs: dict {expert_id: list of (token_idx, token_vector)}</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    N, H <span class="op">=</span> tokens.shape</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>    N_idx, K <span class="op">=</span> topk_idx.shape</span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> N <span class="op">==</span> N_idx</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    expert_inputs <span class="op">=</span> {e: [] <span class="cf">for</span> e <span class="kw">in</span> <span class="bu">range</span>(num_experts)}</span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="co"># </span><span class="al">TODO</span><span class="co">: 遍历所有 Token 与其 Top-K 路由目标，填入对应专家的输入队列</span></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(K):</span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> topk_idx[i, k]</span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 存入 (原序列索引 i, 对应的 token 特征向量)</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>            ______</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> expert_inputs</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H):</span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a><span class="co">    模拟 DeepEP Combine 阶段：接收各专家输出，按 Gating Weights 加权汇聚</span></span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a><span class="co">    expert_outputs: dict {expert_id: list of (token_idx, output_vector)}</span></span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a><span class="co">    topk_idx:       [N, K]</span></span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a><span class="co">    topk_weights:   [N, K]</span></span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a><span class="co">    返回:</span></span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a><span class="co">      combined_out:   [N, H]</span></span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>    combined_out <span class="op">=</span> np.zeros((N, H), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 建立从 (token_idx, expert_id) 到输出结果的快速查找表</span></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>    result_map <span class="op">=</span> {}</span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> e_id, item_list <span class="kw">in</span> expert_outputs.items():</span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t_idx, out_vec <span class="kw">in</span> item_list:</span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>            result_map[(t_idx, e_id)] <span class="op">=</span> out_vec</span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>    <span class="co"># </span><span class="al">TODO</span><span class="co">: 按照 topk_idx 与 topk_weights 完成原始 Token 的加权和</span></span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(topk_idx.shape[<span class="dv">1</span>]):</span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> topk_idx[i, k]</span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>            weight <span class="op">=</span> topk_weights[i, k]</span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>            out_vec <span class="op">=</span> result_map[(i, e_id)]</span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>            combined_out[i] <span class="op">+=</span> ______</span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> combined_out</span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------- 测试用例与端到端验证 -----------------</span></span>
+<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>np.random.seed(<span class="dv">42</span>)</span>
+<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a>N, H, K, E <span class="op">=</span> <span class="dv">4</span>, <span class="dv">4</span>, <span class="dv">2</span>, <span class="dv">4</span></span>
+<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a><span class="co"># 生成虚拟输入</span></span>
+<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>tokens <span class="op">=</span> np.random.randn(N, H).astype(np.float32)</span>
+<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a><span class="co"># 每个 token 随机选 2 个不重复的专家</span></span>
+<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a>topk_idx <span class="op">=</span> np.array([</span>
+<span id="cb2-61"><a href="#cb2-61" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">0</span>, <span class="dv">2</span>],</span>
+<span id="cb2-62"><a href="#cb2-62" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">1</span>, <span class="dv">3</span>],</span>
+<span id="cb2-63"><a href="#cb2-63" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">0</span>, <span class="dv">3</span>],</span>
+<span id="cb2-64"><a href="#cb2-64" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">1</span>, <span class="dv">2</span>]</span>
+<span id="cb2-65"><a href="#cb2-65" aria-hidden="true" tabindex="-1"></a>], dtype<span class="op">=</span>np.int32)</span>
+<span id="cb2-66"><a href="#cb2-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-67"><a href="#cb2-67" aria-hidden="true" tabindex="-1"></a><span class="co"># 归一化 Softmax 门控权重</span></span>
+<span id="cb2-68"><a href="#cb2-68" aria-hidden="true" tabindex="-1"></a>raw_weights <span class="op">=</span> np.random.uniform(<span class="fl">0.1</span>, <span class="fl">1.0</span>, size<span class="op">=</span>(N, K))</span>
+<span id="cb2-69"><a href="#cb2-69" aria-hidden="true" tabindex="-1"></a>topk_weights <span class="op">=</span> (raw_weights <span class="op">/</span> raw_weights.<span class="bu">sum</span>(axis<span class="op">=</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)).astype(np.float32)</span>
+<span id="cb2-70"><a href="#cb2-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-71"><a href="#cb2-71" aria-hidden="true" tabindex="-1"></a><span class="co"># 专家权重矩阵（每个专家一个 H x H 线性变换）</span></span>
+<span id="cb2-72"><a href="#cb2-72" aria-hidden="true" tabindex="-1"></a>expert_weights <span class="op">=</span> {e: np.random.randn(H, H).astype(np.float32) <span class="cf">for</span> e <span class="kw">in</span> <span class="bu">range</span>(E)}</span>
+<span id="cb2-73"><a href="#cb2-73" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-74"><a href="#cb2-74" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. 运行 Dispatch</span></span>
+<span id="cb2-75"><a href="#cb2-75" aria-hidden="true" tabindex="-1"></a>dispatched <span class="op">=</span> moe_dispatch(tokens, topk_idx, num_experts<span class="op">=</span>E)</span>
+<span id="cb2-76"><a href="#cb2-76" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="bu">sum</span>(<span class="bu">len</span>(v) <span class="cf">for</span> v <span class="kw">in</span> dispatched.values()) <span class="op">==</span> N <span class="op">*</span> K, <span class="st">"总分发量必须等于 N * K"</span></span>
+<span id="cb2-77"><a href="#cb2-77" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-78"><a href="#cb2-78" aria-hidden="true" tabindex="-1"></a><span class="co"># 2. 执行专家计算</span></span>
+<span id="cb2-79"><a href="#cb2-79" aria-hidden="true" tabindex="-1"></a>expert_outputs <span class="op">=</span> {}</span>
+<span id="cb2-80"><a href="#cb2-80" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> e, items <span class="kw">in</span> dispatched.items():</span>
+<span id="cb2-81"><a href="#cb2-81" aria-hidden="true" tabindex="-1"></a>    expert_outputs[e] <span class="op">=</span> []</span>
+<span id="cb2-82"><a href="#cb2-82" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> t_idx, vec <span class="kw">in</span> items:</span>
+<span id="cb2-83"><a href="#cb2-83" aria-hidden="true" tabindex="-1"></a>        out_vec <span class="op">=</span> np.matmul(vec, expert_weights[e])</span>
+<span id="cb2-84"><a href="#cb2-84" aria-hidden="true" tabindex="-1"></a>        expert_outputs[e].append((t_idx, out_vec))</span>
+<span id="cb2-85"><a href="#cb2-85" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-86"><a href="#cb2-86" aria-hidden="true" tabindex="-1"></a><span class="co"># 3. 运行 Combine</span></span>
+<span id="cb2-87"><a href="#cb2-87" aria-hidden="true" tabindex="-1"></a>combined <span class="op">=</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H)</span>
+<span id="cb2-88"><a href="#cb2-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-89"><a href="#cb2-89" aria-hidden="true" tabindex="-1"></a><span class="co"># 4. 黄金参考标杆 (单机稠密基准对比)</span></span>
+<span id="cb2-90"><a href="#cb2-90" aria-hidden="true" tabindex="-1"></a>ref_out <span class="op">=</span> np.zeros((N, H), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb2-91"><a href="#cb2-91" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb2-92"><a href="#cb2-92" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(K):</span>
+<span id="cb2-93"><a href="#cb2-93" aria-hidden="true" tabindex="-1"></a>        e <span class="op">=</span> topk_idx[i, k]</span>
+<span id="cb2-94"><a href="#cb2-94" aria-hidden="true" tabindex="-1"></a>        w <span class="op">=</span> topk_weights[i, k]</span>
+<span id="cb2-95"><a href="#cb2-95" aria-hidden="true" tabindex="-1"></a>        ref_out[i] <span class="op">+=</span> w <span class="op">*</span> np.matmul(tokens[i], expert_weights[e])</span>
+<span id="cb2-96"><a href="#cb2-96" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-97"><a href="#cb2-97" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(combined, ref_out, atol<span class="op">=</span><span class="fl">1e-5</span>), <span class="st">"MoE Dispatch &amp; Combine 数学等价性校验失败！"</span></span>
+<span id="cb2-98"><a href="#cb2-98" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"DeepEP 核心调度流数学等价验证 100% 通过！"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+</section>
+<section id="检查方法" class="level3">
+<h3 class="anchored" data-anchor-id="检查方法">检查方法</h3>
+<p>运行脚本验证断言通过；核对各专家处理 Token 总数与 <code>N * K</code> 守恒，确认加权汇聚结果与单机数学真值严格一致。</p>
+</section>
+<section id="q1" class="level3">
+<h3 class="anchored" data-anchor-id="q1">Q1</h3>
+<p>在 MoE 推理的 Decoding 阶段，为什么传统基于 CPU 发起的 NCCL <code>all_to_allv</code> 会造成严重的显卡算力空转（Bubbles）？DeepEP 的“纯 SM 驱动低延迟内核”是如何消除这一瓶颈的？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+<section id="q2" class="level3">
+<h3 class="anchored" data-anchor-id="q2">Q2</h3>
+<p>DeepEP 在架构设计上为何坚决采用<strong>非对称 SM 分区（固定分配 20~24 个 SM 专职通信）</strong>，而不是让全部 SM（如 H800 的 132 个 SM）并发参与传输？这与 Mega-MoE 的计算重叠有什么直接因果联系？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+<section id="q3" class="level3">
+<h3 class="anchored" data-anchor-id="q3">Q3</h3>
+<p>面对跨多物理机节点的大规模集群，为什么扁平的 All-to-All 性能远逊于 DeepEP 的“分层两跳路由（Hierarchical 2-Hop）”？在面临不同专家负载偏斜（Load Imbalance / Straggler）时，系统是如何防范尾部延迟爆炸的？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+</section>
+<section id="评分与通过规则" class="level2">
+<h2 class="anchored" data-anchor-id="评分与通过规则">评分与通过规则</h2>
+<ul>
+<li>代码 4 分：正确完成 Dispatch 索引映射与 Combine 加权和逻辑并跑通断言；</li>
+<li>Q1～Q3 各 2 分：必须结合微架构原语（CPU Launch 延迟、NVLink 硬件带宽、GPUDirect RDMA、SM 占用与计算并发）深入说明；</li>
+<li>一票否决：混淆 Dispatch 与 Combine 的通信方向，或认为通讯必须占用全量 SM。</li>
+</ul>
+<div class="callout callout-style-default callout-tip no-icon callout-titled" title="💡 点击展开参考答案与详细代码实现">
+<div class="callout-header d-flex align-content-center collapsed" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon no-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>💡 点击展开参考答案与详细代码实现
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-1" class="callout-1-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<section id="参考答案仅-answer-分支" class="level2">
+<h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
+<div id="deepep_solution" class="cell" data-course_role="solution" data-execution_count="2">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_dispatch(tokens, topk_idx, num_experts):</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    N, H <span class="op">=</span> tokens.shape</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    expert_inputs <span class="op">=</span> {e: [] <span class="cf">for</span> e <span class="kw">in</span> <span class="bu">range</span>(num_experts)}</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(topk_idx.shape[<span class="dv">1</span>]):</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> <span class="bu">int</span>(topk_idx[i, k])</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>            expert_inputs[e_id].append((i, tokens[i]))</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> expert_inputs</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H):</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    combined_out <span class="op">=</span> np.zeros((N, H), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    result_map <span class="op">=</span> {}</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> e_id, item_list <span class="kw">in</span> expert_outputs.items():</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t_idx, out_vec <span class="kw">in</span> item_list:</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>            result_map[(t_idx, e_id)] <span class="op">=</span> out_vec</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(topk_idx.shape[<span class="dv">1</span>]):</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> <span class="bu">int</span>(topk_idx[i, k])</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>            weight <span class="op">=</span> topk_weights[i, k]</span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>            out_vec <span class="op">=</span> result_map[(i, e_id)]</span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>            combined_out[i] <span class="op">+=</span> weight <span class="op">*</span> out_vec</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> combined_out</span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="co"># 执行自测</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>dispatched <span class="op">=</span> moe_dispatch(tokens, topk_idx, num_experts<span class="op">=</span>E)</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>expert_outputs <span class="op">=</span> {e: [(t_idx, np.matmul(vec, expert_weights[e])) <span class="cf">for</span> t_idx, vec <span class="kw">in</span> items] <span class="cf">for</span> e, items <span class="kw">in</span> dispatched.items()}</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>combined <span class="op">=</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H)</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(combined, ref_out, atol<span class="op">=</span><span class="fl">1e-5</span>)</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"参考答案验证执行通过！"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+<section id="q1-参考答案" class="level3">
+<h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
+<ol type="1">
+<li><strong>NCCL 的 CPU 发起瓶颈与时延占比</strong>： 在通用 NCCL 中，每次通信必须由 CPU 运行通信运行时代码，解析通信拓扑并向 GPU 发射通信 Kernel。这一开销固定在 <span class="math inline">\(10 \sim 25\,\mu\text{s}\)</span>。在训练大 Batch 时该开销可忽略，但在推理 Decoding 阶段，每个 Step 的 GEMM 计算耗时可能仅有 <span class="math inline">\(30\,\mu\text{s}\)</span>。CPU Launch 开销直接吃掉整个执行周期的 40% 以上，造成严重的“CPU 喂不饱 GPU”的饥饿气泡。</li>
+<li><strong>纯 SM 驱动低延迟内核破局</strong>： DeepEP 在 GPU 显存中预分配固定的通信环形队列和状态 Flag。GPU 内部线程（SM）直接利用 NVLink P2P 语义，执行远程显存写入（Store 指令），并通过微架构级的原子栅栏（Memory Barrier）通知对方。全流程<strong>无需主机端 CPU 发送任何新指令，也无需重建通信拓扑</strong>，将握手与传输端到端延迟压缩至惊人的 <span class="math inline">\(&lt; 5\,\mu\text{s}\)</span>，且完美兼容 CUDA Graph。</li>
+</ol>
+</section>
+<section id="q2-参考答案" class="level3">
+<h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
+<ol type="1">
+<li><strong>SM 资源饱和度阈值</strong>： NVLink 的双向物理带宽（如 H100 的 900 GB/s）由 GPU 专用的 NVLink 传输引擎和片上 Crossbar 提供支持。测试表明，<strong>仅需 20~24 个 SM 的线程发射并发度，就足以打满整张显卡的 NVLink/RDMA 物理带宽</strong>。若投入全部 132 个 SM，通信带宽不会有任何提升，反而因为片上互连总线冲突导致效率下降。</li>
+<li><strong>Mega-MoE 计算-通信双流重叠的前提</strong>： 如果通信占满了所有 SM，GPU 就无法同时执行其他计算 Kernel。通过将 SM 显式分区：<strong>20 个 SM 锁定在独立 CUDA Stream 跑通信，其余 110 个 SM 锁定在主计算 Stream 执行共享专家（Shared Expert）或前序 Attention 算子</strong>。两者在 GPU 硬件调度器中物理并行共存，通信时间被纯计算完全吸收掩盖，实现了真实的“零通信开销 MoE”。</li>
+</ol>
+</section>
+<section id="q3-参考答案" class="level3">
+<h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
+<ol type="1">
+<li><strong>分层两跳（Hierarchical 2-Hop）消灭网络木桶短板</strong>： 集群中节点内 NVLink 带宽（900 GB/s）是节点间 RDMA 带宽（50 GB/s）的近 18 倍。若采用扁平 All-to-All，各卡各自跨机发射小包，将导致 RDMA 拥塞丢包、网卡 PCIe 竞争严重。两跳路由将跨机流量在节点内部聚合成连续大包，统一经由特定高速网卡通道外发，最大化 RDMA 的传输吞吐（MTU 利用率 100%）。</li>
+<li><strong>缓解长尾专家（Straggler）机制</strong>： 在大模型中，某些热门专家被选中的频率远高于冷门专家。DeepEP 配合 DeepSeek-V3 的无辅助损失负载均衡策略（Auxiliary-loss-free Load Balancing），在通信层设计了<strong>带丢弃/分流重试与动态缓冲区管理</strong>，防止单个过载 Expert 的接收队列撑爆显存或造成跨卡死锁。</li>
+</ol>
+</section>
+</section>
+<section id="面试高频追问与工业级优化扩展" class="level2">
+<h2 class="anchored" data-anchor-id="面试高频追问与工业级优化扩展">面试高频追问与工业级优化扩展</h2>
+<ul>
+<li><strong>追问 1：DeepEP 的 Combine 算子是如何在通信搬运的同时完成加权求和（In-Flight Reduction）的？</strong>
+<ul>
+<li><em>回答要点</em>：传统做法是先把各专家的原始输出通过 All-to-All 全量收集回显存，再调用一个单独的 PyTorch/Triton Kernel 算加权和，增加了额外的显存读写往返。DeepEP 的 Combine Kernel 在将远端数据通过 NVLink/RDMA 读取到片上共享内存或寄存器后，<strong>直接在片上完成乘 Top-K 权重并原地累加到输出张量</strong>，做到了真实的通信-归约融合（Fused Communication &amp; Reduction），显存带宽消耗直降一半！</li>
+</ul></li>
+<li><strong>追问 2：为什么 DeepEP 可以做到完全免除辅助损失函数（Aux-loss-free）的负载均衡鲁棒性？</strong>
+<ul>
+<li><em>回答要点</em>：过去 MoE 必须依赖高权重的 Aux-loss 强行让各专家 Token 数量均等，但严重损害了模型推理能力。DeepSeek-V3 在算法端采用动态偏置调整（Bias Adjustment），在系统端配合 DeepEP 的高动态范围缓冲切分，即使某些专家瞬时接收 2~3 倍超额 Token，通信流依然能通过流水切片将其高效平滑，不再需要激进丢弃 Token（Zero Token Drop）。</li>
+</ul></li>
+</ul>
+</section>
+<section id="源码参考与延伸阅读" class="level2">
+<h2 class="anchored" data-anchor-id="源码参考与延伸阅读">源码参考与延伸阅读</h2>
+<ul>
+<li><a href="https://github.com/deepseek-ai/DeepEP">DeepSeek DeepEP 官方开源仓库</a></li>
+<li><a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 架构解析：极低通信开销的 MoE 专家并行方案</a></li>
+<li><a href="https://www.nvidia.com/en-us/data-center/nvlink/">NVIDIA NVLink and NVSwitch Architecture In-Depth Guide</a></li>
+</ul>
+</section>
+</div>
+</div>
+</div>
+
+
+<!-- -->
+
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+    const viewSource = window.document.getElementById('quarto-view-source') ||
+                       window.document.getElementById('quarto-code-tools-source');
+    if (viewSource) {
+      const sourceUrl = viewSource.getAttribute("data-quarto-source-url");
+      viewSource.addEventListener("click", function(e) {
+        if (sourceUrl) {
+          // rstudio viewer pane
+          if (/\bcapabilities=\b/.test(window.location)) {
+            window.open(sourceUrl);
+          } else {
+            window.location.href = sourceUrl;
+          }
+        } else {
+          const modal = new bootstrap.Modal(document.getElementById('quarto-embedded-source-code-modal'));
+          modal.show();
+        }
+        return false;
+      });
+    }
+    function toggleCodeHandler(show) {
+      return function(e) {
+        const cellDetails = window.document.querySelectorAll(".cell details.code-fold");
+        for (let i=0; i<cellDetails.length; i++) {
+          const details = cellDetails[i];
+          if (show) {
+            details.open = true;
+          } else {
+            details.removeAttribute("open");
+          }
+        }
+        const cellCodeDivs = window.document.querySelectorAll(".cell div.sourceCode.cell-code");
+        const fromCls = show ? "hidden" : "unhidden";
+        const toCls = show ? "unhidden" : "hidden";
+        for (let i=0; i<cellCodeDivs.length; i++) {
+          const codeDiv = cellCodeDivs[i];
+          if (codeDiv.classList.contains(fromCls)) {
+            codeDiv.classList.remove(fromCls);
+            codeDiv.classList.add(toCls);
+          } 
+        }
+        return false;
+      }
+    }
+    const hideAllCode = window.document.getElementById("quarto-hide-all-code");
+    if (hideAllCode) {
+      hideAllCode.addEventListener("click", toggleCodeHandler(false));
+    }
+    const showAllCode = window.document.getElementById("quarto-show-all-code");
+    if (showAllCode) {
+      showAllCode.addEventListener("click", toggleCodeHandler(true));
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/hsthanb4\.github\.io\/hpclearning\/");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 14 课：DeepSeek DeepEP 核心架构与 MoE 专家并行通信算子拆解"</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>深刻理解大模型 MoE（Mixture of Experts）在集群规模扩展下的通信瓶颈（All-to-All Dispatch &amp; Combine）；</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>掌握 DeepSeek 开源 MoE 通信库 **DeepEP** 的核心架构与设计哲学，说清其颠覆传统 NCCL 的技术关键；</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>剖析 DeepEP 的两大核心引擎：**高吞吐普通模式（High-Throughput Normal Mode）** 与 **低延迟推理模式（Low-Latency Mode）**；</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>掌握 SM 算力分区（SM Resource Partitioning）与“计算-通信完全重叠”（Mega-MoE Overlapping）的实现机理；</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>理解跨机分层调度（Hierarchical All-to-All：NVLink 节点内 + RDMA 节点间）与 CUDA Graph 零开销静态绑定的精髓。</span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题（MoE 专家路由分发 Dispatch 与加权合并 Combine 核心算子模拟），并通过测试断言；</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链与硬件交互逻辑，拒绝空洞术语；</span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能讲清至少一个通信正确性边界与性能权衡（如 SM 占用量与 GEMM 算力竞争）；</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且无一票否决级概念错误。</span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：<span class="co">[</span><span class="ot">第 10 课：共享内存 Tiled GEMM</span><span class="co">](lesson10_gemm_tiled.qmd)</span>、<span class="co">[</span><span class="ot">第 13 课：DeepSeek DeepGEMM 核心架构</span><span class="co">](lesson13_deepgemm.qmd)</span>、分布式通信基础（AllReduce/All-to-All、RDMA、NVLink）。</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：与第 13 课 DeepGEMM 形成“算子+通信”合力，完整拼齐 DeepSeek-V3 / R1 核心分布式系统的底层基石。</span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>    subgraph DeepEPArch[<span class="ot">"</span><span class="st">DeepEP MoE 专家并行端到端通信与重叠架构</span><span class="ot">"</span>]</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>        subgraph Dispatch[<span class="ot">"</span><span class="st">1. Token 分发阶段 (Dispatch Phase)</span><span class="ot">"</span>]</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a>            TokenIn[<span class="ot">"</span><span class="st">输入隐藏状态 Tokens [Batch, Hidden]</span><span class="ot">"</span>] --&gt; TopK[<span class="ot">"</span><span class="st">Gate 网络选出 Top-K 专家及权重</span><span class="ot">"</span>]</span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>            TopK --&gt; SM_Part[<span class="ot">"</span><span class="st">SM 硬件分区: 分配 20~24 SMs 专职通信</span><span class="ot">"</span>]</span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>            SM_Part --&gt;|节点内高速直写| NVLink[<span class="ot">"</span><span class="st">NVLink P2P (900 GB/s) 直接搬运</span><span class="ot">"</span>]</span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>            SM_Part --&gt;|跨节点 RDMA| IB[<span class="ot">"</span><span class="st">InfiniBand / RoCE GPUDirect RDMA</span><span class="ot">"</span>]</span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>            NVLink &amp; IB --&gt; ExpertBuf[<span class="ot">"</span><span class="st">目标卡专家接收缓冲区 (对齐至 DeepGEMM 输入)</span><span class="ot">"</span>]</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>        subgraph Compute[<span class="ot">"</span><span class="st">2. 专家计算阶段 (Expert GEMM Phase)</span><span class="ot">"</span>]</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>            ExpertBuf --&gt; GroupedGEMM[<span class="ot">"</span><span class="st">DeepGEMM Grouped FP8 GEMM (占用剩余 100+ SMs)</span><span class="ot">"</span>]</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>            GroupedGEMM --&gt; ExpertOut[<span class="ot">"</span><span class="st">本地专家前向输出张量</span><span class="ot">"</span>]</span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a>        subgraph Combine[<span class="ot">"</span><span class="st">3. 结果合并阶段 (Combine Phase)</span><span class="ot">"</span>]</span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>            ExpertOut --&gt; ScatterBack[<span class="ot">"</span><span class="st">沿反向链路回传至源卡 (NVLink / RDMA)</span><span class="ot">"</span>]</span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a>            ScatterBack --&gt; WeightedSum[<span class="ot">"</span><span class="st">按 Top-K 门控权重 (Gating Weights) 浮点加权求和</span><span class="ot">"</span>]</span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a>            WeightedSum --&gt; FinalOut[<span class="ot">"</span><span class="st">恢复原始序列顺序的输出张量 [Batch, Hidden]</span><span class="ot">"</span>]</span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 14-1：DeepEP 在 MoE 专家并行中的 Dispatch、计算与 Combine 数据链路全景<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>    subgraph OverlapScheme[<span class="ot">"</span><span class="st">DeepEP Mega-MoE 计算与通信完全重叠流水线 (Compute-Comm Overlapping)</span><span class="ot">"</span>]</span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a>        subgraph StreamComm[<span class="ot">"</span><span class="st">通信流 (专用 20 SMs，异步执行)</span><span class="ot">"</span>]</span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>            CommDispatch[<span class="ot">"</span><span class="st">MoE Layer L: 路由 Dispatch 通信</span><span class="ot">"</span>]</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>            CommCombine[<span class="ot">"</span><span class="st">MoE Layer L: 专家 Combine 通信</span><span class="ot">"</span>]</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a>        subgraph StreamComp[<span class="ot">"</span><span class="st">计算流 (独占 110 SMs，全速推进)</span><span class="ot">"</span>]</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>            CompShared[<span class="ot">"</span><span class="st">MoE Layer L: 共享专家 GEMM / Dense Attention</span><span class="ot">"</span>]</span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a>            CompNext[<span class="ot">"</span><span class="st">MoE Layer L+1: 预处理 LayerNorm / QKV 投影 GEMM</span><span class="ot">"</span>]</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>        CommDispatch -.-&gt;|时间窗口完全重叠| CompShared</span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a>        CommCombine -.-&gt;|时间窗口完全重叠| CompNext</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 14-2：DeepEP 专用通信 SM 与主计算流在时间轴上的无气泡重叠机理<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a>**DeepEP** 是 DeepSeek 专门为超大规模混合专家模型（MoE，如 DeepSeek-V3 / R1 / V2）打造的**首个开源专用 EP（Expert Parallelism）通信库**。</span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 传统 MoE 分布式训练与推理的通信灾难</span></span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a>DeepSeek-V3 拥有 671B 参数，采用了极度细粒度的路由机制：总共 **256 个路由专家 + 1 个共享专家**，每个 Token 动态激活 **Top-8 个专家**。当集群规模达到数百乃至数千张 GPU 时，专家被切分在不同物理节点上：</span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**NCCL `all_to_allv` 的巨大延迟开销**：</span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>NCCL 作为通用通信原语，依赖 Host 端 CPU 发起，每次 Launch 开销高达 $10 \sim 20\,\mu\text{s}$；</span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>在推理 Decoding 阶段（Batch 较小，每个 Token 仅几十微秒的 GEMM 计算），通信 Launch 开销甚至超过了计算本身，导致 GPU 发生大量同步空转。</span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**动态 Token 数量破坏 CUDA Graph 捕获**：</span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>每个 Expert 接收到的 Token 数因数据分布动态变化。传统做法需要 CPU 介入统计偏移行数并重新下发变长张量，**彻底摧毁了推理引擎的 CUDA Graph 静态执行图**。</span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**节点内 NVLink 与跨机 RDMA 无法高效分层流水**：</span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>扁平的 All-to-All 使得跨机网络带宽与卡间 NVLink 带宽发生拥塞短板效应，无法跑满硬件物理上限。</span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) DeepEP 的革命性突破</span></span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**纯 GPU SM 驱动的低延迟内核（Low-Latency Kernel）**：完全绕过 CPU 与 NCCL。GPU 线程直接发起 NVLink 内存读写和 GPUDirect RDMA 网络事务，将通信延迟压至**微秒级（$&lt; 10\,\mu\text{s}$）**！</span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CUDA Graph 原生兼容（零 CPU 介入）**：在解码阶段通过预分配静态缓冲区与掩码标记，全流程由 GPU 硬件自主完成路由寻址与同步，完美与 CUDA Graph 融为一体；</span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**非对称 SM 分区（SM Partitioning）**：精确固定占用 20 个左右的 SM 执行通信，其余 100+ 个 SM 持续全速计算，奠定了 DeepSeek-V3 惊艳业界的 **Mega-MoE 零通信开销掩盖**。</span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. DeepEP 核心微架构与算法剖析</span></span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 双模引擎设计（Dual-Engine Architecture）</span></span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a>DeepEP 针对训练与推理的不同吞吐特征，实现了两套独立的算子流水线：</span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> 维度 <span class="pp">|</span> 普通高吞吐模式（Normal Mode） <span class="pp">|</span> 低延迟模式（Low-Latency Mode） <span class="pp">|</span></span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a><span class="pp">| :---</span> <span class="pp">| :---</span> <span class="pp">| :---</span> <span class="pp">|</span></span>
+<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **主要应用场景** <span class="pp">|</span> 离线训练（Training）与推理首字填充（Prefill） <span class="pp">|</span> 推理逐字生成（Decoding）与低延迟服务 <span class="pp">|</span></span>
+<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **数据吞吐特征** <span class="pp">|</span> 大 Batch、长序列、Token 吞吐量巨大 <span class="pp">|</span> 小 Batch（1~128 tokens）、对时延极端敏感 <span class="pp">|</span></span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **底层硬件通道** <span class="pp">|</span> 显存 Buffer + NVLink / 跨机 RDMA 大包多通道并发 <span class="pp">|</span> 纯 SM 寄存器/SMem 直写 NVLink P2P + 硬件原子操作 <span class="pp">|</span></span>
+<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **CPU 介入度** | 极小（异步流水调度） | **绝对零介入（Pure GPU Hardware-Driven）** <span class="pp">|</span></span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **CUDA Graph 支持** | 支持静态变体 | **100% 静态兼容，无动态分配** <span class="pp">|</span></span>
+<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 低延迟引擎（Low-Latency Engine）微架构细节</span></span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a>在 Low-Latency 模式下，GPU 节点间的 NVLink 充当了一块“全局统一编址内存（Unified Memory Fabric）”：</span>
+<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**P2P 硬件原子标记**：源 GPU 的 SM 在向目标 GPU 的全局显存写入 Token 字节流后，利用 NVLink 远程原子指令（<span class="in">`atomicAdd`</span> 或带 release 语义的 memory fence）在目标卡上的控制槽位加 1；</span>
+<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**目标卡自旋等待（Spinning Barrier）**：目标卡上的消费者 SM 直接在 L2 Cache / SMem 级别对控制槽位进行自旋轮询（`ld.volatile`），一旦数据到达即刻启动计算，**延迟降低到不可思议的 $3 \sim 5\,\mu\text{s}$**！</span>
+<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (3) 分层 All-to-All（Hierarchical All-to-All）与两跳路由</span></span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a>对于跨节点集群（例如 8 卡/节点）：</span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**节点内（Intra-node）**：具备高达 $900\,\text{GB/s}$ 双向带宽的 NVLink；</span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**节点间（Inter-node）**：受限于网卡带宽（如 $400\,\text{Gbps} \approx 50\,\text{GB/s}$）。</span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**两跳代理路由机制**：DeepEP 将发往同一远程节点的跨机 Token 先在本地节点内通过 NVLink 汇总到特定的网卡代理卡（Proxy Rank），由网卡高效打包发起 RDMA 发送；到达目标节点后，再经由目标节点内部的 NVLink 广播至相应专家卡，彻底消除远端跨机网卡的随机散落小包，打满网络吞吐。</span>
+<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 核心代码架构解析：Dispatch 与 Combine 原语</span></span>
+<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a>以下代码展示了 DeepEP 核心通信算子的逻辑骨架与调用接口：</span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a><span class="co"># DeepEP Python 核心 API 规范</span></span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> deep_ep</span>
+<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. 初始化低延迟通信缓冲（支持 CUDA Graph）</span></span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a><span class="bu">buffer</span> <span class="op">=</span> deep_ep.Buffer(</span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a>    group<span class="op">=</span>dist_group, </span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a>    num_nvl_bytes<span class="op">=</span><span class="dv">128</span> <span class="op">*</span> <span class="dv">1024</span> <span class="op">*</span> <span class="dv">1024</span>,  <span class="co"># NVLink 环形缓冲区</span></span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a>    num_rdma_bytes<span class="op">=</span><span class="dv">256</span> <span class="op">*</span> <span class="dv">1024</span> <span class="op">*</span> <span class="dv">1024</span>  <span class="co"># RDMA 跨机缓冲区</span></span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a><span class="co"># 2. 低延迟 Token 分发（Dispatch）</span></span>
+<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a><span class="co"># topk_idx: [num_tokens, num_topk] 各 Token 选中的全局专家索引</span></span>
+<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a><span class="co"># x:        [num_tokens, hidden_dim] 输入激活值</span></span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a>recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens <span class="op">=</span> <span class="bu">buffer</span>.low_latency_dispatch(</span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a>    x<span class="op">=</span>x,</span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a>    topk_idx<span class="op">=</span>topk_idx,</span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a>    topk_weights<span class="op">=</span>topk_weights,</span>
+<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a>    num_max_dispatch_tokens_per_rank<span class="op">=</span>max_capacity,</span>
+<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a>    is_async<span class="op">=</span><span class="va">True</span>  <span class="co"># 异步非阻塞发射，释放主计算流</span></span>
+<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a><span class="co"># 3. 本地专家执行计算（调用 DeepGEMM Masked 算子）</span></span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a>expert_out <span class="op">=</span> deep_gemm.m_grouped_fp8_gemm_nt_masked(</span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a>    recv_x, expert_weights, mask<span class="op">=</span>recv_mask</span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a><span class="co"># 4. 专家输出合并汇聚（Combine）</span></span>
+<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a><span class="co"># 将各专家计算出的隐藏状态拉回源卡，并完成 Top-K 权重乘加</span></span>
+<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a>final_hidden_states <span class="op">=</span> <span class="bu">buffer</span>.low_latency_combine(</span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a>    x<span class="op">=</span>expert_out,</span>
+<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a>    topk_idx<span class="op">=</span>topk_idx,</span>
+<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a>    topk_weights<span class="op">=</span>topk_weights,</span>
+<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a>    is_async<span class="op">=</span><span class="va">False</span></span>
+<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb4-176"><a href="#cb4-176" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-177"><a href="#cb4-177" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a><span class="fu">### 练习说明</span></span>
+<span id="cb4-183"><a href="#cb4-183" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a>请实现一个**自包含的 MoE 专家并行路由与加权合并算子模拟器（MoE Token Dispatch &amp; Combine Simulator）**：</span>
+<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>输入 $N$ 个 Token，每个 Token 拥有隐藏维度 $H=4$；</span>
+<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每个 Token 路由到 Top-$K$（$K=2$）个专家，共有 $E=4$ 个专家，每个专家有归属的虚拟 Rank；</span>
+<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Dispatch 阶段**：按照专家索引将 Token 数据打包，分发到对应专家的待处理队列中；</span>
+<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Expert Compute 阶段**：专家对接收到的 Token 执行简单的前向映射（仿 GEMM 运算：$y = x \cdot W_e$）；</span>
+<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Combine 阶段**：将计算结果拉回原 Token 位置，**并严格按照 Gating 权重执行归一化加权求和**。</span>
+<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a>只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 位置，不得删除断言或放宽通过条件。</span>
+<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a>::: {#deepep_exercise .cell course_role='exercise' execution_count=1}</span>
+<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a><span class="in">``` {.python .cell-code}</span></span>
+<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_dispatch(tokens, topk_idx, num_experts):</span>
+<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a><span class="co">    模拟 DeepEP Dispatch 阶段：将 Token 打包分配给各 Expert</span></span>
+<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a><span class="co">    tokens:   [N, H]</span></span>
+<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a><span class="co">    topk_idx: [N, K] (每个 token 选中的 expert 编号)</span></span>
+<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a><span class="co">    返回:</span></span>
+<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a><span class="co">      expert_inputs: dict {expert_id: list of (token_idx, token_vector)}</span></span>
+<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a>    N, H <span class="op">=</span> tokens.shape</span>
+<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a>    N_idx, K <span class="op">=</span> topk_idx.shape</span>
+<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> N <span class="op">==</span> N_idx</span>
+<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a>    expert_inputs <span class="op">=</span> {e: [] <span class="cf">for</span> e <span class="kw">in</span> <span class="bu">range</span>(num_experts)}</span>
+<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a>    <span class="co"># </span><span class="al">TODO</span><span class="co">: 遍历所有 Token 与其 Top-K 路由目标，填入对应专家的输入队列</span></span>
+<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(K):</span>
+<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> topk_idx[i, k]</span>
+<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 存入 (原序列索引 i, 对应的 token 特征向量)</span></span>
+<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a>            ______</span>
+<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> expert_inputs</span>
+<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H):</span>
+<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb4-222"><a href="#cb4-222" aria-hidden="true" tabindex="-1"></a><span class="co">    模拟 DeepEP Combine 阶段：接收各专家输出，按 Gating Weights 加权汇聚</span></span>
+<span id="cb4-223"><a href="#cb4-223" aria-hidden="true" tabindex="-1"></a><span class="co">    expert_outputs: dict {expert_id: list of (token_idx, output_vector)}</span></span>
+<span id="cb4-224"><a href="#cb4-224" aria-hidden="true" tabindex="-1"></a><span class="co">    topk_idx:       [N, K]</span></span>
+<span id="cb4-225"><a href="#cb4-225" aria-hidden="true" tabindex="-1"></a><span class="co">    topk_weights:   [N, K]</span></span>
+<span id="cb4-226"><a href="#cb4-226" aria-hidden="true" tabindex="-1"></a><span class="co">    返回:</span></span>
+<span id="cb4-227"><a href="#cb4-227" aria-hidden="true" tabindex="-1"></a><span class="co">      combined_out:   [N, H]</span></span>
+<span id="cb4-228"><a href="#cb4-228" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb4-229"><a href="#cb4-229" aria-hidden="true" tabindex="-1"></a>    combined_out <span class="op">=</span> np.zeros((N, H), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb4-230"><a href="#cb4-230" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-231"><a href="#cb4-231" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 建立从 (token_idx, expert_id) 到输出结果的快速查找表</span></span>
+<span id="cb4-232"><a href="#cb4-232" aria-hidden="true" tabindex="-1"></a>    result_map <span class="op">=</span> {}</span>
+<span id="cb4-233"><a href="#cb4-233" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> e_id, item_list <span class="kw">in</span> expert_outputs.items():</span>
+<span id="cb4-234"><a href="#cb4-234" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t_idx, out_vec <span class="kw">in</span> item_list:</span>
+<span id="cb4-235"><a href="#cb4-235" aria-hidden="true" tabindex="-1"></a>            result_map[(t_idx, e_id)] <span class="op">=</span> out_vec</span>
+<span id="cb4-236"><a href="#cb4-236" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb4-237"><a href="#cb4-237" aria-hidden="true" tabindex="-1"></a>    <span class="co"># </span><span class="al">TODO</span><span class="co">: 按照 topk_idx 与 topk_weights 完成原始 Token 的加权和</span></span>
+<span id="cb4-238"><a href="#cb4-238" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb4-239"><a href="#cb4-239" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(topk_idx.shape[<span class="dv">1</span>]):</span>
+<span id="cb4-240"><a href="#cb4-240" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> topk_idx[i, k]</span>
+<span id="cb4-241"><a href="#cb4-241" aria-hidden="true" tabindex="-1"></a>            weight <span class="op">=</span> topk_weights[i, k]</span>
+<span id="cb4-242"><a href="#cb4-242" aria-hidden="true" tabindex="-1"></a>            out_vec <span class="op">=</span> result_map[(i, e_id)]</span>
+<span id="cb4-243"><a href="#cb4-243" aria-hidden="true" tabindex="-1"></a>            combined_out[i] <span class="op">+=</span> ______</span>
+<span id="cb4-244"><a href="#cb4-244" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb4-245"><a href="#cb4-245" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> combined_out</span>
+<span id="cb4-246"><a href="#cb4-246" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-247"><a href="#cb4-247" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------- 测试用例与端到端验证 -----------------</span></span>
+<span id="cb4-248"><a href="#cb4-248" aria-hidden="true" tabindex="-1"></a>np.random.seed(<span class="dv">42</span>)</span>
+<span id="cb4-249"><a href="#cb4-249" aria-hidden="true" tabindex="-1"></a>N, H, K, E <span class="op">=</span> <span class="dv">4</span>, <span class="dv">4</span>, <span class="dv">2</span>, <span class="dv">4</span></span>
+<span id="cb4-250"><a href="#cb4-250" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-251"><a href="#cb4-251" aria-hidden="true" tabindex="-1"></a><span class="co"># 生成虚拟输入</span></span>
+<span id="cb4-252"><a href="#cb4-252" aria-hidden="true" tabindex="-1"></a>tokens <span class="op">=</span> np.random.randn(N, H).astype(np.float32)</span>
+<span id="cb4-253"><a href="#cb4-253" aria-hidden="true" tabindex="-1"></a><span class="co"># 每个 token 随机选 2 个不重复的专家</span></span>
+<span id="cb4-254"><a href="#cb4-254" aria-hidden="true" tabindex="-1"></a>topk_idx <span class="op">=</span> np.array([</span>
+<span id="cb4-255"><a href="#cb4-255" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">0</span>, <span class="dv">2</span>],</span>
+<span id="cb4-256"><a href="#cb4-256" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">1</span>, <span class="dv">3</span>],</span>
+<span id="cb4-257"><a href="#cb4-257" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">0</span>, <span class="dv">3</span>],</span>
+<span id="cb4-258"><a href="#cb4-258" aria-hidden="true" tabindex="-1"></a>    [<span class="dv">1</span>, <span class="dv">2</span>]</span>
+<span id="cb4-259"><a href="#cb4-259" aria-hidden="true" tabindex="-1"></a>], dtype<span class="op">=</span>np.int32)</span>
+<span id="cb4-260"><a href="#cb4-260" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-261"><a href="#cb4-261" aria-hidden="true" tabindex="-1"></a><span class="co"># 归一化 Softmax 门控权重</span></span>
+<span id="cb4-262"><a href="#cb4-262" aria-hidden="true" tabindex="-1"></a>raw_weights <span class="op">=</span> np.random.uniform(<span class="fl">0.1</span>, <span class="fl">1.0</span>, size<span class="op">=</span>(N, K))</span>
+<span id="cb4-263"><a href="#cb4-263" aria-hidden="true" tabindex="-1"></a>topk_weights <span class="op">=</span> (raw_weights <span class="op">/</span> raw_weights.<span class="bu">sum</span>(axis<span class="op">=</span><span class="dv">1</span>, keepdims<span class="op">=</span><span class="va">True</span>)).astype(np.float32)</span>
+<span id="cb4-264"><a href="#cb4-264" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-265"><a href="#cb4-265" aria-hidden="true" tabindex="-1"></a><span class="co"># 专家权重矩阵（每个专家一个 H x H 线性变换）</span></span>
+<span id="cb4-266"><a href="#cb4-266" aria-hidden="true" tabindex="-1"></a>expert_weights <span class="op">=</span> {e: np.random.randn(H, H).astype(np.float32) <span class="cf">for</span> e <span class="kw">in</span> <span class="bu">range</span>(E)}</span>
+<span id="cb4-267"><a href="#cb4-267" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-268"><a href="#cb4-268" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. 运行 Dispatch</span></span>
+<span id="cb4-269"><a href="#cb4-269" aria-hidden="true" tabindex="-1"></a>dispatched <span class="op">=</span> moe_dispatch(tokens, topk_idx, num_experts<span class="op">=</span>E)</span>
+<span id="cb4-270"><a href="#cb4-270" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="bu">sum</span>(<span class="bu">len</span>(v) <span class="cf">for</span> v <span class="kw">in</span> dispatched.values()) <span class="op">==</span> N <span class="op">*</span> K, <span class="st">"总分发量必须等于 N * K"</span></span>
+<span id="cb4-271"><a href="#cb4-271" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-272"><a href="#cb4-272" aria-hidden="true" tabindex="-1"></a><span class="co"># 2. 执行专家计算</span></span>
+<span id="cb4-273"><a href="#cb4-273" aria-hidden="true" tabindex="-1"></a>expert_outputs <span class="op">=</span> {}</span>
+<span id="cb4-274"><a href="#cb4-274" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> e, items <span class="kw">in</span> dispatched.items():</span>
+<span id="cb4-275"><a href="#cb4-275" aria-hidden="true" tabindex="-1"></a>    expert_outputs[e] <span class="op">=</span> []</span>
+<span id="cb4-276"><a href="#cb4-276" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> t_idx, vec <span class="kw">in</span> items:</span>
+<span id="cb4-277"><a href="#cb4-277" aria-hidden="true" tabindex="-1"></a>        out_vec <span class="op">=</span> np.matmul(vec, expert_weights[e])</span>
+<span id="cb4-278"><a href="#cb4-278" aria-hidden="true" tabindex="-1"></a>        expert_outputs[e].append((t_idx, out_vec))</span>
+<span id="cb4-279"><a href="#cb4-279" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-280"><a href="#cb4-280" aria-hidden="true" tabindex="-1"></a><span class="co"># 3. 运行 Combine</span></span>
+<span id="cb4-281"><a href="#cb4-281" aria-hidden="true" tabindex="-1"></a>combined <span class="op">=</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H)</span>
+<span id="cb4-282"><a href="#cb4-282" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-283"><a href="#cb4-283" aria-hidden="true" tabindex="-1"></a><span class="co"># 4. 黄金参考标杆 (单机稠密基准对比)</span></span>
+<span id="cb4-284"><a href="#cb4-284" aria-hidden="true" tabindex="-1"></a>ref_out <span class="op">=</span> np.zeros((N, H), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb4-285"><a href="#cb4-285" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb4-286"><a href="#cb4-286" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(K):</span>
+<span id="cb4-287"><a href="#cb4-287" aria-hidden="true" tabindex="-1"></a>        e <span class="op">=</span> topk_idx[i, k]</span>
+<span id="cb4-288"><a href="#cb4-288" aria-hidden="true" tabindex="-1"></a>        w <span class="op">=</span> topk_weights[i, k]</span>
+<span id="cb4-289"><a href="#cb4-289" aria-hidden="true" tabindex="-1"></a>        ref_out[i] <span class="op">+=</span> w <span class="op">*</span> np.matmul(tokens[i], expert_weights[e])</span>
+<span id="cb4-290"><a href="#cb4-290" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-291"><a href="#cb4-291" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(combined, ref_out, atol<span class="op">=</span><span class="fl">1e-5</span>), <span class="st">"MoE Dispatch &amp; Combine 数学等价性校验失败！"</span></span>
+<span id="cb4-292"><a href="#cb4-292" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"DeepEP 核心调度流数学等价验证 100% 通过！"</span>)</span>
+<span id="cb4-293"><a href="#cb4-293" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-294"><a href="#cb4-294" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-295"><a href="#cb4-295" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-296"><a href="#cb4-296" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-297"><a href="#cb4-297" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb4-298"><a href="#cb4-298" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-299"><a href="#cb4-299" aria-hidden="true" tabindex="-1"></a>运行脚本验证断言通过；核对各专家处理 Token 总数与 <span class="in">`N * K`</span> 守恒，确认加权汇聚结果与单机数学真值严格一致。</span>
+<span id="cb4-300"><a href="#cb4-300" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-301"><a href="#cb4-301" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb4-302"><a href="#cb4-302" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-303"><a href="#cb4-303" aria-hidden="true" tabindex="-1"></a>在 MoE 推理的 Decoding 阶段，为什么传统基于 CPU 发起的 NCCL <span class="in">`all_to_allv`</span> 会造成严重的显卡算力空转（Bubbles）？DeepEP 的“纯 SM 驱动低延迟内核”是如何消除这一瓶颈的？</span>
+<span id="cb4-304"><a href="#cb4-304" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-305"><a href="#cb4-305" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-306"><a href="#cb4-306" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-307"><a href="#cb4-307" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb4-308"><a href="#cb4-308" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-309"><a href="#cb4-309" aria-hidden="true" tabindex="-1"></a>DeepEP 在架构设计上为何坚决采用**非对称 SM 分区（固定分配 20~24 个 SM 专职通信）**，而不是让全部 SM（如 H800 的 132 个 SM）并发参与传输？这与 Mega-MoE 的计算重叠有什么直接因果联系？</span>
+<span id="cb4-310"><a href="#cb4-310" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-311"><a href="#cb4-311" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-312"><a href="#cb4-312" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-313"><a href="#cb4-313" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb4-314"><a href="#cb4-314" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-315"><a href="#cb4-315" aria-hidden="true" tabindex="-1"></a>面对跨多物理机节点的大规模集群，为什么扁平的 All-to-All 性能远逊于 DeepEP 的“分层两跳路由（Hierarchical 2-Hop）”？在面临不同专家负载偏斜（Load Imbalance / Straggler）时，系统是如何防范尾部延迟爆炸的？</span>
+<span id="cb4-316"><a href="#cb4-316" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-317"><a href="#cb4-317" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-318"><a href="#cb4-318" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-319"><a href="#cb4-319" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb4-320"><a href="#cb4-320" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-321"><a href="#cb4-321" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正确完成 Dispatch 索引映射与 Combine 加权和逻辑并跑通断言；</span>
+<span id="cb4-322"><a href="#cb4-322" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分：必须结合微架构原语（CPU Launch 延迟、NVLink 硬件带宽、GPUDirect RDMA、SM 占用与计算并发）深入说明；</span>
+<span id="cb4-323"><a href="#cb4-323" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：混淆 Dispatch 与 Combine 的通信方向，或认为通讯必须占用全量 SM。</span>
+<span id="cb4-324"><a href="#cb4-324" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-325"><a href="#cb4-325" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-326"><a href="#cb4-326" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb4-327"><a href="#cb4-327" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-328"><a href="#cb4-328" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-329"><a href="#cb4-329" aria-hidden="true" tabindex="-1"></a>::: {#deepep_solution .cell course_role='solution' execution_count=2}</span>
+<span id="cb4-330"><a href="#cb4-330" aria-hidden="true" tabindex="-1"></a><span class="in">``` {.python .cell-code}</span></span>
+<span id="cb4-331"><a href="#cb4-331" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_dispatch(tokens, topk_idx, num_experts):</span>
+<span id="cb4-332"><a href="#cb4-332" aria-hidden="true" tabindex="-1"></a>    N, H <span class="op">=</span> tokens.shape</span>
+<span id="cb4-333"><a href="#cb4-333" aria-hidden="true" tabindex="-1"></a>    expert_inputs <span class="op">=</span> {e: [] <span class="cf">for</span> e <span class="kw">in</span> <span class="bu">range</span>(num_experts)}</span>
+<span id="cb4-334"><a href="#cb4-334" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-335"><a href="#cb4-335" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb4-336"><a href="#cb4-336" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(topk_idx.shape[<span class="dv">1</span>]):</span>
+<span id="cb4-337"><a href="#cb4-337" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> <span class="bu">int</span>(topk_idx[i, k])</span>
+<span id="cb4-338"><a href="#cb4-338" aria-hidden="true" tabindex="-1"></a>            expert_inputs[e_id].append((i, tokens[i]))</span>
+<span id="cb4-339"><a href="#cb4-339" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb4-340"><a href="#cb4-340" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> expert_inputs</span>
+<span id="cb4-341"><a href="#cb4-341" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-342"><a href="#cb4-342" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H):</span>
+<span id="cb4-343"><a href="#cb4-343" aria-hidden="true" tabindex="-1"></a>    combined_out <span class="op">=</span> np.zeros((N, H), dtype<span class="op">=</span>np.float32)</span>
+<span id="cb4-344"><a href="#cb4-344" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-345"><a href="#cb4-345" aria-hidden="true" tabindex="-1"></a>    result_map <span class="op">=</span> {}</span>
+<span id="cb4-346"><a href="#cb4-346" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> e_id, item_list <span class="kw">in</span> expert_outputs.items():</span>
+<span id="cb4-347"><a href="#cb4-347" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t_idx, out_vec <span class="kw">in</span> item_list:</span>
+<span id="cb4-348"><a href="#cb4-348" aria-hidden="true" tabindex="-1"></a>            result_map[(t_idx, e_id)] <span class="op">=</span> out_vec</span>
+<span id="cb4-349"><a href="#cb4-349" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb4-350"><a href="#cb4-350" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb4-351"><a href="#cb4-351" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(topk_idx.shape[<span class="dv">1</span>]):</span>
+<span id="cb4-352"><a href="#cb4-352" aria-hidden="true" tabindex="-1"></a>            e_id <span class="op">=</span> <span class="bu">int</span>(topk_idx[i, k])</span>
+<span id="cb4-353"><a href="#cb4-353" aria-hidden="true" tabindex="-1"></a>            weight <span class="op">=</span> topk_weights[i, k]</span>
+<span id="cb4-354"><a href="#cb4-354" aria-hidden="true" tabindex="-1"></a>            out_vec <span class="op">=</span> result_map[(i, e_id)]</span>
+<span id="cb4-355"><a href="#cb4-355" aria-hidden="true" tabindex="-1"></a>            combined_out[i] <span class="op">+=</span> weight <span class="op">*</span> out_vec</span>
+<span id="cb4-356"><a href="#cb4-356" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb4-357"><a href="#cb4-357" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> combined_out</span>
+<span id="cb4-358"><a href="#cb4-358" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-359"><a href="#cb4-359" aria-hidden="true" tabindex="-1"></a><span class="co"># 执行自测</span></span>
+<span id="cb4-360"><a href="#cb4-360" aria-hidden="true" tabindex="-1"></a>dispatched <span class="op">=</span> moe_dispatch(tokens, topk_idx, num_experts<span class="op">=</span>E)</span>
+<span id="cb4-361"><a href="#cb4-361" aria-hidden="true" tabindex="-1"></a>expert_outputs <span class="op">=</span> {e: [(t_idx, np.matmul(vec, expert_weights[e])) <span class="cf">for</span> t_idx, vec <span class="kw">in</span> items] <span class="cf">for</span> e, items <span class="kw">in</span> dispatched.items()}</span>
+<span id="cb4-362"><a href="#cb4-362" aria-hidden="true" tabindex="-1"></a>combined <span class="op">=</span> moe_combine(expert_outputs, topk_idx, topk_weights, N, H)</span>
+<span id="cb4-363"><a href="#cb4-363" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> np.allclose(combined, ref_out, atol<span class="op">=</span><span class="fl">1e-5</span>)</span>
+<span id="cb4-364"><a href="#cb4-364" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"参考答案验证执行通过！"</span>)</span>
+<span id="cb4-365"><a href="#cb4-365" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-366"><a href="#cb4-366" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-367"><a href="#cb4-367" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-368"><a href="#cb4-368" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb4-369"><a href="#cb4-369" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-370"><a href="#cb4-370" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**NCCL 的 CPU 发起瓶颈与时延占比**：</span>
+<span id="cb4-371"><a href="#cb4-371" aria-hidden="true" tabindex="-1"></a>   在通用 NCCL 中，每次通信必须由 CPU 运行通信运行时代码，解析通信拓扑并向 GPU 发射通信 Kernel。这一开销固定在 $10 \sim 25\,\mu\text{s}$。在训练大 Batch 时该开销可忽略，但在推理 Decoding 阶段，每个 Step 的 GEMM 计算耗时可能仅有 $30\,\mu\text{s}$。CPU Launch 开销直接吃掉整个执行周期的 40% 以上，造成严重的“CPU 喂不饱 GPU”的饥饿气泡。</span>
+<span id="cb4-372"><a href="#cb4-372" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**纯 SM 驱动低延迟内核破局**：</span>
+<span id="cb4-373"><a href="#cb4-373" aria-hidden="true" tabindex="-1"></a>   DeepEP 在 GPU 显存中预分配固定的通信环形队列和状态 Flag。GPU 内部线程（SM）直接利用 NVLink P2P 语义，执行远程显存写入（Store 指令），并通过微架构级的原子栅栏（Memory Barrier）通知对方。全流程**无需主机端 CPU 发送任何新指令，也无需重建通信拓扑**，将握手与传输端到端延迟压缩至惊人的 $&lt; 5\,\mu\text{s}$，且完美兼容 CUDA Graph。</span>
+<span id="cb4-374"><a href="#cb4-374" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-375"><a href="#cb4-375" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb4-376"><a href="#cb4-376" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-377"><a href="#cb4-377" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**SM 资源饱和度阈值**：</span>
+<span id="cb4-378"><a href="#cb4-378" aria-hidden="true" tabindex="-1"></a>   NVLink 的双向物理带宽（如 H100 的 900 GB/s）由 GPU 专用的 NVLink 传输引擎和片上 Crossbar 提供支持。测试表明，**仅需 20~24 个 SM 的线程发射并发度，就足以打满整张显卡的 NVLink/RDMA 物理带宽**。若投入全部 132 个 SM，通信带宽不会有任何提升，反而因为片上互连总线冲突导致效率下降。</span>
+<span id="cb4-379"><a href="#cb4-379" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**Mega-MoE 计算-通信双流重叠的前提**：</span>
+<span id="cb4-380"><a href="#cb4-380" aria-hidden="true" tabindex="-1"></a>   如果通信占满了所有 SM，GPU 就无法同时执行其他计算 Kernel。通过将 SM 显式分区：**20 个 SM 锁定在独立 CUDA Stream 跑通信，其余 110 个 SM 锁定在主计算 Stream 执行共享专家（Shared Expert）或前序 Attention 算子**。两者在 GPU 硬件调度器中物理并行共存，通信时间被纯计算完全吸收掩盖，实现了真实的“零通信开销 MoE”。</span>
+<span id="cb4-381"><a href="#cb4-381" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-382"><a href="#cb4-382" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb4-383"><a href="#cb4-383" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-384"><a href="#cb4-384" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**分层两跳（Hierarchical 2-Hop）消灭网络木桶短板**：</span>
+<span id="cb4-385"><a href="#cb4-385" aria-hidden="true" tabindex="-1"></a>   集群中节点内 NVLink 带宽（900 GB/s）是节点间 RDMA 带宽（50 GB/s）的近 18 倍。若采用扁平 All-to-All，各卡各自跨机发射小包，将导致 RDMA 拥塞丢包、网卡 PCIe 竞争严重。两跳路由将跨机流量在节点内部聚合成连续大包，统一经由特定高速网卡通道外发，最大化 RDMA 的传输吞吐（MTU 利用率 100%）。</span>
+<span id="cb4-386"><a href="#cb4-386" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**缓解长尾专家（Straggler）机制**：</span>
+<span id="cb4-387"><a href="#cb4-387" aria-hidden="true" tabindex="-1"></a>   在大模型中，某些热门专家被选中的频率远高于冷门专家。DeepEP 配合 DeepSeek-V3 的无辅助损失负载均衡策略（Auxiliary-loss-free Load Balancing），在通信层设计了**带丢弃/分流重试与动态缓冲区管理**，防止单个过载 Expert 的接收队列撑爆显存或造成跨卡死锁。</span>
+<span id="cb4-388"><a href="#cb4-388" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-389"><a href="#cb4-389" aria-hidden="true" tabindex="-1"></a><span class="fu">## 面试高频追问与工业级优化扩展</span></span>
+<span id="cb4-390"><a href="#cb4-390" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-391"><a href="#cb4-391" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**追问 1：DeepEP 的 Combine 算子是如何在通信搬运的同时完成加权求和（In-Flight Reduction）的？**</span>
+<span id="cb4-392"><a href="#cb4-392" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*回答要点*：传统做法是先把各专家的原始输出通过 All-to-All 全量收集回显存，再调用一个单独的 PyTorch/Triton Kernel 算加权和，增加了额外的显存读写往返。DeepEP 的 Combine Kernel 在将远端数据通过 NVLink/RDMA 读取到片上共享内存或寄存器后，**直接在片上完成乘 Top-K 权重并原地累加到输出张量**，做到了真实的通信-归约融合（Fused Communication &amp; Reduction），显存带宽消耗直降一半！</span>
+<span id="cb4-393"><a href="#cb4-393" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**追问 2：为什么 DeepEP 可以做到完全免除辅助损失函数（Aux-loss-free）的负载均衡鲁棒性？**</span>
+<span id="cb4-394"><a href="#cb4-394" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*回答要点*：过去 MoE 必须依赖高权重的 Aux-loss 强行让各专家 Token 数量均等，但严重损害了模型推理能力。DeepSeek-V3 在算法端采用动态偏置调整（Bias Adjustment），在系统端配合 DeepEP 的高动态范围缓冲切分，即使某些专家瞬时接收 2~3 倍超额 Token，通信流依然能通过流水切片将其高效平滑，不再需要激进丢弃 Token（Zero Token Drop）。</span>
+<span id="cb4-395"><a href="#cb4-395" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-396"><a href="#cb4-396" aria-hidden="true" tabindex="-1"></a><span class="fu">## 源码参考与延伸阅读</span></span>
+<span id="cb4-397"><a href="#cb4-397" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-398"><a href="#cb4-398" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">DeepSeek DeepEP 官方开源仓库</span><span class="co">](https://github.com/deepseek-ai/DeepEP)</span></span>
+<span id="cb4-399"><a href="#cb4-399" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">DeepSeek-V3 架构解析：极低通信开销的 MoE 专家并行方案</span><span class="co">](https://arxiv.org/abs/2412.19437)</span></span>
+<span id="cb4-400"><a href="#cb4-400" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">NVIDIA NVLink and NVSwitch Architecture In-Depth Guide</span><span class="co">](https://www.nvidia.com/en-us/data-center/nvlink/)</span></span>
+<span id="cb4-401"><a href="#cb4-401" aria-hidden="true" tabindex="-1"></a>:::</span>
+</code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
+</div></div></div></div></div>
+</div> <!-- /content -->
+
+
+
+
+<footer class="footer"><div class="nav-footer"><div class="nav-footer-center"><div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></div></div></footer><script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>
