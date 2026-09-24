@@ -1,0 +1,321 @@
+---
+title: "训练系统 · 第 6/14 课：张量并行 TP"
+subtitle: "Ultra-Scale Playbook 训练系统"
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 一次只完成一课；未通过前不要打开下一课答案。
+
+
+## 统一完成标准
+
+代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
+
+# 第 6 课：张量并行 TP
+
+- 对应官方章节：Tensor Parallelism / Tensor parallelism in a transformer block
+- 前置：第 3 课（all-gather / all-reduce / broadcast / scatter）、第 5 课（为什么 ZeRO 之后还需要 TP）
+- 状态：未开始
+
+## 本课目标
+
+完成后你需要能够：
+
+- 从矩阵乘法恒等式推导列并行与行并行的切分方式与所需 collective。
+- 解释 Transformer 中 MLP 与 Attention 的 TP 布局（col → row，省一次中间 all-reduce）。
+- 说明 TP 的约束：TP ≤ 注意力头数、GQA 下 K/V 同步问题、TP 通常在节点内（≤8）。
+- 说明 TP 通信为什么在关键路径上、难与计算重叠。
+
+## 核心概念
+
+### 1. 两个恒等式
+
+```{python}
+1. A·B = A·[B1 B2 …] = [A·B1  A·B2  …]     列切分：结果拼起来
+2. A·B = [A1 A2 …]·[B1; B2; …] = Σ Ai·Bi    行切分：结果相加
+```
+
+在神经网络里是 `X·W`：
+
+- **列并行（column-parallel）**：W 按列切。输入 X 每卡都有一份（forward 中已是同步状态，无需 broadcast；教材说 broadcast 在训练中通常不需要，因为输入已经同步），每卡算 `X·W_i`，最后 **AllGather** 拼出完整输出。
+- **行并行（row-parallel）**：W 按行切。输入也要按列切（**Scatter**），每卡算 `X_i·W_i`，最后 **AllReduce** 求和。
+
+### 2. Transformer 里的布局
+
+- **MLP**：col（升维投影 + GELU）→ row（降维投影）。先 col 后 row 的好处：两次切分之间**不需要中间 all-reduce**——row 层的输出 all-reduce 一并完成了合并。若先 row 后 col 则需要一次多余 all-reduce（共两次）。
+- **Attention**：QKV 投影 col 并行，输出投影 row 并行。col 并行下每个 GPU 恰好负责一部分注意力头，天然语义清晰；GQA/MQA 同理（K/V 头共享）。
+- 每个 transformer block 前向因此有 2 次 all-reduce（MLP 一次 + Attention 输出一次；教材按 block 计）。
+
+### 3. 收益与代价
+
+- 收益：参数、梯度、优化器状态**和激活**一起分片（这是与 ZeRO 的本质区别）；还能分片中间激活。
+- 代价：通信在**计算的关键路径**上（all-reduce 之后才能做 LayerNorm），难以像 DP/ZeRO 那样藏在计算后面；跨节点（8→16）带宽骤降，性能明显下跌。
+- 约束：TP 度 ≤ 注意力头数；GQA 时 K/V 头需要跨卡同步（Llama-3 8B：32 Q 头 / 8 KV 头）；LayerNorm 权重梯度天然同步（各 rank 看到相同输入），dropout 需要同步随机种子保证确定性。
+- 实践规则：TP 只用在节点内（TP ≤ 8，走 NVLink）。
+
+## 具体演示
+
+70B 模型、TP=8：每卡参数/梯度/优化器静态显存从 1120 GB（70B×16B）降到 140 GB/卡，模型可以放进一个 8 卡节点（配合第 7 课 SP 更好）。但 TP=8→16 时 all-reduce 从 NVLink 变成跨节点网络，吞吐明显下降。
+
+## 代码填空题
+
+用 torch 模拟列并行与行并行，验证与完整 matmul 等价；再组合成 TP 版 MLP。
+
+```{python}
+#| course_role: exercise
+import torch
+import torch.nn.functional as F
+
+
+def column_parallel_linear(x: torch.Tensor, w: torch.Tensor, tp: int) -> torch.Tensor:
+    """
+    模拟列并行：W (out, in) 按【列】切分（即沿 out 维），每卡持有完整输入 x。
+    x: (..., in_features)；w: (out_features, in_features)
+
+    每卡局部输出 x @ W_i^T 形状 (..., out/tp)，最后 AllGather 沿 out 维拼回。
+    """
+    out, inn = w.shape
+    assert out % tp == 0
+    chunk = out // tp
+    parts = []
+    for i in range(tp):
+        w_i = w[______, :]          # 填空：第 i 个列分片
+        parts.append(x @ w_i.T)     # 每卡局部 matmul
+    # AllGather：沿输出维拼接所有局部结果
+    return torch.cat(parts, dim=______)
+
+
+def row_parallel_linear(x: torch.Tensor, w: torch.Tensor, tp: int) -> torch.Tensor:
+    """
+    模拟行并行：W (out, in) 按【行】切分（即沿 in 维），输入 X 也沿最后一维切分。
+    x: (..., in_features)；w: (out_features, in_features)
+
+    每卡局部输出 x_i @ W_i^T 形状 (..., out)，最后 AllReduce 求和。
+    """
+    out, inn = w.shape
+    assert inn % tp == 0
+    chunk = inn // tp
+    parts = []
+    for i in range(tp):
+        w_i = w[:, ______]                     # 填空：第 i 个行分片
+        x_i = x[..., ______]                   # 填空：输入的对应列分片（Scatter）
+        parts.append(x_i @ w_i.T)
+    # AllReduce：所有局部结果求和
+    return sum(parts)
+
+
+def tp_mlp(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, tp: int) -> torch.Tensor:
+    """
+    TP 版 MLP：col(GELU) → row。中间不 all-gather、不 all-reduce，
+    只在 row 层输出处做一次 all-reduce（sum）。
+    返回 (每个 TP rank 的局部输出, 合并后的完整输出)。
+    """
+    h_col = column_parallel_linear(x, w1, tp)
+    h_act = torch.nn.functional.gelu(h_col)
+    # 注意：h_act 是"按 out 维分片"的，传给行并行时输入也按该维切分——
+    # 行并行函数内部会沿最后一维 scatter，语义恰好对齐（w2 按行切）。
+    local = row_parallel_linear(h_act, w2, tp)   # 每卡局部
+    return local, sum(local) if isinstance(local, list) else local
+
+
+def reference_mlp(x, w1, w2):
+    return torch.nn.functional.gelu(x @ w1.T) @ w2.T
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    tp = 4
+    x = torch.randn(2, 8, 64)
+    w1 = torch.randn(256, 64)   # MLP 升维投影
+    w2 = torch.randn(64, 256)   # MLP 降维投影
+
+    # 验证列并行
+    y_col = column_parallel_linear(x, w1, tp)
+    assert torch.allclose(y_col, x @ w1.T), "column parallel mismatch"
+    print("列并行等价 ✓")
+
+    # 验证行并行
+    y_row = row_parallel_linear(x, w2, tp)
+    assert torch.allclose(y_row, x @ w2.T), "row parallel mismatch"
+    print("行并行等价 ✓")
+
+    # 验证 TP-MLP 组合
+    y_tp = tp_mlp(x, w1, w2, tp)
+    assert torch.allclose(y_tp, reference_mlp(x, w1, w2)), "TP-MLP mismatch"
+    print("TP-MLP 与完整 MLP 等价 ✓（中间无需 all-reduce）")
+```
+
+## 三个问答题
+
+### Q1
+
+为什么 MLP 用"列并行 → 行并行"而不是"行并行 → 列并行"？请用矩阵乘法恒等式说明两者都正确，但前者每层只做 1 次 all-reduce，后者需要 2 次。
+
+### Q2
+
+教材说 TP 的通信"在关键路径上、难以完全隐藏"，而 DP/ZeRO 的通信"可以重叠"。区别的本质是什么？（提示：同步点之后是否还有必须等待该结果的计算；以及 all-reduce 在一个 block 内出现的频率与位置。）
+
+### Q3
+
+TP 度数有哪些硬约束？给定 Llama-3 8B（32 Q 头、8 KV 头），TP=16 是否可行？TP=32 呢？需要怎样的实现调整（K/V 同步）？再说明为什么实践中 TP 通常不超过节点内 GPU 数。
+
+## 检查与通过标准
+
+总分 10 分：代码正确 4 分（列/行分片切片与拼接/求和、TP-MLP 等价验证）、三题各 2 分、通过线 8 分。
+
+一票否决项：
+
+- 列并行用 all-reduce、行并行用 all-gather（方向搞反）。
+- 认为 TP 只分片权重不分片激活。
+- 认为 TP 可以随便跨节点扩展且没有性能代价。
+- 说不出 TP 度与注意力头数的约束关系。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。
+
+```{python}
+#| course_role: solution
+import torch
+import torch.nn.functional as F
+
+
+def column_parallel_linear(x: torch.Tensor, w: torch.Tensor, tp: int) -> torch.Tensor:
+    """
+    模拟列并行：W (out, in) 按【列】切分（即沿 out 维），每卡持有完整输入 x。
+    x: (..., in_features)；w: (out_features, in_features)
+
+    每卡局部输出 x @ W_i^T 形状 (..., out/tp)，最后 AllGather 沿 out 维拼回。
+    """
+    out, inn = w.shape
+    assert out % tp == 0
+    chunk = out // tp
+    parts = []
+    for i in range(tp):
+        w_i = w[i * chunk:(i + 1) * chunk, :]          # 填空：第 i 个列分片
+        parts.append(x @ w_i.T)     # 每卡局部 matmul
+    # AllGather：沿输出维拼接所有局部结果
+    return torch.cat(parts, dim=-1)
+
+
+def row_parallel_linear(x: torch.Tensor, w: torch.Tensor, tp: int) -> torch.Tensor:
+    """
+    模拟行并行：W (out, in) 按【行】切分（即沿 in 维），输入 X 也沿最后一维切分。
+    x: (..., in_features)；w: (out_features, in_features)
+
+    每卡局部输出 x_i @ W_i^T 形状 (..., out)，最后 AllReduce 求和。
+    """
+    out, inn = w.shape
+    assert inn % tp == 0
+    chunk = inn // tp
+    parts = []
+    for i in range(tp):
+        w_i = w[:, i * chunk:(i + 1) * chunk]                     # 填空：第 i 个行分片
+        x_i = x[..., i * chunk:(i + 1) * chunk]                   # 填空：输入的对应列分片（Scatter）
+        parts.append(x_i @ w_i.T)
+    # AllReduce：所有局部结果求和
+    return sum(parts)
+
+
+def tp_mlp(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, tp: int) -> torch.Tensor:
+    """模拟 col-parallel → GELU → row-parallel；中间局部激活不做 AllGather。"""
+    out1 = w1.shape[0]
+    assert out1 % tp == 0 and w2.shape[1] == out1
+    chunk = out1 // tp
+    partial_outputs = []
+    for i in range(tp):
+        h_i = torch.nn.functional.gelu(x @ w1[i * chunk:(i + 1) * chunk, :].T)
+        partial_outputs.append(h_i @ w2[:, i * chunk:(i + 1) * chunk].T)
+    # 这里只在 row-parallel 末尾模拟一次 AllReduce(sum)。
+    return sum(partial_outputs)
+
+
+def reference_mlp(x, w1, w2):
+    return torch.nn.functional.gelu(x @ w1.T) @ w2.T
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    tp = 4
+    x = torch.randn(2, 8, 64)
+    w1 = torch.randn(256, 64)   # MLP 升维投影
+    w2 = torch.randn(64, 256)   # MLP 降维投影
+
+    # 验证列并行
+    y_col = column_parallel_linear(x, w1, tp)
+    assert torch.allclose(y_col, x @ w1.T), "column parallel mismatch"
+    print("列并行等价 ✓")
+
+    # 验证行并行
+    x_row = torch.randn(2, 8, 256)
+    y_row = row_parallel_linear(x_row, w2, tp)
+    torch.testing.assert_close(y_row, x_row @ w2.T, atol=5e-5, rtol=1e-5)
+    print("行并行等价 ✓")
+
+    # 验证 TP-MLP 组合
+    y_tp = tp_mlp(x, w1, w2, tp)
+    torch.testing.assert_close(y_tp, reference_mlp(x, w1, w2), atol=3e-4, rtol=1e-5)
+    print("TP-MLP 与完整 MLP 等价 ✓（中间无需 all-reduce）")
+```
+
+# 第 6 课参考答案（复盘用，先提交再打开）
+
+## 补全后的代码（关键填空处）
+
+```python
+def column_parallel_linear(x, w, tp):
+    out, inn = w.shape
+    chunk = out // tp
+    parts = []
+    for i in range(tp):
+        w_i = w[i * chunk:(i + 1) * chunk, :]     # 列分片：沿 out 维
+        parts.append(x @ w_i.T)
+    return torch.cat(parts, dim=-1)               # AllGather：沿输出维拼接
+
+
+def row_parallel_linear(x, w, tp):
+    out, inn = w.shape
+    chunk = inn // tp
+    parts = []
+    for i in range(tp):
+        w_i = w[:, i * chunk:(i + 1) * chunk]     # 行分片：沿 in 维
+        x_i = x[..., i * chunk:(i + 1) * chunk]   # Scatter：输入对应切片
+        parts.append(x_i @ w_i.T)
+    return sum(parts)                             # AllReduce：求和
+```
+
+验证：`column_parallel_linear(x, w1, 4) == x @ w1.T`、`row_parallel_linear(x, w2, 4) == x @ w2.T`、`tp_mlp == reference_mlp` 全部通过。
+
+## 三个问答题要点
+
+### Q1
+
+- 数学依据：`XW₁W₂` 中，若 W₁ 按列切（输出维）、W₂ 按行切（输入维），则 `Σᵢ X·W₁ᵢ·W₂ᵢ = X·W₁·W₂`——每 rank 的局部结果直接相加就是正确答案，**中间不需要同步**；列并行端到端只产生一次 all-reduce（行并行输出处）。
+- 反过来（先 row 后 col）也正确，但 row 输出需要先 all-reduce 得到完整中间激活，才能喂给 col 层——多一次全量 all-reduce。
+- 所以 MLP 布局：col（gate/up 投影 + 激活）→ row（down 投影），每 block 前向 1 次 all-reduce（attention 输出投影同理，共 2 次）。
+
+### Q2
+
+- 本质区别：TP 的同步点之后**立即有依赖它的计算**（LayerNorm 需要完整 h；下一层 matmul 需要完整输入），且每层出现（每 block 2 次 all-reduce），通信在关键路径上；
+- DP 的 all-reduce 是一次训练步中的"批量"同步，之后没有逐层依赖，可以完全重叠到 backward 里；
+- 后果：TP 吞吐对带宽极度敏感 → 限制在节点内（NVLink），TP=8→16 跨节点时性能骤降。
+
+### Q3
+
+- 硬约束 1：TP ≤ 注意力头数（QKV 投影沿头维切）；
+- 硬约束 2：TP ≤ 节点内 GPU 数（工程约束，非数学约束）；
+- GQA：Llama-3 8B 有 32 Q 头但只有 8 KV 头——TP=16/32 时 Q 投影可以继续切，但 K/V 投影分片后需要跨 rank 同步（保证每个 rank 有完整的 KV 头供其 Q 头使用）；TP=32 > 32 头则 Q 投影也无法切；
+- 实践：TP 通常 ≤ 8，因为跨节点带宽不够（哪怕数学上允许）。
+
+## 通过要点
+
+- 方向口诀：列并行（W 按 out 切）→ 输出拼接（all-gather）；行并行（W 按 in 切）→ 输出求和（all-reduce）。
+- TP 同时分片参数与激活；LayerNorm/dropout 需要全量 h → 引出第 7 课 SP。
+
+## 官方主参考
+
+- [Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)
+- [PyTorch distributed documentation](https://pytorch.org/docs/stable/distributed.html)
+

@@ -1,0 +1,130 @@
+---
+title: 集群平台、网络存储与可靠性补充线 · 第 7/8 课：Metrics、Logs、Traces 与 SLO Burn Rate
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 逐课通过制：未完成代码、问答与边界解释前，不进入下一课。
+
+
+## 本课目标与完成标准
+
+本课产出：实现错误预算 burn rate，并设计从服务症状下钻到 GPU/网络/存储根因的观测链。
+
+通过要求：唯一代码填空题通过给定检查；Q1～Q3 都给出因果链；能指出一个正确性边界和一个性能/运营取舍；总分至少 8/10。
+
+## 与既有六条主线的边界
+
+`inference/lesson08` 定义服务 SLO；本课关注平台如何持续观测和告警，而不是离线 benchmark。
+
+前置：Linux/网络基础、runtime 补充线、train 分布式章节。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
+
+## 核心心智模型
+
+### 它是什么、解决什么问题
+
+Metrics 聚合趋势，logs 记录离散事件，traces 连接跨服务请求。SLO error budget 是允许失败比例；burn rate=当前坏事件比例/预算比例。
+
+### 数据与控制如何流动
+
+入口为请求生成 trace/request ID，服务与调度层传播 context，GPU/网络/存储导出资源指标；告警先由用户可见 SLI 触发，再用 trace 关联日志和基础设施时间线下钻根因。
+
+### 正确性条件与常见误区
+
+告警应基于用户可见 SLI，并用短/长窗口同时控制响应速度和噪声。高 cardinality labels、丢日志和采样偏差会让观测系统本身失真。
+
+### 性能、成本与工程取舍
+
+更细粒度遥测便于定位却增加成本和扰动；只看 GPU utilization 便宜但无法区分排队、通信、数据或错误重试。
+
+## 具体演示
+
+SLO=99.9%，预算=0.1%。若 1 小时错误率 1%，burn=10：按此速度一个 30 天预算约 3 天耗尽。
+
+请先独立复述“输入 → 状态变化 → 输出/指标”，再开始填空。
+
+## 实践任务：唯一代码填空题
+
+补齐 burn rate，并拒绝没有错误预算的 100% SLO。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def burn_rate(bad_events, total_events, slo_target):
+    if total_events <= 0 or bad_events < 0 or bad_events > total_events or not 0 < slo_target < 1:
+        raise ValueError("invalid SLO window")
+    observed_bad = bad_events / total_events
+    error_budget = 1 - slo_target
+    # TODO：当前坏事件比例消耗预算的倍速。
+    return ______
+
+assert abs(burn_rate(100, 10_000, 0.999) - 10.0) < 1e-9
+assert burn_rate(0, 10_000, 0.999) == 0
+```
+
+### 检查方法
+
+运行本单元格，所有断言必须通过；再补一个边界输入并解释预期。
+
+### Q1
+
+为什么 GPU utilization=100% 可能是坏消息也可能是好消息？
+
+**你的答案：**
+
+### Q2
+
+短窗口 burn 高、长窗口正常时是否立即 page？
+
+**你的答案：**
+
+### Q3
+
+trace 采样只保留成功请求，会造成什么诊断盲区？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：正常输入 2 分、边界输入 1 分、解释 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：混淆测量与推测、忽略租户/请求隔离、用平均值掩盖尾延迟、删除失败路径。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请改变一个规模或故障条件重新推演。
+
+```{python}
+#| course_role: solution
+def burn_rate(bad_events, total_events, slo_target):
+    if total_events <= 0 or bad_events < 0 or bad_events > total_events or not 0 < slo_target < 1:
+        raise ValueError("invalid SLO window")
+    observed_bad = bad_events / total_events
+    error_budget = 1 - slo_target
+    return observed_bad / error_budget
+
+assert abs(burn_rate(100, 10_000, 0.999) - 10.0) < 1e-9
+assert burn_rate(0, 10_000, 0.999) == 0
+```
+
+### Q1 参考答案
+
+可能是有效模型计算充分利用，也可能是重算、错误重试、低优先级挤占或 kernel 卡在低吞吐。必须结合 goodput、SLO、功耗、kernel/通信和队列。
+
+### Q2 参考答案
+
+取决于告警策略和影响。多窗口多 burn-rate 通常要求短窗口检测快速故障、长窗口确认持续预算消耗；极端故障可单独快速告警，避免瞬时噪声。
+
+### Q3 参考答案
+
+失败/超时和尾延迟路径恰好被丢失，trace 看起来健康。应做 tail/error-based sampling，并确保请求 ID 在日志/指标中可关联，同时控制敏感数据。
+
+## 参考资料
+
+- [Google SRE Workbook: Alerting on SLOs](https://sre.google/workbook/alerting-on-slos/)
+- [OpenTelemetry documentation](https://opentelemetry.io/docs/)
+
+API 与平台能力会演进；部署前应按目标版本重新核对。
+

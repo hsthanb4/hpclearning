@@ -1,0 +1,132 @@
+---
+title: 框架运行时、数据与性能补充线 · 第 2/8 课：torch.compile：Graph Break、Guard 与动态 Shape
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 逐课通过制：未完成代码、问答与边界解释前，不进入下一课。
+
+
+## 本课目标与完成标准
+
+本课产出：模拟 shape guard cache key，解释 graph capture、重新编译和 eager fallback 的诊断方法。
+
+通过要求：唯一代码填空题通过给定检查；Q1～Q3 都给出因果链；能指出一个正确性边界和一个性能/运营取舍；总分至少 8/10。
+
+## 与既有六条主线的边界
+
+`mlir/` 讲通用 IR；本课只讲 PyTorch 运行时如何从 Python frame 捕获图、建立 guards，并把图交给后端。
+
+前置：Python、PyTorch、train 第 1～5 课、CUDA 基础。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
+
+## 核心心智模型
+
+### 它是什么、解决什么问题
+
+TorchDynamo 捕获可追踪区域，对 Python 全局、tensor dtype/device/shape 等建立 guards；guard 失败可重新编译，graph break 把函数切成多个区域。
+
+### 数据与控制如何流动
+
+Python frame 进入 Dynamo 后先尝试生成 FX 图和 guards，图交给后端编译并缓存；后续调用先检查 guards，命中则复用，失败则重新捕获、编译或按策略回退 eager。
+
+### 正确性条件与常见误区
+
+编译结果只对 guards 成立的输入有效。把所有维度设 dynamic 不保证无重编译，某些算子仍要求专门化；`fullgraph=True` 用于暴露 graph break，不是默认性能开关。
+
+### 性能、成本与工程取舍
+
+静态专门化可能生成更快 kernel，却在 shape 多变时导致编译风暴；动态图减少 variants，但优化空间和代码复杂度不同。
+
+## 具体演示
+
+shape=(B,S,H)，若 B/S 动态、H 静态，则 key 可概念化为 `(*,*,4096,dtype,device)`；H 改变应产生新 variant。
+
+请先独立复述“输入 → 状态变化 → 输出/指标”，再开始填空。
+
+## 实践任务：唯一代码填空题
+
+补齐教学版 guard key：动态维用 `*`，静态维保留精确大小。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def guard_key(shape, dynamic_dims, dtype, device):
+    if any(i < 0 or i >= len(shape) for i in dynamic_dims):
+        raise ValueError("dynamic dim out of range")
+    dynamic_dims = set(dynamic_dims)
+    guarded_shape = tuple("*" if i in dynamic_dims else size
+                          for i, size in enumerate(shape))
+    # TODO：dtype/device 仍属于 guard。
+    return ______
+
+assert guard_key((2, 128, 4096), {0, 1}, "bf16", "cuda") == (("*", "*", 4096), "bf16", "cuda")
+assert guard_key((8, 256, 4096), {0, 1}, "bf16", "cuda") == (("*", "*", 4096), "bf16", "cuda")
+```
+
+### 检查方法
+
+运行本单元格，所有断言必须通过；再补一个边界输入并解释预期。
+
+### Q1
+
+graph break 与 guard failure 有什么区别？
+
+**你的答案：**
+
+### Q2
+
+把 `dynamic=True` 打开后仍重新编译，可能有哪些原因？
+
+**你的答案：**
+
+### Q3
+
+什么时候先用 `fullgraph=True`，什么时候不适合长期打开？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：正常输入 2 分、边界输入 1 分、解释 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：混淆测量与推测、忽略租户/请求隔离、用平均值掩盖尾延迟、删除失败路径。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请改变一个规模或故障条件重新推演。
+
+```{python}
+#| course_role: solution
+def guard_key(shape, dynamic_dims, dtype, device):
+    if any(i < 0 or i >= len(shape) for i in dynamic_dims):
+        raise ValueError("dynamic dim out of range")
+    dynamic_dims = set(dynamic_dims)
+    guarded_shape = tuple("*" if i in dynamic_dims else size
+                          for i, size in enumerate(shape))
+    return guarded_shape, dtype, device
+
+assert guard_key((2, 128, 4096), {0, 1}, "bf16", "cuda") == (("*", "*", 4096), "bf16", "cuda")
+assert guard_key((8, 256, 4096), {0, 1}, "bf16", "cuda") == (("*", "*", 4096), "bf16", "cuda")
+```
+
+### Q1 参考答案
+
+Graph break 是捕获过程中遇到不能/不应进图的 Python 行为，形成图边界；guard failure 是已有 compiled variant 的前提对新输入不成立，运行时可能编译新 variant。两者诊断日志和优化手段不同。
+
+### Q2 参考答案
+
+dtype/device、Python 常量/全局状态、stride/layout、数据依赖控制流或某个算子强制专门化仍可触发 guard；也可能超过后端支持。应看 `TORCH_LOGS=guards,dynamic,recompiles`，不要猜。
+
+### Q3 参考答案
+
+集成/测试时用于强制暴露任何 break，帮助确定可捕获边界；生产函数本身含合法 Python/I/O 或后端不支持 op 时会直接失败，分区编译可能更实用。
+
+## 参考资料
+
+- [torch.compile](https://docs.pytorch.org/docs/stable/generated/torch.compile.html)
+- [PyTorch documentation](https://docs.pytorch.org/docs/stable/)
+
+API 与平台能力会演进；部署前应按目标版本重新核对。
+

@@ -1,0 +1,130 @@
+---
+title: 框架运行时、数据与性能补充线 · 第 1/8 课：PyTorch 执行栈、Dispatcher 与 Autograd
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 逐课通过制：未完成代码、问答与边界解释前，不进入下一课。
+
+
+## 本课目标与完成标准
+
+本课产出：从 Python op 追到 dispatcher/kernel/autograd node，并实现 DAG 反向中的梯度累加。
+
+通过要求：唯一代码填空题通过给定检查；Q1～Q3 都给出因果链；能指出一个正确性边界和一个性能/运营取舍；总分至少 8/10。
+
+## 与既有六条主线的边界
+
+`cuda/` 和 `triton/` 解释 kernel 内部；本课解释框架如何选择 kernel、记录动态图并在反向汇总多条梯度路径。
+
+前置：Python、PyTorch、train 第 1～5 课、CUDA 基础。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
+
+## 核心心智模型
+
+### 它是什么、解决什么问题
+
+PyTorch operator 经 dispatcher 按 device/dtype/backend key 选择实现；启用 grad 时 autograd 记录 Function 节点和 saved tensors，反向按依赖执行。
+
+### 数据与控制如何流动
+
+同一 tensor 被多条路径使用时，每条边产生局部梯度，autograd 必须在该节点所有下游贡献到达后累加，再调用其 backward。views、原地版本计数和 stream 语义共同约束正确性。
+
+### 正确性条件与常见误区
+
+叶子 `.grad` 是累加而非自动清零；原地修改 saved tensor 会触发版本错误或破坏梯度。`no_grad`、`inference_mode` 与 `detach` 的语义不同。
+
+### 性能、成本与工程取舍
+
+保存更多中间值降低反向重算，却增加显存；custom autograd 可控但必须通过 gradcheck，并处理非连续、混合精度和高阶梯度。
+
+## 具体演示
+
+若 `y=x²+x³`，x 的梯度来自两条边：2x 和 3x²，必须相加。只保留最后一条会在 x=2 时得到 12 而不是 16。
+
+请先独立复述“输入 → 状态变化 → 输出/指标”，再开始填空。
+
+## 实践任务：唯一代码填空题
+
+补齐多条反向边对同一 tensor 的梯度累加。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def accumulate_edge_grads(edge_grads):
+    """edge_grads: [(tensor_name, local_grad), ...]"""
+    totals = {}
+    for name, grad in edge_grads:
+        # TODO：同一 tensor 可能出现多次，不能覆盖已有贡献。
+        totals[name] = ______
+    return totals
+
+assert accumulate_edge_grads([("x", 4.0), ("x", 12.0), ("w", 3.0)]) == {"x": 16.0, "w": 3.0}
+assert accumulate_edge_grads([]) == {}
+```
+
+### 检查方法
+
+运行本单元格，所有断言必须通过；再补一个边界输入并解释预期。
+
+### Q1
+
+为什么调用两次 `loss.backward()` 默认会让 parameter.grad 相加，而不是覆盖？
+
+**你的答案：**
+
+### Q2
+
+对 forward 保存的 tensor 做原地修改，为什么 autograd 需要版本计数？
+
+**你的答案：**
+
+### Q3
+
+自定义 op 有 CUDA kernel 但 `torch.compile`/autograd 不认识，集成至少需要哪些层？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：正常输入 2 分、边界输入 1 分、解释 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：混淆测量与推测、忽略租户/请求隔离、用平均值掩盖尾延迟、删除失败路径。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请改变一个规模或故障条件重新推演。
+
+```{python}
+#| course_role: solution
+def accumulate_edge_grads(edge_grads):
+    """edge_grads: [(tensor_name, local_grad), ...]"""
+    totals = {}
+    for name, grad in edge_grads:
+        totals[name] = totals.get(name, 0.0) + grad
+    return totals
+
+assert accumulate_edge_grads([("x", 4.0), ("x", 12.0), ("w", 3.0)]) == {"x": 16.0, "w": 3.0}
+assert accumulate_edge_grads([]) == {}
+```
+
+### Q1 参考答案
+
+Autograd 的 leaf accumulator 把每次反向产生的贡献累加到 `.grad`，这支持多 loss/梯度累积。训练循环必须在正确边界 `zero_grad(set_to_none=True)` 或清零，否则跨 step 污染。
+
+### Q2 参考答案
+
+backward 依赖 forward 时的数值。版本计数让引擎检测 saved tensor 已被改写，避免悄悄用错误值求导；某些不需要旧值的原地操作可安全，但不能凭结果看似正确判断。
+
+### Q3 参考答案
+
+需要 dispatcher schema/实现注册、autograd 公式或 custom Function、fake/meta kernel 供 shape 推导，并按编译路径提供 decomposition/lowering；还要定义 aliasing/mutation 语义和测试。
+
+## 参考资料
+
+- [PyTorch autograd mechanics](https://docs.pytorch.org/docs/stable/notes/autograd.html)
+- [PyTorch documentation](https://docs.pytorch.org/docs/stable/)
+
+API 与平台能力会演进；部署前应按目标版本重新核对。
+

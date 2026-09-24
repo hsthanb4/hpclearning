@@ -1,0 +1,372 @@
+---
+title: "训练系统 · 第 7/14 课：序列并行 SP"
+subtitle: "Ultra-Scale Playbook 训练系统"
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 一次只完成一课；未通过前不要打开下一课答案。
+
+
+## 统一完成标准
+
+代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
+
+# 第 7 课：序列并行 SP
+
+- 对应官方章节：Sequence parallelism
+- 前置：第 6 课（TP）
+- 状态：未开始
+
+## 本课目标
+
+完成后你需要能够：
+
+- 说明 SP 解决的问题：LayerNorm/dropout 需要完整隐藏维度，抵消 TP 的激活节省。
+- 画出一个 transformer block 在 TP 与 TP+SP 下激活形状 `(b, s, h)` 的转换图。
+- 解释 f/f\* 与 g/g\* 两组共轭操作在 forward/backward 中的角色。
+- 说明 TP+SP 的通信量与纯 TP 相同的原因。
+
+## 核心概念
+
+### 1. 术语澄清（面试容易踩坑）
+
+本书中"sequence parallelism"**专指与 TP 配套**、作用于 LayerNorm/dropout 的技巧；把序列切分应用在整模型（含 attention）的技术本书叫 **context parallelism（CP，第 8 课）**。回答面试题时先问清楚对方指哪一个。
+
+### 2. 为什么需要 SP
+
+LayerNorm 需要**完整的隐藏维度 h** 计算均值和方差：
+
+```{python}
+LayerNorm(x) = γ·(x − μ)/√(σ² + ε) + β，μ、σ² 沿 h 维计算
+```
+
+所以 LayerNorm 区域内的激活必须是 `(b, s, h)` 全量——TP 把注意力/MLP 的激活切成 `(b, s, h/tp)` 后，每次经过 LayerNorm/dropout 都要拼回全量，激活峰值为 `b·s·h`，抵消了 TP 的部分收益。SP 的做法：这些区域沿**序列维**切分，激活为 `(b, s/tp, h)`。
+
+### 3. 区域转换与共轭操作
+
+前向经过的区域（每个 block）：
+
+```{python}
+LN(SP区) --g--> col-linear(TP区) --GELU--> row-linear(TP区) --g*--> dropout(SP区)
+```
+
+- TP 区域内：h 被切分；SP 区域内：s 被切分。
+- **g**（SP→TP）：all-gather 沿序列维，恢复完整 s；**g\***（TP→SP）：reduce-scatter 沿序列维，把 h 维的合并结果（row-linear 需要求和）与 s 维切分一步完成。
+- 在 TP 区域内部，col-linear **入口**需要完整输入 s（所以 g 在它之前），row-linear **出口**需要 all-reduce 求和——由 g\* 承担。
+- LayerNorm 的算子本身与 TP 搭配时的 f/f\*：TP 区域与 DP 交界处的同步语义（前向 f 是 no-op、f\* 是 all-reduce；反向互换）。SP 的 g/g\* 同理成对。
+
+> 关键理解：f 与 f\*、g 与 g\* 是"共轭对"——前向中一个是 no-op 另一个是 all-reduce/all-gather/reduce-scatter，反向中角色互换；因为反向要传播的梯度形状恰好是前向的转置。
+
+### 4. 收益与代价
+
+- 最大激活从 `b·s·h` 降到 `b·s·h/tp`。
+- 通信量不变：纯 TP 每 block 前向 2 次 all-reduce；TP+SP 是 2 次 all-gather + 2 次 reduce-scatter。而 all-reduce = all-gather + reduce-scatter，所以**总通信量等价**（通信操作数翻倍但每次减半）。
+- SP 区域 LayerNorm 各 rank 算的是不同序列片段 → 梯度不同，反向需要 all-reduce 其权重梯度（LayerNorm 参数少，开销小）。
+- 与 TP 一样：通常限制在节点内（TP ≤ 8），跨节点性能骤降。
+
+## 具体演示
+
+70B 模型（L=80、h=8192）、TP=8、seq=16k、mbs=1：TP-only 每层驻留激活 ≈ b·s·h·2 ≈ 268 MB → 80 层 ≈ 21.5 GB；TP+SP 每层 ≈ b·s·h·2/TP ≈ 33.5 MB → 约 2.7 GB（节省 8×），配合全量重计算可处理 16k 序列。教材基准：3B 模型、seq=4096，TP=8→16 性能大幅下降（跨节点带宽），但激活节省显著，能上更大的 batch。
+
+## 代码填空题
+
+模拟一个 transformer block 内激活形状 `(s, h)` 的变化，比较 TP-only 与 TP+SP 的峰值激活。
+
+```{python}
+#| course_role: exercise
+def trace_block(
+    seq: int, hidden: int, tp: int, enable_sp: bool, batch: int = 1,
+) -> list[tuple[str, int, int]]:
+    """
+    返回 [(区域名, s, h)]：前向经过 block 时激活形状的轨迹（每 token 两字节 BF16 可算字节数）。
+
+    算子表（对 (s, h) 的作用）：
+      split_seq    : s -> s/tp      （SP 区入口 / g* 出口）
+      gather_seq   : s -> s*tp      （g：SP -> TP）
+      split_hidden : h -> h/tp      （col-linear 切 h）
+      gather_hidden: h -> h*tp      （row-linear 恢复 h）
+      noop         : 不变
+
+    区域顺序：
+      layernorm → col_linear → gelu → row_linear → dropout
+    """
+    def split_seq(s, h): return (s // tp, h)
+    def gather_seq(s, h): return (s * tp, h)
+    def split_hidden(s, h): return (s, h // tp)
+    def gather_hidden(s, h): return (s, h * tp)
+    def noop(s, h): return (s, h)
+
+    region_ops = {
+        "layernorm": ______,   # 填空：TP-only 下 LN 输入就是全量 (s,h)，用什么算子？
+        "col_linear": ______,  # 填空：col-linear 沿隐藏维切分
+        "gelu": ______,        # 填空：逐元素，形状不变
+        "row_linear": ______,  # 填空：row-linear 恢复隐藏维
+        "dropout": ______,     # 填空：TP-only 下 dropout 保持全量
+    }
+    sp_ops = {
+        # 启用 SP 时各区域用的算子（提示：LN/dropout 在 SP 区沿序列切，
+        # col/row 在 TP 区沿隐藏维切）
+        "layernorm": ______,
+        "col_linear": ______,
+        "gelu": ______,
+        "row_linear": ______,
+        "dropout": ______,
+    }
+    plan = sp_ops if enable_sp else region_ops
+
+    s, h = seq, hidden
+    trace = []
+    for name, op in plan.items():
+        if enable_sp and name == "col_linear":
+            # SP -> TP 过渡：g = all-gather 沿序列维，恢复完整 s
+            s, h = gather_seq(s, h)
+            trace.append(("g (all-gather seq)", s, h, False))   # 瞬态通信缓冲
+        s, h = op(s, h)
+        # SP 模式下 row-linear 的 (s, h) 输出是瞬态（随后被 g* 切回序列分片），
+        # 反向真正需要的是它的输入（上一区域的 (s, h/tp)）——所以标记为不驻留。
+        persists = not (enable_sp and name == "row_linear")
+        trace.append((name, s, h, persists))                    # 驻留激活（要存给反向）
+        if enable_sp and name == "row_linear":
+            trace.append(("row_out (full h)", s, h, False))      # 瞬态：随后被 g* 切回
+            s, h = split_seq(s, h)
+            trace.append(("g* (reduce-scatter seq)", s, h, False))
+    return trace
+
+
+def max_activation_bytes(trace: list[tuple[str, int, int, bool]], batch: int) -> int:
+    """
+    峰值【驻留】激活 = max(需要保存给反向的激活字节数)，BF16 每元素 2 字节。
+    g/g* 与 row_out 是瞬态全量张量（存在通信/临时缓冲区里），不计入驻留激活；
+    但它们会出现在峰值显存里——面试时要主动区分"驻留激活"与"瞬态缓冲"。
+    """
+    return max(
+        ______   # 填空：只统计驻留条目 (stored=True)，b*s*h*2
+        for name, s, h, stored in trace
+        if stored
+    )
+
+
+def bf16_bytes(s: int, h: int, batch: int) -> int:
+    return batch * s * h * 2
+
+
+if __name__ == "__main__":
+    seq, hidden, tp, bs = 4096, 4096, 8, 1
+
+    t_tp = trace_block(seq, hidden, tp, enable_sp=False, batch=bs)
+    t_sp = trace_block(seq, hidden, tp, enable_sp=True, batch=bs)
+
+    print("TP-only:")
+    for name, s, h, stored in t_tp:
+        tag = " " if stored else "*"
+        print(f"  {tag}{name:22s} s={s:5d} h={h:5d}  {bf16_bytes(s, h, bs)/1e6:8.1f} MB")
+    print("TP+SP（* = 瞬态全量，不计入驻留激活）:")
+    for name, s, h, stored in t_sp:
+        tag = " " if stored else "*"
+        print(f"  {tag}{name:26s} s={s:5d} h={h:5d}  {bf16_bytes(s, h, bs)/1e6:8.1f} MB")
+
+    m_tp = max_activation_bytes(t_tp, bs)
+    m_sp = max_activation_bytes(t_sp, bs)
+    print(f"\nTP-only 峰值 = {m_tp/1e6:.1f} MB = b·s·h·2 = {bs*seq*hidden*2/1e6:.1f} MB")
+    print(f"TP+SP   峰值 = {m_sp/1e6:.1f} MB = b·s·h·2/tp = {bs*seq*hidden*2/tp/1e6:.1f} MB")
+    assert m_sp * tp == m_tp
+    print("验证：TP+SP 峰值激活 = TP-only 的 1/tp ✓")
+```
+
+## 三个问答题
+
+### Q1
+
+为什么 LayerNorm 不能像 MLP 那样沿隐藏维切分？请写出 LayerNorm 公式并指出哪一步依赖完整 h。dropout 为什么也需要 SP（提示：随机掩码的模式）？
+
+### Q2
+
+教材用 f/f\* 描述 TP 区域与 DP 的交界、用 g/g\* 描述 SP 与 TP 区域的交界。请分别写出前向和反向下 f、f\* 各是什么操作（no-op 还是 all-reduce），并解释为什么反向恰好互换。SP 区域为什么刻意不用 all-reduce？
+
+### Q3
+
+教材说 TP+SP "通信操作数是 TP 的两倍（2 all-gather + 2 reduce-scatter vs 2 all-reduce），但总通信量等价"。请用第 3 课的结论（all-reduce = reduce-scatter + all-gather）证明这一点，并指出这为什么使 SP 几乎免费。
+
+## 检查与通过标准
+
+总分 10 分：代码正确 4 分（变换计划、g/g\* 过渡、峰值公式与验证）、三题各 2 分、通过线 8 分。
+
+一票否决项：
+
+- 把 SP 与 CP 混为一谈（本书定义下）。
+- 认为 SP 沿隐藏维切分 LayerNorm 的输入。
+- 说不出 g\* 是 reduce-scatter（把 row-linear 的求和与序列切分合并）或方向错误。
+- 声称 SP 增加了通信量（而非通信次数增加、总量等价）。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。
+
+```{python}
+#| course_role: solution
+def trace_block(
+    seq: int, hidden: int, tp: int, enable_sp: bool, batch: int = 1,
+) -> list[tuple[str, int, int]]:
+    """
+    返回 [(区域名, s, h)]：前向经过 block 时激活形状的轨迹（每 token 两字节 BF16 可算字节数）。
+
+    算子表（对 (s, h) 的作用）：
+      split_seq    : s -> s/tp      （SP 区入口 / g* 出口）
+      gather_seq   : s -> s*tp      （g：SP -> TP）
+      split_hidden : h -> h/tp      （col-linear 切 h）
+      gather_hidden: h -> h*tp      （row-linear 恢复 h）
+      noop         : 不变
+
+    区域顺序：
+      layernorm → col_linear → gelu → row_linear → dropout
+    """
+    def split_seq(s, h): return (s // tp, h)
+    def gather_seq(s, h): return (s * tp, h)
+    def split_hidden(s, h): return (s, h // tp)
+    def gather_hidden(s, h): return (s, h * tp)
+    def noop(s, h): return (s, h)
+
+    region_ops = {
+        "layernorm": noop,   # 填空：TP-only 下 LN 输入就是全量 (s,h)，用什么算子？
+        "col_linear": split_hidden,  # 填空：col-linear 沿隐藏维切分
+        "gelu": noop,        # 填空：逐元素，形状不变
+        "row_linear": gather_hidden,  # 填空：row-linear 恢复隐藏维
+        "dropout": noop,     # 填空：TP-only 下 dropout 保持全量
+    }
+    sp_ops = {
+        # 启用 SP 时各区域用的算子（提示：LN/dropout 在 SP 区沿序列切，
+        # col/row 在 TP 区沿隐藏维切）
+        "layernorm": split_seq,
+        "col_linear": split_hidden,
+        "gelu": noop,
+        "row_linear": gather_hidden,
+        "dropout": noop,
+    }
+    plan = sp_ops if enable_sp else region_ops
+
+    s, h = seq, hidden
+    trace = []
+    for name, op in plan.items():
+        if enable_sp and name == "col_linear":
+            # SP -> TP 过渡：g = all-gather 沿序列维，恢复完整 s
+            s, h = gather_seq(s, h)
+            trace.append(("g (all-gather seq)", s, h, False))   # 瞬态通信缓冲
+        s, h = op(s, h)
+        # SP 模式下 row-linear 的 (s, h) 输出是瞬态（随后被 g* 切回序列分片），
+        # 反向真正需要的是它的输入（上一区域的 (s, h/tp)）——所以标记为不驻留。
+        persists = not (enable_sp and name == "row_linear")
+        trace.append((name, s, h, persists))                    # 驻留激活（要存给反向）
+        if enable_sp and name == "row_linear":
+            trace.append(("row_out (full h)", s, h, False))      # 瞬态：随后被 g* 切回
+            s, h = split_seq(s, h)
+            trace.append(("g* (reduce-scatter seq)", s, h, False))
+    return trace
+
+
+def max_activation_bytes(trace: list[tuple[str, int, int, bool]], batch: int) -> int:
+    """
+    峰值【驻留】激活 = max(需要保存给反向的激活字节数)，BF16 每元素 2 字节。
+    g/g* 与 row_out 是瞬态全量张量（存在通信/临时缓冲区里），不计入驻留激活；
+    但它们会出现在峰值显存里——面试时要主动区分"驻留激活"与"瞬态缓冲"。
+    """
+    return max(
+        max(batch * s * h * 2 for _, s, h, stored in trace if stored)   # 填空：只统计驻留条目 (stored=True)，b*s*h*2
+        for name, s, h, stored in trace
+        if stored
+    )
+
+
+def bf16_bytes(s: int, h: int, batch: int) -> int:
+    return batch * s * h * 2
+
+
+if __name__ == "__main__":
+    seq, hidden, tp, bs = 4096, 4096, 8, 1
+
+    t_tp = trace_block(seq, hidden, tp, enable_sp=False, batch=bs)
+    t_sp = trace_block(seq, hidden, tp, enable_sp=True, batch=bs)
+
+    print("TP-only:")
+    for name, s, h, stored in t_tp:
+        tag = " " if stored else "*"
+        print(f"  {tag}{name:22s} s={s:5d} h={h:5d}  {bf16_bytes(s, h, bs)/1e6:8.1f} MB")
+    print("TP+SP（* = 瞬态全量，不计入驻留激活）:")
+    for name, s, h, stored in t_sp:
+        tag = " " if stored else "*"
+        print(f"  {tag}{name:26s} s={s:5d} h={h:5d}  {bf16_bytes(s, h, bs)/1e6:8.1f} MB")
+
+    m_tp = max_activation_bytes(t_tp, bs)
+    m_sp = max_activation_bytes(t_sp, bs)
+    print(f"\nTP-only 峰值 = {m_tp/1e6:.1f} MB = b·s·h·2 = {bs*seq*hidden*2/1e6:.1f} MB")
+    print(f"TP+SP   峰值 = {m_sp/1e6:.1f} MB = b·s·h·2/tp = {bs*seq*hidden*2/tp/1e6:.1f} MB")
+    assert m_sp * tp == m_tp
+    print("验证：TP+SP 峰值激活 = TP-only 的 1/tp ✓")
+```
+
+# 第 7 课参考答案（复盘用，先提交再打开）
+
+## 补全后的代码（关键填空处）
+
+```python
+region_ops = {
+        "layernorm": noop,             # TP-only：LN 输入本来就是全量 (s, h)
+        "col_linear": split_hidden,    # col-linear 切 h
+        "gelu": noop,                  # 逐元素
+        "row_linear": gather_hidden,   # row-linear 恢复 h
+        "dropout": noop,               # TP-only：全量
+    }
+    sp_ops = {
+        "layernorm": split_seq,        # SP 区：沿序列切
+        "col_linear": split_hidden,    # TP 区：沿隐藏维切
+        "gelu": noop,
+        "row_linear": gather_hidden,
+        "dropout": noop,               # SP 区：保持序列切分
+    }
+    # 过渡：col_linear 前 g=gather_seq（SP→TP）；row_linear 后 g*=split_seq（TP→SP）
+    # 驻留标记：g/g*/row_out 为瞬态（存在通信/临时缓冲区），不计入驻留激活
+
+def max_activation_bytes(trace, batch):
+    return max(batch * s * h * 2 for _, s, h, stored in trace if stored)
+```
+
+运行结果（seq=4096, h=4096, tp=8）：
+
+```python
+TP-only：LN/row/dropout 处形状 (4096, 4096) → 驻留峰值 33.6 MB = b·s·h·2
+TP+SP ：layernorm (512,4096)、col/gelu (4096,512)、dropout (512,4096)
+        → 驻留峰值 4.2 MB = b·s·h·2/tp ✓（g、row_out、g* 是瞬态全量）
+验证：TP+SP 驻留峰值 = TP-only 的 1/tp ✓
+```
+
+## 三个问答题要点
+
+### Q1
+
+- LayerNorm：μ 与 σ² 沿 h 维求均值/方差（`LayerNorm(x) = γ·(x−μ)/√(σ²+ε)+β`），每 rank 只有 h/tp 无法算出正确的统计量 → 必须全量 h；
+- dropout：掩码是随机模式，各 rank 必须用相同种子生成一致的掩码（否则激活模式不同步），且掩码要覆盖全量张量；
+- 所以这些"便宜"操作反而是激活内存大户 → 沿序列维切分（SP）把它们也分片。
+
+### Q2
+
+- f/f\*（TP 与 DP 交界）：前向 f=no-op（输入已同步）、f\*=all-reduce（保证正确性）；反向互换（梯度形状是前向的转置，谁前向是 no-op 谁反向就是 all-reduce）；
+- g/g\*（SP 与 TP 交界）：前向 g=all-gather（序列拼回全量）、g\*=reduce-scatter（合并 row-linear 的部分和 + 切回序列分片）；反向为共轭互换；
+- SP 区域不用 all-reduce 的原因：all-reduce 需要物化全量激活（先 gather 再 reduce），峰值内存回到 b·s·h，SP 的初衷就没了；用 reduce-scatter 把"求和"与"切分"一步完成。
+
+### Q3
+
+- 由第 3 课：all-reduce = reduce-scatter + all-gather，通信量各半；
+- 纯 TP 每 block：2 次 all-reduce = 通信量 2·(K)；TP+SP：2 all-gather + 2 reduce-scatter = 2·(K/2) + 2·(K/2) = 2K——总量相同，只是操作数翻倍；
+- 所以 SP 的额外代价主要是实现复杂度和更多小消息（latency 略增），带宽成本与 TP 相同；这就是"SP 几乎免费"。
+
+## 通过要点
+
+- 术语：本书 SP 专指 TP 的配套技术（LN/dropout 沿序列切）；独立的序列切分叫 CP（第 8 课）。
+- 激活形状：TP 区域 h 切、SP 区域 s 切；**驻留**激活峰值 b·s·h/tp；g/g* 的瞬态全量张量只存在于通信/临时缓冲区（面试要主动区分）。
+
+## 官方主参考
+
+- [Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)
+- [PyTorch distributed documentation](https://pytorch.org/docs/stable/distributed.html)
+

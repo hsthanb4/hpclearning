@@ -1,0 +1,203 @@
+---
+title: 推理引擎源码与前沿优化 · 第 8/8 课：现代 Speculative Systems：EAGLE-3、MTP、DFlash 与 DSpark
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 源码审阅日期：2026-08-12；vLLM `8e958902eee5`；SGLang `9deb6952afa4`。
+
+
+## 本课目标与通过标准
+
+本课产出：能从 vLLM/SGLang 当前源码辨认已集成的 proposer/worker 与 verify 路径，比较 autoregressive feature/token draft、MTP、block-diffusion draft 和 adaptive depth，并设计不误导的 benchmark。
+
+通过要求：唯一代码填空题通过全部断言；Q1～Q3 都能沿源码对象给出因果链；能指出一个正确性不变量、一个性能边界和一个需要 benchmark 才能确认的结论；总分至少 8/10。
+
+## 源码版本与阅读方法
+
+本课程使用固定 commit 的永久链接保证行号可复现，同时链接 current docs 供核对最新变化。阅读时先画调用图和状态所有权，再进入分支；不要从大文件第一行机械顺读。
+
+源码阅读路线：
+
+1. SGLang `speculative/spec_info.py::SpeculativeAlgorithm`：当前内置 DFLASH、DSPARK、EAGLE/EAGLE3、FROZEN_KV_MTP、STANDALONE、NGRAM。
+2. `eagle_worker_v2.py::draft/verify`：tree draft、target verify、CUDA graph 与 adaptive runtime state。
+3. `dflash_worker_v2.py::forward_batch_generation`：target hidden capture、block draft、verify 和下一轮状态。
+4. `dspark_components/dspark_worker_v2.py`：ragged verify、confidence budget 和动态长度。
+5. vLLM `v1/spec_decode/` 与 worker speculator/rejection sampler：对照 proposer 与通用 verifier 的边界。
+6. SGLang Spec V2/overlap 文档与发布记录：区分“源码存在”“默认启用”“某模型可用”。
+
+源码快照：vLLM `8e958902eee5`；SGLang `9deb6952afa4`。
+
+## 核心对象
+
+方案族：
+
+- N-gram/suffix：无需训练，复用上下文重复模式，便宜但依赖文本可预测性。
+- Standalone draft：小模型自回归提案，通用但有额外权重/KV和串行 draft。
+- MTP：目标模型原生多 token heads/模块，部署紧耦合、额外模型较小。
+- EAGLE-3：使用 target 多层特征并直接预测 token，autoregressive/tree draft 后并行 verify。
+- DFlash：轻量 block-diffusion drafter 并行生成一个 block，减少串行 drafting。
+- DSpark：源码中体现 confidence-scheduled/adaptive draft budget 与 ragged verify，目标是按请求难度减少无效 verify。
+
+这些名称描述 proposal 机制；lossless 仍依赖上一课的 target verification。
+
+## 调用链与状态变化
+
+EAGLE V2 worker 从 target hidden/token 状态构造 draft input，多步/top-k 扩展成 tree，再构建 target verify mask；verify 返回 accepted tokens、bonus 和下一轮 draft 状态。DFlash prefill 捕获 target auxiliary hidden states并写 draft KV，decode 时产生 block proposal、target verify、提交接受前缀并构造下一 block。DSpark 为不同请求选择不同 draft/verify 长度，因此需要 ragged layout、bucketed CUDA graph 和 confidence relay。
+
+Overlap scheduling 尝试让 CPU 结果处理、draft/verify 或下一 batch 准备重叠，但共享 hidden/KV/buffer 的 WAR、shape bucket 和 grammar barrier 都是正确性条件。
+
+## 正确性条件与常见误区
+
+不能只比较 acceptance rate：应分别记录 accepted drafts、每轮产出 token、draft time、verify time、sampling/CPU overhead、额外显存、batch size、prompt/output 分布和 SLO goodput。论文的单请求 greedy speedup不等于高并发服务收益。
+
+方案必须与 target tokenizer/vocab、hidden interface、model revision 和 sampling features兼容。源码中枚举存在不代表所有硬件、模型、PP/PD/LoRA/grammar 组合都成熟。
+
+## 当前前沿与工程取舍
+
+截至本快照，EAGLE-3 是成熟高接受率的训练式路线；DFlash 代表并行 block draft 的新前沿；DSpark/自适应 speculation 代表按位置、请求和 batch 动态调深度。论文报告可作为候选证据，最终选型没有统一冠军：高 batch、长 reasoning、开放式采样、代码重复和不同 GPU 会改变成本。最先进的工程实践是可观测、可回退的自适应策略，而不是固定最大 draft length。
+
+## 具体推演
+
+若每个 draft 位置的条件接受率是 `[0.8,0.7,0.5]`，期望接受 draft 数为 `0.8 + 0.8×0.7 + 0.8×0.7×0.5 = 1.64`；加上拒绝校正或全接受后的 bonus，每轮期望产出 2.64 tokens。若 draft+verify+overhead 比 target-only 生成 2.64 tokens 还慢，acceptance 看起来不错也没有端到端加速。
+
+请先口头复述“输入 → 状态所有者 → 状态迁移 → 输出/指标”，再做练习。
+
+## 实践任务：唯一代码填空题
+
+补齐投机方案成本模型：由逐位置条件接受率计算每轮期望产出，并在显存预算内选择相对 baseline 真正加速的方案。输入时间必须来自同一 workload 的测量。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def expected_tokens_per_round(conditional_acceptance):
+    survival = 1.0
+    expected_accepted = 0.0
+    for probability in conditional_acceptance:
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("acceptance probability out of range")
+        # TODO：第 i 个 token 被接受要求前面全部存活。
+        survival = ______
+        expected_accepted += ______
+    return 1.0 + expected_accepted  # replacement/bonus token
+
+def choose_spec_method(methods, baseline_ms_per_token, memory_budget_gb):
+    best = ("baseline", 1.0)
+    for method in methods:
+        if method["extra_memory_gb"] > memory_budget_gb:
+            continue
+        produced = expected_tokens_per_round(method["conditional_acceptance"])
+        round_ms = method["draft_ms"] + method["verify_ms"] + method["overhead_ms"]
+        speedup = produced * baseline_ms_per_token / round_ms
+        if speedup > best[1]:
+            best = (method["name"], speedup)
+    return best
+
+methods = [
+    {"name": "tree", "conditional_acceptance": [0.8, 0.7, 0.5],
+     "draft_ms": 3.0, "verify_ms": 8.0, "overhead_ms": 1.0, "extra_memory_gb": 4},
+    {"name": "block", "conditional_acceptance": [0.75, 0.75, 0.7],
+     "draft_ms": 1.5, "verify_ms": 8.5, "overhead_ms": 1.0, "extra_memory_gb": 6},
+]
+name, speedup = choose_spec_method(methods, baseline_ms_per_token=10.0, memory_budget_gb=8)
+assert name == "block" and speedup > 1.0
+assert abs(expected_tokens_per_round([0.8, 0.7, 0.5]) - 2.64) < 1e-12
+assert choose_spec_method(methods, 2.0, 5)[0] == "baseline"
+```
+
+### 检查方法
+
+运行断言；把 batch 增大后测得的 verify_ms 代入，观察选择是否改变。该模型是筛选器，最终必须报告实测 goodput。
+
+### Q1
+
+EAGLE-3、MTP 与 DFlash 的 proposal 临界路径有何根本区别？
+
+**你的答案：**
+
+### Q2
+
+为什么固定把 speculative depth 调到最大通常不是先进实践？
+
+**你的答案：**
+
+### Q3
+
+你会怎样设计一次不会夸大 DFlash/EAGLE-3 收益的 benchmark？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：主路径 2 分、边界条件 1 分、能映射回源码对象 1 分；
+- Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；
+- 一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请更换一个 batch、cache 或硬件条件重新推演，不能只复制。
+
+```{python}
+#| course_role: solution
+def expected_tokens_per_round(conditional_acceptance):
+    survival = 1.0
+    expected_accepted = 0.0
+    for probability in conditional_acceptance:
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("acceptance probability out of range")
+        survival *= probability
+        expected_accepted += survival
+    return 1.0 + expected_accepted
+
+def choose_spec_method(methods, baseline_ms_per_token, memory_budget_gb):
+    best = ("baseline", 1.0)
+    for method in methods:
+        if method["extra_memory_gb"] > memory_budget_gb:
+            continue
+        produced = expected_tokens_per_round(method["conditional_acceptance"])
+        round_ms = method["draft_ms"] + method["verify_ms"] + method["overhead_ms"]
+        speedup = produced * baseline_ms_per_token / round_ms
+        if speedup > best[1]:
+            best = (method["name"], speedup)
+    return best
+
+methods = [
+    {"name": "tree", "conditional_acceptance": [0.8, 0.7, 0.5],
+     "draft_ms": 3.0, "verify_ms": 8.0, "overhead_ms": 1.0, "extra_memory_gb": 4},
+    {"name": "block", "conditional_acceptance": [0.75, 0.75, 0.7],
+     "draft_ms": 1.5, "verify_ms": 8.5, "overhead_ms": 1.0, "extra_memory_gb": 6},
+]
+name, speedup = choose_spec_method(methods, baseline_ms_per_token=10.0, memory_budget_gb=8)
+assert name == "block" and speedup > 1.0
+assert abs(expected_tokens_per_round([0.8, 0.7, 0.5]) - 2.64) < 1e-12
+assert choose_spec_method(methods, 2.0, 5)[0] == "baseline"
+```
+
+### Q1 参考答案
+
+EAGLE-3 使用 target 多层特征的轻量 draft，通常仍自回归/树式扩展多个步骤；MTP 使用目标模型原生额外预测模块/heads，省独立大 draft 但与模型结构紧耦合；DFlash 用 block-diffusion drafter 并行提出一块 token，试图去掉串行 draft 深度。三者都需 target verify，额外 KV/hidden、kernel shape 和可支持模型集合不同。
+
+### Q2 参考答案
+
+位置、请求类型、temperature、batch 和生成长度会改变接受率；更深 proposal 增加 draft、verify token、KV和 graph bucket，低接受时大部分工作被拒绝。自适应策略根据近期 accepted length/置信度和成本选择预捕获 tier，在收益不足时回退普通 decode，才能维持 SLO goodput。
+
+### Q3 参考答案
+
+固定 engine commit、模型/draft revision、硬件/功耗和 sampling 参数；使用生产 prompt/output/到达分布的 open-loop 压测，覆盖不同 batch、长输出、代码与开放文本。记录 TTFT、ITL/p99、output tok/s、SLO goodput、accepted drafts/tokens、draft/verify/CPU时间、显存和失败。与同 engine 的 target-only baseline 比较，并报告 warmup、CUDA graph、质量/分布等价验证和不加速区域。
+
+## 参考资料
+
+- [SGLang speculative algorithm registry](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/speculative/spec_info.py#L30-L316)
+- [SGLang EAGLE V2 worker](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/speculative/eagle_worker_v2.py#L489-L1508)
+- [SGLang DFlash V2 worker](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/speculative/dflash_worker_v2.py#L168-L1600)
+- [SGLang DSpark worker](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py)
+- [vLLM speculative decode implementations](https://github.com/vllm-project/vllm/tree/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/spec_decode)
+- [SGLang speculative decoding guide](https://docs.sglang.io/docs/advanced_features/speculative_decoding)
+- [EAGLE-3 paper](https://arxiv.org/abs/2503.01840)
+- [DFlash paper](https://arxiv.org/abs/2602.06036)
+- [Production-grade speculative decoding study](https://arxiv.org/abs/2601.11580)
+
+源码链接固定到本课审阅 commit；current docs、支持矩阵和默认参数会变化，面试或部署前必须按目标版本重新核对。
+

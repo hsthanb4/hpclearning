@@ -1,0 +1,193 @@
+---
+title: 推理引擎源码与前沿优化 · 第 1/8 课：vLLM V1 源码地图：AsyncLLM、EngineCore 与 Worker
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 源码审阅日期：2026-08-12；vLLM `8e958902eee5`；SGLang `9deb6952afa4`。
+
+
+## 本课目标与通过标准
+
+本课产出：能从在线请求入口沿真实调用链追到一次模型执行和输出回传，并准确说明 frontend、EngineCore、Scheduler、Executor/Worker 的状态所有权。
+
+通过要求：唯一代码填空题通过全部断言；Q1～Q3 都能沿源码对象给出因果链；能指出一个正确性不变量、一个性能边界和一个需要 benchmark 才能确认的结论；总分至少 8/10。
+
+## 源码版本与阅读方法
+
+本课程使用固定 commit 的永久链接保证行号可复现，同时链接 current docs 供核对最新变化。阅读时先画调用图和状态所有权，再进入分支；不要从大文件第一行机械顺读。
+
+本课按下面顺序阅读，不要从 2500 行的 `core.py` 第一行顺读：
+
+| 顺序 | 文件与入口 | 带着什么问题读 |
+|---:|---|---|
+| 1 | `vllm/v1/engine/async_llm.py`：`AsyncLLM.generate`、`_add_request`、`_run_output_handler` | 谁负责 tokenization、请求流和客户端取消？ |
+| 2 | `vllm/v1/engine/core.py`：`EngineCore.step` | 一次迭代为何是 schedule → execute → update？ |
+| 3 | `core.py`：`EngineCoreProc.run_busy_loop`、`_process_engine_step` | frontend 与 engine core 为什么分进程？ |
+| 4 | `vllm/v1/core/sched/interface.py`：`SchedulerInterface` | scheduler 的输入输出合同是什么？ |
+| 5 | `vllm/v1/worker/gpu_model_runner.py` | 哪些状态必须在 GPU worker 内，哪些不能由 frontend 猜？ |
+
+源码快照：vLLM `8e958902eee5`。方法会继续演进，面试回答应先声明所读版本。
+
+## 核心对象
+
+`AsyncLLM` 是面向调用方的异步入口；`EngineCoreProc` 是持有调度状态的核心进程；`Scheduler` 管理请求生命周期和逻辑 KV 分配；`Executor` 把一次 `SchedulerOutput` 广播给一个或多个 worker；GPU model runner 准备 tensor、执行 forward、采样并返回 `ModelRunnerOutput`。
+
+关键分层不是“HTTP 层/模型层”这么粗，而是：frontend 拥有客户端流与输入处理；core 拥有跨 step 的请求事实；worker 拥有设备 tensor、物理 KV 和 CUDA graph。状态只有一个权威写入者，其他层通过显式消息同步。
+
+## 调用链与状态变化
+
+主链为：`AsyncLLM.generate` 创建输出流并提交 `EngineCoreRequest` → core 进程收取请求并调用 `scheduler.add_request` → `EngineCore.step` 调 `schedule` → `model_executor.execute_model(non_block=True)` → 同时准备 grammar mask → 等待 worker future → 处理执行期间到达的 abort → `scheduler.update_from_output` → core 输出回到 frontend → output processor/detokenizer 推送流式结果。
+
+`execute_model(non_block=True)` 与 grammar 准备形成 CPU/GPU 控制工作的重叠；但 scheduler 的状态更新仍必须基于本次 `SchedulerOutput` 和对应的 model output，不能把不同 step 的结果串错。
+
+## 正确性条件与常见误区
+
+正确性条件：同一 request id 的状态迁移必须单调且可追踪；abort 必须在应用模型输出前处理，防止已经取消的请求再次产出；`SchedulerOutput` 与 `ModelRunnerOutput` 必须属于同一迭代；worker 失败不能被包装成正常空输出。
+
+常见误区：把 API server 当成 scheduler；认为 `execute_model` 返回的就是最终字符串；忽略 detokenization/stop 条件；看到异步 future 就认为任意步骤都能乱序。
+
+## 当前前沿与工程取舍
+
+截至该快照，V1 是主架构，目标包括低 CPU 开销和统一可扩展核心。真正的性能边界包括 engine core busy loop 的 CPU 供给、进程间通信、batch queue、worker launch 与 GPU kernel；不能只看 kernel 时间。源码走读的产出是“状态所有权 + 调用合同 + 失败路径”，不是背类名。
+
+## 具体推演
+
+假设请求 R 在执行期间收到取消：正确顺序不是 `update(R 的 token) → abort(R)`，而是 worker 完成后先消费 abort 队列，再让 scheduler 根据最新存活集合更新输出。这样客户端不会看到取消后的幽灵 token。若模型没有实际执行（空计划），返回的 `model_executed` 也必须为假，指标不能把空 step 算成有效推理。
+
+请先口头复述“输入 → 状态所有者 → 状态迁移 → 输出/指标”，再做练习。
+
+## 实践任务：唯一代码填空题
+
+补齐一个最小 `EngineCore.step` 控制流模型。重点不是模拟 GPU，而是保持官方源码中的顺序合同；不得删除 trace 断言。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def engine_core_step(has_requests, schedule, execute_async,
+                     get_grammar, process_aborts, update):
+    trace = []
+    if not has_requests:
+        return {}, False, trace
+
+    # TODO：保持 schedule → async execute/grammar → wait → aborts → update。
+    plan = ______
+    trace.append("schedule")
+    future = ______
+    trace.append("execute")
+    grammar = ______
+    trace.append("grammar")
+    model_output = ______
+    trace.append("wait")
+    ______
+    trace.append("aborts")
+    outputs = ______
+    trace.append("update")
+    return outputs, plan["scheduled_tokens"] > 0, trace
+
+events = []
+schedule = lambda: {"scheduled_tokens": 4}
+execute = lambda plan: (lambda: {"tokens": [7]})
+grammar = lambda plan: {"mask": None}
+aborts = lambda: events.append("abort-queue-drained")
+update = lambda plan, output: {"r0": output["tokens"]}
+
+out, ran, trace = engine_core_step(True, schedule, execute, grammar, aborts, update)
+assert out == {"r0": [7]} and ran
+assert trace == ["schedule", "execute", "grammar", "wait", "aborts", "update"]
+assert events == ["abort-queue-drained"]
+assert engine_core_step(False, schedule, execute, grammar, aborts, update) == ({}, False, [])
+```
+
+### 检查方法
+
+运行断言；再让 `scheduled_tokens=0`，解释为什么仍可能走完控制路径但 `ran=False`。
+
+### Q1
+
+`AsyncLLM`、`EngineCore`、`Scheduler` 和 GPU worker 各自拥有什么状态？为什么不能把它们合成一个全局可变对象？
+
+**你的答案：**
+
+### Q2
+
+为什么源码先 `execute_model(non_block=True)`，再取得 grammar bitmask，最后等待 future？这是否意味着 grammar 可以晚于采样？
+
+**你的答案：**
+
+### Q3
+
+某请求在 GPU forward 期间被取消。为何 `EngineCore.step` 要在 `update_from_output` 前处理 abort？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：主路径 2 分、边界条件 1 分、能映射回源码对象 1 分；
+- Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；
+- 一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请更换一个 batch、cache 或硬件条件重新推演，不能只复制。
+
+```{python}
+#| course_role: solution
+def engine_core_step(has_requests, schedule, execute_async,
+                     get_grammar, process_aborts, update):
+    trace = []
+    if not has_requests:
+        return {}, False, trace
+
+    plan = schedule()
+    trace.append("schedule")
+    future = execute_async(plan)
+    trace.append("execute")
+    grammar = get_grammar(plan)
+    trace.append("grammar")
+    model_output = future()
+    trace.append("wait")
+    process_aborts()
+    trace.append("aborts")
+    outputs = update(plan, model_output)
+    trace.append("update")
+    return outputs, plan["scheduled_tokens"] > 0, trace
+
+events = []
+schedule = lambda: {"scheduled_tokens": 4}
+execute = lambda plan: (lambda: {"tokens": [7]})
+grammar = lambda plan: {"mask": None}
+aborts = lambda: events.append("abort-queue-drained")
+update = lambda plan, output: {"r0": output["tokens"]}
+
+out, ran, trace = engine_core_step(True, schedule, execute, grammar, aborts, update)
+assert out == {"r0": [7]} and ran
+assert trace == ["schedule", "execute", "grammar", "wait", "aborts", "update"]
+assert events == ["abort-queue-drained"]
+assert engine_core_step(False, schedule, execute, grammar, aborts, update) == ({}, False, [])
+```
+
+### Q1 参考答案
+
+`AsyncLLM` 拥有输入处理、客户端请求流、输出队列和取消入口；`EngineCore` 驱动迭代并协调 executor；`Scheduler` 是请求状态、逻辑 KV 账本及完成/抢占决策的权威；worker 持有设备 tensor、物理 KV、CUDA graph 和采样运行时。跨进程复制一个全局可变对象会产生多个写入者、step 对齐困难和故障传播不清。显式消息合同让所有权、序列化边界和恢复策略可审计。
+
+### Q2 参考答案
+
+这是为了把 CPU 侧 grammar 准备与 worker 的模型计算重叠。grammar 仍必须在真正采样前可用；具体路径可能先执行 forward、再由 executor/sampler 消费 mask。`non_block=True` 只改变等待位置，不取消数据依赖。若 mask 属于错误请求或错误 step，会造成结构化输出错误，因此 plan、mask 和 output 必须同迭代关联。
+
+### Q3 参考答案
+
+因为 worker 结果反映的是提交 batch 时的旧存活集合。先处理 abort，scheduler 才能在应用输出时知道该请求已终止，丢弃其 token并释放状态；反过来会向客户端发出取消后的 token，甚至让已释放请求重新进入 running。该顺序还把取消事件和本次输出更新放在一个可解释的串行化点。
+
+## 参考资料
+
+- [vLLM AsyncLLM source](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/engine/async_llm.py#L283-L750)
+- [vLLM EngineCore source](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/engine/core.py#L581-L738)
+- [vLLM Scheduler interface](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/core/sched/interface.py)
+- [vLLM V1 guide](https://docs.vllm.ai/en/stable/usage/v1_guide/)
+- [vLLM optimization and process architecture](https://docs.vllm.ai/en/latest/configuration/optimization/)
+
+源码链接固定到本课审阅 commit；current docs、支持矩阵和默认参数会变化，面试或部署前必须按目标版本重新核对。
+

@@ -1,0 +1,164 @@
+---
+title: 强化学习与大模型后训练 · 第 4/12 课：GAE 与优势估计
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 本仓库采用逐课通过制。本课未通过前，不应直接进入下一课。
+
+
+## 本课目标与完成标准
+
+学完后你应能：实现带终止 mask 的 GAE 反向递推，并解释 λ 如何连接 TD 与 MC。
+
+通过必须同时满足：
+
+- 独立补齐本课唯一的代码填空题，并通过给定检查；
+- 三个问答题均说明因果链，而不是只报术语；
+- 能指出至少一个正确性边界和一个性能取舍；
+- 总分不低于 8/10，且没有一票否决级概念错误。
+
+## 前置关系
+
+- 课程前置：Python、概率期望、基本深度学习
+- 本课在路线中的作用：GAE 把多个 n-step TD error 以 (γλ)^k 加权，控制优势估计的偏差—方差。
+
+## 核心心智模型
+
+### 1. 从 TD residual 构造优势
+
+δₜ=rₜ+γ(1−terminatedₜ)Vₜ₊₁−Vₜ，反向递推 Aₜ=δₜ+γλcₜAₜ₊₁。cₜ 表示是否继续累加同一轨迹的下一项 residual。λ=0 只保留一步 TD；完整终止轨迹上 λ=1 的 telescoping 得 Gₜ−Vₜ。
+
+### 2. 两种 mask 的职责不同
+
+真正终止时关闭 bootstrap，也切断 carry。本课函数支持单段轨迹或仅以真正终止分隔的 packed episode，不支持内部时间截断后 reset 的拼接；此时 dones 表示真正终止，两个 mask 可共用。values 比 rewards 多一个末状态价值。
+
+若采样窗口在非终止状态结束，仍保留末状态 bootstrap，但反向扫描在该窗口末尾从 carry=0 开始。若将截断后 reset 的新 episode 拼入同一数组，则必须分离 bootstrap mask 与 carry mask，不能直接共用本课 dones。padding 也不能当作真实转移。
+
+### 3. LLM 的末端分数如何传播
+
+结果分数只放最后一个有效回答 token；其 residual 通过 γλ 向前传播，同时每个位置减去 critic 的预期价值。KL-shaped reward 可让前面 token 也有非零奖励，详见第 10 课。
+
+### 4. 取舍
+
+较小 λ 更多依赖 critic，可能降低方差但继承估计偏差；较大 λ 使用更多真实后续奖励，通常方差更高。不能只因奖励稀疏就断言 λ 越大越好。
+
+## 具体演示
+
+两步轨迹可先算 δ₁，再算 A₀；这比背整串加权和更不易错。
+
+请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+
+## 实践任务：唯一代码填空题
+
+补齐 GAE 中两个 mask 位置。
+
+规则：只能修改 `TODO`/`______` 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。
+
+```{python}
+#| course_role: exercise
+def gae(rewards, values, dones, gamma, lam):
+    assert len(values) == len(rewards) + 1
+    assert len(dones) == len(rewards)
+    adv = [0.0] * len(rewards)
+    carry = 0.0
+    for t in range(len(rewards) - 1, -1, -1):
+        not_done = 1.0 - float(dones[t])
+        delta = rewards[t] + gamma * ______ * values[t + 1] - values[t]
+        carry = delta + gamma * lam * ______ * carry
+        adv[t] = carry
+    return adv
+
+got = gae([1., 1.], [0.5, 0.6, 0.0], [False, True], .9, .95)
+assert all(abs(a-b) < 1e-9 for a,b in zip(got, [1.382, 0.4]))
+
+# 真正终止不读末状态价值；采样窗口结束仍保留 bootstrap。
+assert gae([1.], [0., 5.], [True], .9, .95) == [1.]
+assert gae([1.], [0., 5.], [False], .9, .95) == [5.5]
+# 两个独立的单步 episode，后一个分数不可泄漏到前一个。
+assert gae([1., 100.], [0., 0., 0.], [True, True], 1., 1.) == [1., 100.]
+assert gae([0., 1.], [0., 0., 0.], [False, True], 1., 1.) == [1., 1.]
+assert gae([], [0.], [], .9, .95) == []
+```
+
+### 检查方法
+
+运行断言，并解释最后一步为何不读取 `values[2]` 的数值贡献。
+
+提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。
+
+### Q1
+
+不要背定义：请从输入、状态变化和输出三个阶段解释“GAE 与优势估计”的工作机制。
+
+**你的答案：**
+
+### Q2
+
+只在 δ 上乘 done mask、递推 carry 不乘，会跨 episode 泄漏什么？
+
+**你的答案：**
+
+### Q3
+
+LLM token 级奖励只有末尾一个分数时，GAE 的信用会如何向前传播？
+
+**你的答案：**
+
+## 评分与通过规则
+
+- 代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。
+
+需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。
+
+```{python}
+#| course_role: solution
+def gae(rewards, values, dones, gamma, lam):
+    assert len(values) == len(rewards) + 1
+    assert len(dones) == len(rewards)
+    adv = [0.0] * len(rewards)
+    carry = 0.0
+    for t in range(len(rewards) - 1, -1, -1):
+        not_done = 1.0 - float(dones[t])
+        delta = rewards[t] + gamma * not_done * values[t + 1] - values[t]
+        carry = delta + gamma * lam * not_done * carry
+        adv[t] = carry
+    return adv
+
+got = gae([1., 1.], [0.5, 0.6, 0.0], [False, True], .9, .95)
+assert all(abs(a-b) < 1e-9 for a,b in zip(got, [1.382, 0.4]))
+
+# 真正终止不读末状态价值；采样窗口结束仍保留 bootstrap。
+assert gae([1.], [0., 5.], [True], .9, .95) == [1.]
+assert gae([1.], [0., 5.], [False], .9, .95) == [5.5]
+# 两个独立的单步 episode，后一个分数不可泄漏到前一个。
+assert gae([1., 100.], [0., 0., 0.], [True, True], 1., 1.) == [1., 100.]
+assert gae([0., 1.], [0., 0., 0.], [False, True], 1., 1.) == [1., 1.]
+assert gae([], [0.], [], .9, .95) == []
+```
+
+### Q1 参考答案
+
+从后向前递推 A_t=δ_t+γλ(1-done_t)A_{t+1}，其中 δ_t=r_t+γ(1-done_t)V_{t+1}-V_t。
+
+### Q2 参考答案
+
+下一 episode 的优势会通过 carry 进入上一 episode；δ 已关掉末状态 bootstrap 也挡不住这个递推通路。例如 packed batch 中一个 episode 终止后立即开始另一个，终止位置必须同时切断 carry。
+
+### Q3 参考答案
+
+末端分数进入最后一步 δ，再以 (γλ)^距离进入此前 A，同时叠加中间各步价值差。γ=λ=1、完整终止轨迹时 Aₜ=R−Vₜ；并非把 R/G 的同一个数无条件复制为所有 token 的优势。
+
+## 参考资料
+
+- [GAE paper](https://arxiv.org/abs/1506.02438)
+
+资料用于建立事实基线；面试回答仍需用自己的语言组织。
+

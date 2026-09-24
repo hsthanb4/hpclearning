@@ -1,0 +1,159 @@
+---
+title: Triton Kernel 主线 · 第 3/10 课：逐元素激活与融合边界
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 本仓库采用逐课通过制。本课未通过前，不应直接进入下一课。
+
+
+## 本课目标与完成标准
+
+学完后你应能：实现 ReLU，解释 branchless 向量语义和融合收益。
+
+通过必须同时满足：
+
+- 独立补齐本课唯一的代码填空题，并通过给定检查；
+- 三个问答题均说明因果链，而不是只报术语；
+- 能指出至少一个正确性边界和一个性能取舍；
+- 总分不低于 8/10，且没有一票否决级概念错误。
+
+## 前置关系
+
+- 课程前置：Python、PyTorch 张量、CUDA 基本线程/内存概念
+- 本课在路线中的作用：ReLU 是逐元素 max(x,0)，没有跨 lane 通信，是 Triton 最适合的入门融合单元。
+
+## 核心心智模型
+
+### 1. 它是什么，解决什么问题
+
+ReLU 是逐元素 max(x,0)，没有跨 lane 通信，是 Triton 最适合的入门融合单元。
+
+### 2. 它如何工作
+
+load 后用 `tl.maximum` 生成 lane-wise 结果；编译器生成 predicated/select 风格代码而非 Python 分支。
+
+### 3. 正确性条件与常见误区
+
+NaN 的 maximum 语义应与参考框架核对；原地写需要确认没有后续读旧值。
+
+### 4. 性能与工程取舍
+
+单独 kernel 算术强度极低；融合减少 HBM 流量和 launch，但会耦合上游 shape。
+
+## 具体演示
+
+[-2,0,3] 映射为 [0,0,3]；尾块 mask 不影响有效 lane。
+
+请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+
+## 实践任务：唯一代码填空题
+
+补齐 lane-wise ReLU。
+
+规则：只能修改 `TODO`/`______` 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。
+
+```{python}
+#| course_role: exercise
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def relu_kernel(x, out, n: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    xv = tl.load(x + offsets, mask=mask)
+    tl.store(out + offsets, ______, mask=mask)  # TODO: ReLU
+
+def relu(x):
+    assert x.is_contiguous()
+    out = torch.empty_like(x)
+    n = x.numel()
+    relu_kernel[(triton.cdiv(n, 256),)](x, out, n, BLOCK=256)
+    return out
+
+x = torch.tensor([-2., 0., 3., -4., 5.], device="cuda")
+torch.testing.assert_close(relu(x), torch.relu(x))
+```
+
+### 检查方法
+
+在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。
+
+提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。
+
+### Q1
+
+不要背定义：请从输入、状态变化和输出三个阶段解释“逐元素激活与融合边界”的工作机制。
+
+**你的答案：**
+
+### Q2
+
+用 Python `if xv > 0` 为什么不符合 tensor lane 语义？
+
+**你的答案：**
+
+### Q3
+
+ReLU 融进 GEMM epilogue 与保持独立各有什么取舍？
+
+**你的答案：**
+
+## 评分与通过规则
+
+- 代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。
+
+需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。
+
+```{python}
+#| course_role: solution
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def relu_kernel(x, out, n: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    xv = tl.load(x + offsets, mask=mask)
+    tl.store(out + offsets, tl.maximum(xv, 0.0), mask=mask)
+
+def relu(x):
+    assert x.is_contiguous()
+    out = torch.empty_like(x)
+    n = x.numel()
+    relu_kernel[(triton.cdiv(n, 256),)](x, out, n, BLOCK=256)
+    return out
+
+x = torch.tensor([-2., 0., 3., -4., 5.], device="cuda")
+torch.testing.assert_close(relu(x), torch.relu(x))
+```
+
+### Q1 参考答案
+
+load 后用 `tl.maximum` 生成 lane-wise 结果；编译器生成 predicated/select 风格代码而非 Python 分支。
+
+### Q2 参考答案
+
+判断时先检查本课不变量：NaN 的 maximum 语义应与参考框架核对；原地写需要确认没有后续读旧值。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+
+### Q3 参考答案
+
+迁移时先保证正确性，再比较代价。这里的核心取舍是：单独 kernel 算术强度极低；融合减少 HBM 流量和 launch，但会耦合上游 shape。
+
+## 参考资料
+
+- [Triton Tutorials](https://triton-lang.org/main/getting-started/tutorials/)
+- [Triton language API](https://triton-lang.org/main/python-api/triton.language.html)
+
+资料用于建立事实基线；面试回答仍需用自己的语言组织。
+

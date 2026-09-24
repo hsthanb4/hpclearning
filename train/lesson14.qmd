@@ -1,0 +1,357 @@
+---
+title: "训练系统 · 第 14/14 课：混合精度与综合面试"
+subtitle: "Ultra-Scale Playbook 训练系统"
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 一次只完成一课；未通过前不要打开下一课答案。
+
+
+## 统一完成标准
+
+代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
+
+# 第 14 课：混合精度与综合面试
+
+- 对应官方章节：Mixed precision training、Conclusion（+ 第 1 课账本回收）
+- 前置：全部课程
+- 状态：未开始
+
+## 本课目标
+
+完成后你需要能够：
+
+- 说出 FP32/FP16/BF16/FP8(e4m3, e5m2) 的位布局、范围与精度（epsilon），解释"范围"与"精度"的取舍。
+- 解释 FP16 训练失败的机制与三个修复：FP32 master weights、loss scaling、FP32 累积。
+- 说明 FP8 训练的做法（per-tile 量化）、难点（稳定性）与各方案的显存账本。
+- 独立完成一道"训练系统设计 + 精度选择"综合面试题。
+
+## 核心概念
+
+### 1. 浮点格式（符号位 / 指数 / 尾数）
+
+| 格式 | 总位 | 符号 | 指数 | 尾数 | 相对 FP32 范围 | 精度(1 附近的 epsilon) |
+|---|---|---|---|---|---|---|
+| FP32 | 32 | 1 | 8 | 23 | 80 个数量级 | ~1.19e-7 |
+| FP16 | 16 | 1 | 5 | 10 | 窄（易上下溢） | ~1e-3 |
+| BF16 | 16 | 1 | 8 | 7 | 与 FP32 相同 | ~1e-2（比 FP16 差 ~10 倍） |
+| FP8 E4M3（概念化） | 8 | 1 | 4 | 3 | 更窄；真实 E4M3FN 编码另有约定 | 1 附近 ULP=2⁻³ |
+| FP8 E5M2（概念化） | 8 | 1 | 5 | 2 | 接近 FP16 的指数范围 | 1 附近 ULP=2⁻² |
+
+- **BF16 牺牲尾数换指数**：范围与 FP32 一致（训练不易上下溢），但精度只有 ~8 位十进制的一半——这是"BF16 有 FP32 的范围"≠"BF16 有 FP32 的精度"。
+- 为什么默认 BF16 而非 FP16：FP16 范围太窄，小数值梯度/权重易下溢为 0，需要 loss scaling 兜底；BF16 省掉大部分这类问题。代价是精度低，所以梯度累积、master weights 仍用 FP32。
+
+### 2. FP16 的三个修复（混合精度论文）
+
+1. **FP32 master weights**：低精度权重的更新量如果小于该权重处的 ulp，`w += Δ` 会被舍入吸收 → 低精度权重的更新量若小于当前量级的半个 ULP，会被舍入吸收；保留 FP32 master weights 可累计这些小更新。权重为 0 并非数学上永远不能恢复，只要后续更新在该格式中可表示就能离开 0。
+2. **Loss scaling**：梯度通常远小于 1，FP16 表示不了 → 先把 loss 乘一个大系数再 backward，反向结束后梯度除回，再做 clip 与优化。
+3. **FP32 累积**：16 位下的求和/平均（如 loss、梯度累积、softmax 分母）可能溢出或损失精度 → 中间累积在 FP32，最后转回。
+
+### 3. FP8 训练（DeepSeek-V3 等）
+
+- 动机：H100 的 FP8 GEMM 是 BF16 的 2 倍 FLOPS。
+- 难点：**稳定性**——学习率偏高时 loss 发散；FP8 范围小，必须先量化。
+- 做法：逐 tile 量化（激活 1×128、权重 128×128 的块缩放），主权重与部分累积保持高精度。DeepSeek-V3 是首个公开的大规模 FP8 预训练。
+- 账本（每参数 bytes，教材表格）：
+
+| 方案 | GEMM | master | 累积梯度 | 权重 | 梯度 | 优化器 | 合计 |
+|---|---|---|---|---|---|---|---|
+| BF16+FP32（含 FP32 梯度累积） | BF16 | FP32 | FP32 | BF16 | BF16 | FP32+FP32 | 20 |
+| 同上但不累积 FP32 梯度 | BF16 | FP32 | — | BF16 | BF16 | FP32+FP32 | 16 |
+| Transformer Engine | FP8 | — | — | FP32 | FP32 | FP32+FP32 | 16 |
+| FP8-LM O3 | FP8 | FP16 | FP16 | FP8 | FP8 | FP8+FP16 | 9 |
+| DeepSeek-V3 | FP8 | FP32 | FP32 | FP8 | BF16 | BF16+BF16 | 15 |
+| Nanotron FP8 | FP8 | BF16 | FP32 | FP8 | FP8 | FP8+FP8 | 10 |
+
+注意：FP8 方案把"计算精度"与"存储精度"解耦——GEMM 用 FP8，但 master/累积仍高精度。这就是第 1 课"混合精度不一定省静态显存"的延伸：省不省取决于每个分量选什么格式。
+
+## 具体演示
+
+BF16 权重 w=1.0，更新量 Δ=1e-3：
+
+- BF16 在 1.0 附近的 ulp ≈ 2⁻⁷ ≈ 7.8e-3 > Δ → `w+Δ` 舍入后还是 1.0，**更新被吸收**。
+- FP32 在 1.0 附近的 ulp ≈ 1.2e-7 → Δ 被完整保留。
+- FP16 在 1.0 附近的 ulp ≈ 2⁻¹⁰ ≈ 9.8e-4，Δ=1e-3 勉强能留下，但 Δ=1e-4 就不行。
+
+这就是 master weights 存在的意义：低精度用于计算，FP32 负责"记账"。
+
+## 代码填空题
+
+实现浮点格式属性计算 + 低精度更新吸收模拟 + 各方案显存账本。
+
+```{python}
+#| course_role: exercise
+import torch
+
+
+def float_props(exp_bits: int, mantissa_bits: int) -> tuple[float, float, float]:
+    """
+    返回 (max_value, min_normal, epsilon)。
+    教学用 IEEE-like 常规格式（忽略 subnormal、NaN/Inf 编码与 E4M3FN 等具体 FP8 变体）：
+      bias      = 2^(exp_bits-1) - 1
+      max_value = (2 - 2^-mantissa_bits) * 2^bias
+      min_normal= 2^(1 - bias)
+      epsilon   = 2^-mantissa_bits      （1.0 之后第一个可表示数）
+    """
+    bias = 2 ** (exp_bits - 1) - 1
+    max_value = ______                  # 填空
+    min_normal = ______                 # 填空
+    epsilon = ______                    # 填空
+    return max_value, min_normal, epsilon
+
+
+FORMATS = {
+    "fp32": (8, 23),
+    "fp16": (5, 10),
+    "bf16": (8, 7),
+    "fp8_e4m3": (4, 3),
+    "fp8_e5m2": (5, 2),
+}
+
+
+def show_formats():
+    print(f"{'format':10s} {'max':>12s} {'min_normal':>12s} {'epsilon':>12s}")
+    for name, (e, m) in FORMATS.items():
+        mx, mn, eps = float_props(e, m)
+        print(f"{name:10s} {mx:12.3e} {mn:12.3e} {eps:12.3e}")
+
+
+def simulate_absorption(w: float, update: float, dtype: torch.dtype) -> tuple[float, float, bool]:
+    """
+    模拟低精度存储下的权重更新：w += update。
+    返回 (更新前的低精度值, 更新后的低精度值, 是否被吸收)。
+    用 torch 的低精度 dtype 直接做舍入（CPU 也支持 fp16/bf16）。
+    """
+    w_low = torch.tensor(w, dtype=dtype).float().item()
+    w_new = (torch.tensor(w, dtype=dtype) + torch.tensor(update, dtype=dtype)).float().item()
+    absorbed = ______                   # 填空：更新后与更新前是否相同
+    return w_low, w_new, absorbed
+
+
+def fp8_memory_ledger() -> dict[str, int]:
+    """
+    教材表格：各方案每参数 bytes 的分量（顺序：master / 累积梯度 / 权重 / 梯度 / 优化器状态）。
+    BF16 基线（含 FP32 梯度累积）另有 GEMM 精度说明，这里只计存储分量。
+    返回 {方案名: 每参数总 bytes}。
+    """
+    schemes = {
+        "bf16_mp_no_fp32acc":   dict(master=4, acc_grad=0, w=2, g=2, opt=8),   # = 16
+        "bf16_mp_fp32acc":      dict(master=4, acc_grad=4, w=2, g=2, opt=8),   # = 20
+        "transformer_engine":   dict(master=0, acc_grad=0, w=4, g=4, opt=8),   # = 16
+        "fp8lm_o3":             dict(master=2, acc_grad=2, w=1, g=1, opt=3),   # = 9
+        "deepseek_v3":          dict(master=4, acc_grad=4, w=1, g=2, opt=4),   # = 15
+        "nanotron_fp8":         dict(master=2, acc_grad=4, w=1, g=1, opt=2),   # = 10
+    }
+    totals = {}
+    for name, comp in schemes.items():
+        totals[name] = ______           # 填空：各分量求和
+    return totals
+
+
+if __name__ == "__main__":
+    show_formats()
+
+    print("\n权重更新吸收演示（w=1.0）:")
+    for dt, name in ((torch.float32, "fp32"), (torch.float16, "fp16"), (torch.bfloat16, "bf16")):
+        for upd in (1e-3, 1e-5):
+            before, after, absorbed = simulate_absorption(1.0, upd, dt)
+            print(f"  {name:5s} update={upd:8.1e} -> w={after:.6f} 吸收={absorbed}")
+
+    print("\n各方案每参数 bytes:")
+    for name, total in fp8_memory_ledger().items():
+        print(f"  {name:22s} {total} bytes")
+```
+
+## 三个问答题
+
+### Q1
+
+BF16 与 FP16 同为 16 位，为什么 BF16 成为预训练默认？请用"范围"与"精度"两个维度回答，并解释为什么"BF16 范围与 FP32 相同"不能推出"BF16 可以替代 FP32"（给出 epsilon 对比）。什么场景下 FP16 反而比 BF16 合适（提示：数值都小且需要精度时）？
+
+### Q2
+
+详细解释低精度权重更新被 ULP 吸收的机制，并说明为什么“变成 0 就永远回不来”并不准确。然后说明三个修复各自作用于链条的哪一环：FP32 master weights、loss scaling、FP32 累积。
+
+### Q3
+
+综合面试题（口述/写作）：某公司要在 8×H100 节点上训练 30B 稠密模型，seq=8192，目标 MFU ≥ 40%，预算只允许 1 个节点。请给出：(1) 并行配置与理由；(2) 精度方案（BF16 还是 FP8）与显存账本估算；(3) 若改用 FP8，哪些组件必须保持高精度，为什么；(4) 一个你会在训练前做的 benchmark/验证实验。请用本课程所有相关结论作答。
+
+## 检查与通过标准
+
+总分 10 分：代码正确 4 分（格式属性、吸收判断、账本求和）、三题各 2 分、通过线 8 分。
+
+一票否决项：
+
+- 认为 BF16 精度与 FP32 相当。
+- 说不清 master weights 解决的具体失败机制（更新被 ulp 吸收）。
+- 认为 FP8 只是"更小的 BF16"，不知道需要量化与稳定性问题。
+- 综合题中给出自相矛盾的配置（如 TP 跨节点、gbs 公式错误、静态账本漏项）。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。
+
+```{python}
+#| course_role: solution
+import torch
+
+
+def float_props(exp_bits: int, mantissa_bits: int) -> tuple[float, float, float]:
+    """
+    返回 (max_value, min_normal, epsilon)。
+    教学用 IEEE-like 常规格式（忽略 subnormal、NaN/Inf 编码与 E4M3FN 等具体 FP8 变体）：
+      bias      = 2^(exp_bits-1) - 1
+      max_value = (2 - 2^-mantissa_bits) * 2^bias
+      min_normal= 2^(1 - bias)
+      epsilon   = 2^-mantissa_bits      （1.0 之后第一个可表示数）
+    """
+    bias = 2 ** (exp_bits - 1) - 1
+    max_value = (2 - 2 ** (-mantissa_bits)) * 2 ** bias                  # 填空
+    min_normal = 2 ** (1 - bias)                 # 填空
+    epsilon = 2 ** (-mantissa_bits)                    # 填空
+    return max_value, min_normal, epsilon
+
+
+FORMATS = {
+    "fp32": (8, 23),
+    "fp16": (5, 10),
+    "bf16": (8, 7),
+    "fp8_e4m3": (4, 3),
+    "fp8_e5m2": (5, 2),
+}
+
+
+def show_formats():
+    print(f"{'format':10s} {'max':>12s} {'min_normal':>12s} {'epsilon':>12s}")
+    for name, (e, m) in FORMATS.items():
+        mx, mn, eps = float_props(e, m)
+        print(f"{name:10s} {mx:12.3e} {mn:12.3e} {eps:12.3e}")
+
+
+def simulate_absorption(w: float, update: float, dtype: torch.dtype) -> tuple[float, float, bool]:
+    """
+    模拟低精度存储下的权重更新：w += update。
+    返回 (更新前的低精度值, 更新后的低精度值, 是否被吸收)。
+    用 torch 的低精度 dtype 直接做舍入（CPU 也支持 fp16/bf16）。
+    """
+    w_low = torch.tensor(w, dtype=dtype).float().item()
+    w_new = (torch.tensor(w, dtype=dtype) + torch.tensor(update, dtype=dtype)).float().item()
+    absorbed = w_new == w_low                   # 填空：更新后与更新前是否相同
+    return w_low, w_new, absorbed
+
+
+def fp8_memory_ledger() -> dict[str, int]:
+    """
+    教材表格：各方案每参数 bytes 的分量（顺序：master / 累积梯度 / 权重 / 梯度 / 优化器状态）。
+    BF16 基线（含 FP32 梯度累积）另有 GEMM 精度说明，这里只计存储分量。
+    返回 {方案名: 每参数总 bytes}。
+    """
+    schemes = {
+        "bf16_mp_no_fp32acc":   dict(master=4, acc_grad=0, w=2, g=2, opt=8),   # = 16
+        "bf16_mp_fp32acc":      dict(master=4, acc_grad=4, w=2, g=2, opt=8),   # = 20
+        "transformer_engine":   dict(master=0, acc_grad=0, w=4, g=4, opt=8),   # = 16
+        "fp8lm_o3":             dict(master=2, acc_grad=2, w=1, g=1, opt=3),   # = 9
+        "deepseek_v3":          dict(master=4, acc_grad=4, w=1, g=2, opt=4),   # = 15
+        "nanotron_fp8":         dict(master=2, acc_grad=4, w=1, g=1, opt=2),   # = 10
+    }
+    totals = {}
+    for name, comp in schemes.items():
+        totals[name] = sum(comp.values())           # 填空：各分量求和
+    return totals
+
+
+if __name__ == "__main__":
+    show_formats()
+
+    print("\n权重更新吸收演示（w=1.0）:")
+    for dt, name in ((torch.float32, "fp32"), (torch.float16, "fp16"), (torch.bfloat16, "bf16")):
+        for upd in (1e-3, 1e-5):
+            before, after, absorbed = simulate_absorption(1.0, upd, dt)
+            print(f"  {name:5s} update={upd:8.1e} -> w={after:.6f} 吸收={absorbed}")
+
+    print("\n各方案每参数 bytes:")
+    for name, total in fp8_memory_ledger().items():
+        print(f"  {name:22s} {total} bytes")
+```
+
+# 第 14 课参考答案（复盘用，先提交再打开）
+
+## 补全后的代码（关键填空处）
+
+```python
+def float_props(exp_bits, mantissa_bits):
+    bias = 2 ** (exp_bits - 1) - 1
+    max_value = (2 - 2 ** (-mantissa_bits)) * 2 ** bias
+    min_normal = 2 ** (1 - bias)
+    epsilon = 2 ** (-mantissa_bits)
+    return max_value, min_normal, epsilon
+
+def simulate_absorption(w, update, dtype):
+    ...
+    absorbed = (w_new == w_low)     # 更新后被舍入回原值
+
+def fp8_memory_ledger():
+    totals[name] = sum(comp.values())   # 每方案各分量求和
+```
+
+输出：
+
+```python
+format      max      min_normal   epsilon
+fp32     3.403e+38    1.175e-38   1.192e-07
+fp16     6.550e+04    6.104e-05   9.766e-04
+bf16     3.390e+38    1.175e-38   7.812e-03
+fp8_e4m3 2.400e+02    1.562e-02   1.250e-01
+fp8_e5m2 5.734e+04    6.104e-05   2.500e-01
+
+权重更新吸收演示（w=1.0）:
+fp32 update=1e-3 → 1.001000   吸收=False
+fp32 update=1e-5 → 1.000010   吸收=False
+fp16 update=1e-3 → 1.000977   吸收=False（ulp≈9.8e-4，勉强留下）
+fp16 update=1e-5 → 1.000000   吸收=True
+bf16 update=1e-3 → 1.000000   吸收=True（ulp≈7.8e-3 > 1e-3）
+bf16 update=1e-5 → 1.000000   吸收=True
+
+各方案每参数 bytes:
+bf16_mp_no_fp32acc   16
+bf16_mp_fp32acc      20
+transformer_engine   16
+fp8lm_o3              9
+deepseek_v3          15
+nanotron_fp8         10
+```
+
+## 三个问答题要点
+
+### Q1
+
+- BF16 指数位与 FP32 相同（8 位）→ 范围相同；但尾数只有 7 位 → 精度 ~1e-2（epsilon≈7.8e-3），比 FP16 的 ~1e-3 差约 10 倍；
+- 预训练默认 BF16 的原因：训练中梯度/权重动态范围大，FP16 范围窄（max 6.5e4、min_normal 6e-5）容易上下溢，需要 loss scaling 等额外机制；BF16 省掉范围问题，代价是精度——用 FP32 master weights + FP32 累积兜底；
+- "范围相同"≠"精度足够"：epsilon 决定小数分辨率，BF16 在 1 附近只能分辨 ~7.8e-3 的差异；
+- FP16 更合适的场景：数值范围已知且较小、需要更高精度时（如某些激活/量化中间表示），FP16 尾数更多。
+
+### Q2
+
+- 机制：低精度格式下 w 的 ulp 随 |w| 增大（如 w=1.0 时 BF16 ulp≈7.8e-3）；更新量 Δ < ulp/2 时 `w+Δ` 舍入后不变 → 更新被吸收；若更新小于当前量级的半个 ULP，`w+Δ` 会舍入回原值；0 本身并非不可恢复，只要后续更新在目标格式中可表示，就能变为非零；
+- 修复：a) FP32 master weights：更新发生在 FP32（ulp~1e-7），再转回低精度用于前向——低精度只负责计算、FP32 负责记账；b) loss scaling：梯度远小于 1，先乘大系数再过 FP16 backward，之后除回——防梯度下溢；c) FP32 累积：求和/平均（loss、梯度累积、softmax 分母）在 FP32 做，防止中间溢出/精度损失。
+
+### Q3（综合题要点）
+
+- (1) 配置：1 节点 8 卡 → TP=8（节点内满 NVLink）为主，辅以 ZeRO-2 或 ZeRO-3 分担静态账本；seq=8192 需注意激活（可开 selective/full 重计算或 CP 无意义——CP 需要多卡切序列，单节点 8 卡留给 TP；激活用重计算 + mbs=1）；gbs 由 grad_acc 与 dp 决定（无 DP 时 grad_acc 单独承担）；
+- (2) 精度：30B×16B ≈ 480 GB 静态账本 / 8 卡 = 60 GB > 80 GB 卡（含激活）→ 必须 ZeRO-2/3；BF16 方案总账本约 60 GB/卡（ZeRO-2、dp=8 时 (2Ψ+(2+12)Ψ/8)/1 维度…按卡计 30B: 参数 60GB/8? 参数量级：30e9×2=60 GB 参数、梯度 60 GB、opt 360 GB → ZeRO-3 每卡 (60+60+360)/8=60 GB，加激活/运行时超 80 → 需重计算 + mbs=1；FP8 方案（如 DeepSeek 式 15B/参数 → 450 GB/8 ≈ 56 GB）更宽松；
+- (3) FP8 必须保持高精度：master weights（FP32/BF16）、梯度累积（FP32）、部分归一化统计量；GEMM 输入/权重才用 FP8 并做 per-tile 量化；
+- (4) 训练前实验：单卡 memory profile（max_memory_allocated 曲线）+ micro-benchmark 各配置的 step time 与 MFU，验证 t_comm/t_compute（本配置以 TP 为主，用 TP 公式预判）。
+
+## 通过要点
+
+- 混合精度的核心思想：低精度负责"计算"（快、省激活），高精度负责"记账"（master、累积、优化器状态）；
+- FP8 的难点不是精度本身，而是动态范围小 → 必须量化（per-tile scaling）+ 稳定性管理；
+- 面试作答结构：范围/精度 → 失败机制 → 三个修复 → 账本 → 配置决策。
+
+## 官方主参考
+
+- [Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)
+- [PyTorch distributed documentation](https://pytorch.org/docs/stable/distributed.html)
+

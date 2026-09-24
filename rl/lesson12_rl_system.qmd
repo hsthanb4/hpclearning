@@ -1,0 +1,173 @@
+---
+title: 强化学习与大模型后训练 · 第 12/12 课：大规模 RL 系统：rollout、训练与评测
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 本仓库采用逐课通过制。本课未通过前，不应直接进入下一课。
+
+
+## 本课目标与完成标准
+
+学完后你应能：为 RLHF/GRPO 设计资源流，计算版本陈旧度，并区分吞吐、延迟和策略一致性。
+
+通过必须同时满足：
+
+- 独立补齐本课唯一的代码填空题，并通过给定检查；
+- 三个问答题均说明因果链，而不是只报术语；
+- 能指出至少一个正确性边界和一个性能取舍；
+- 总分不低于 8/10，且没有一票否决级概念错误。
+
+## 前置关系
+
+- 课程前置：Python、概率期望、基本深度学习
+- 本课在路线中的作用：大规模 RL 系统由采样引擎、奖励/规则评估、经验缓冲和训练引擎组成；瓶颈常在生成而非反向。
+
+## 核心心智模型
+
+### 1. 从权重版本到可重放样本
+
+发布权重 v → rollout 生成回答/工具调用 → RM 或环境打分 → 有界队列 → trainer 消费并更新。异步可重叠生成与训练，但策略版本可能在一个长轨迹完成前已经变化。版本差是诊断量，不是自动接收样本的正确性证明。
+
+### 2. 两类分布差异要分开
+
+同权重的训练/推理引擎也可能因精度、kernel、temperature/top-p 等不同产生分布差异。若 πold 是训练后端对采样快照的分布，πrollout 是实际行为分布，则有：
+
+πθ/πrollout = (πθ/πold) × (πold/πrollout)。
+
+前项描述优化后的更新，后项描述行为分布到训练锚点的差异。TIS（截断重要性采样）可以限制校正权重的方差，但引入偏差；它与 PPO clip 的职责不同。也可直接把行为分布当 old 锚点，但不能再无意重复校正。重要性采样要求行为分布覆盖目标支持；top-p 硬截断丢掉的动作不能靠权重恢复。具体权重粒度和目标以算法实现为准。
+
+### 3. 数据合同比 checkpoint 名更具体
+
+单轮样本至少要关联 token ids/前缀、有效动作 mask、奖励位置、真实行为 log-prob、生成权重版本及解码设置；使用独立 old 锚点时还需其冻结 log-prob。reference log-prob 服务于 KL，不代替前两者。
+
+Agent 多轮中工具输出/观测进入上下文，但不是模型采样的动作；policy loss mask 只能选择 agent 生成 token。记录终止/截断、环境与验证器版本；一次轨迹若允许中途换权重，不能只用一个版本号概括行为策略。
+
+### 4. 评测与成本
+
+先固定模型、prompt、采样数、temperature 和 token/tool 预算，再比较独立正确率与总生成/训练/环境耗时；同时看队列等待、样本丢弃率、陈旧度及 ratio 尾部。高 GPU 利用率不等于单位成本有效学习更多。续训需恢复 trainer、数据/RNG 和队列版本语义，而非只恢复权重。
+
+## 具体演示
+
+trainer 为 v=12、样本来自 v=10，staleness=2；即使 staleness=0，后端/解码分布仍可能不同。若一个 token 的 πθ=.4、πold=.5、πrollout=.25，则更新比率 .8、后端校正比率 2，两者相乘才是行为到当前的 1.6。
+
+Agent 序列 [prompt, agent_call, tool_result, agent_answer, padding] 的动作 mask=[0,1,0,1,0]。工具结果可影响后续 log-prob，但不能被当作 agent 动作优化。检查中的标量比率仅演示分解，不是完整序列无偏校正算法。
+
+## 实践任务：唯一代码填空题
+
+补齐版本陈旧度并拒绝未来版本。
+
+规则：只能修改 `TODO`/`______` 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。
+
+```{python}
+#| course_role: exercise
+def policy_staleness(current_version, sample_version):
+    if sample_version > current_version:
+        raise ValueError("sample cannot come from a future policy")
+    return ______
+
+assert policy_staleness(12, 10) == 2
+try:
+    policy_staleness(10, 12)
+except ValueError:
+    pass
+else:
+    raise AssertionError("future sample must fail")
+
+assert policy_staleness(12, 12) == 0
+# 零版本差不能消除不同后端的概率差异。
+p_current, p_old, p_rollout = .4, .5, .25
+update_ratio = p_current / p_old
+backend_ratio = p_old / p_rollout
+assert abs(update_ratio * backend_ratio - p_current / p_rollout) < 1e-12
+assert backend_ratio == 2.
+# 工具观测进上下文，不进策略动作 mask。
+roles = ["prompt", "agent_call", "tool_result", "agent_answer", "padding"]
+policy_mask = [int(role in {"agent_call", "agent_answer"}) for role in roles]
+assert policy_mask == [0, 1, 0, 1, 0]
+```
+
+### 检查方法
+
+运行两个版本用例；未来版本样本必须抛出 ValueError。
+
+提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。
+
+### Q1
+
+不要背定义：请从输入、状态变化和输出三个阶段解释“大规模 RL 系统：rollout、训练与评测”的工作机制。
+
+**你的答案：**
+
+### Q2
+
+只记录模型 checkpoint 名、不记录 old log-prob，PPO 重放时缺什么？
+
+**你的答案：**
+
+### Q3
+
+rollout GPU 长期满载而 trainer 空闲，你会按什么顺序扩容或优化？
+
+**你的答案：**
+
+## 评分与通过规则
+
+- 代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。
+
+需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。
+
+```{python}
+#| course_role: solution
+def policy_staleness(current_version, sample_version):
+    if sample_version > current_version:
+        raise ValueError("sample cannot come from a future policy")
+    return current_version - sample_version
+
+assert policy_staleness(12, 10) == 2
+try:
+    policy_staleness(10, 12)
+except ValueError:
+    pass
+else:
+    raise AssertionError("future sample must fail")
+
+assert policy_staleness(12, 12) == 0
+# 零版本差不能消除不同后端的概率差异。
+p_current, p_old, p_rollout = .4, .5, .25
+update_ratio = p_current / p_old
+backend_ratio = p_old / p_rollout
+assert abs(update_ratio * backend_ratio - p_current / p_rollout) < 1e-12
+assert backend_ratio == 2.
+# 工具观测进上下文，不进策略动作 mask。
+roles = ["prompt", "agent_call", "tool_result", "agent_answer", "padding"]
+policy_mask = [int(role in {"agent_call", "agent_answer"}) for role in roles]
+assert policy_mask == [0, 1, 0, 1, 0]
+```
+
+### Q1 参考答案
+
+发布版本后采样，保存真实行为概率与动作边界，打分后进入有界队列；trainer 检查陈旧度和分布差异，用所选算法消费样本并发布下一版本。重叠可提高资源利用率，但必须有背压、明确的接收/丢弃规则和独立质量评测。
+
+### Q2 参考答案
+
+缺的是该批 PPO 更新使用的冻结 old log-prob。行为分布直接作为 old 锚点时，它就是实际采样概率；使用独立训练后端 old 锚点时，还需区分 rollout log-prob，并按配方处理两者差异。checkpoint 名不包含后端、解码和前缀语义；只有完整重建并验证相同分布后才可重算，不能把当前 log-prob 冒充 old。
+
+### Q3 参考答案
+
+先分解 prefill/decode、奖励/环境耗时、有效生成长度和队列等待，确认 trainer 真因缺数据空闲；再优化 batching/KV、任务长尾或资源配比，并比较有效样本/秒与独立评估。最后才考虑扩大异步窗口；若样本更陈旧、丢弃更多，名义吞吐提升可能没有学习收益。
+
+## 参考资料
+
+- [verl：Rollout Correction 与策略分解](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html)
+- [RLinf](https://github.com/RLinf/RLinf)
+
+系统 API 会变化；本课是数据契约和算术检查，未运行 GPU 集群或 Agent 环境。
+

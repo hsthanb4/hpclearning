@@ -1,0 +1,204 @@
+---
+title: 强化学习与大模型后训练 · 第 11/12 课：GRPO 与组内相对优势
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 本仓库采用逐课通过制。本课未通过前，不应直接进入下一课。
+
+
+## 本课目标与完成标准
+
+学完后你应能：解释 GRPO 如何省掉独立 critic，并实现带零方差保护的组内标准化优势。
+
+通过必须同时满足：
+
+- 独立补齐本课唯一的代码填空题，并通过给定检查；
+- 三个问答题均说明因果链，而不是只报术语；
+- 能指出至少一个正确性边界和一个性能取舍；
+- 总分不低于 8/10，且没有一票否决级概念错误。
+
+## 前置关系
+
+- 课程前置：Python、概率期望、基本深度学习
+- 本课在路线中的作用：GRPO 对同一 prompt 采样一组回答，用组内相对奖励构造 advantage，省去单独价值模型。
+
+## 核心心智模型
+
+### 1. 组统计代替 critic
+
+同 prompt 采样 G 个回答，非零方差时 Aᵢ=(Rᵢ−mean(R))/std(R)，结果奖励下把 Aᵢ广播到该回答的有效 token。对每个 token 用第 5 课的 new/old clipped surrogate，原始配方再减 reference KL。省掉 value model/GAE，不等于省掉 rollout、reference 或奖励成本。
+
+本课用总体标准差（方差除 G），std<ε 时直接给零优势；这是明确的教学零方差分支，不与所有框架的 ε/方差约定完全相同。组内全对或全错没有相对奖励梯度，但启用的 KL 项仍可能更新参数。
+
+### 2. Centering 与 scaling 不同
+
+组内减均值消去 prompt 的加性分数偏移；除各组 std 又改变了不同 prompt 的相对权重，不是普遍消除难度偏差。同组均值包含自身，也不要把 GRPO 的标准化优势称为第 3 课 RLOO 的无偏 baseline。
+
+### 3. 变体改变的是目标细节
+
+| 方法 | 关键改动 | 要核对什么 |
+|---|---|---|
+| 原始 GRPO | 组内标准化，回答内 token 均值再按回答平均 | std 与回答长度的重加权 |
+| DAPO | 非对称 clip；动态补采样；按有效 token 聚合；过长奖励处理 | 零优势组过滤后的采样成本/分布 |
+| Dr. GRPO | 不除组 std，使用固定长度常数归一化 | 不能把 batch token 均值当成同一目标 |
+| GSPO | sᵢ=exp(meanₜ(logπθ−logπold))，按回答裁剪 | 是 token 比率的几何均值，不是算术均值或完整序列概率比 |
+| CISPO | clipped ratio detach 后作为权重乘 A×logπθ | 与 PPO 饱和分支的梯度路径不同 |
+
+这些不是可随意叠加的“必选优化”。GSPO 的长度归一化 ratio 不等于标准的完整序列 IS 权重；其 clip 尺度不能直接照搬 PPO。
+
+### 4. 固定预算的取舍
+
+总回答数 N=B×G，大 G 可能改善同题比较，但减少 prompt 覆盖。同时看非零优势组比例、独立验证正确率、回答长度和总生成成本；只提高有效 batch 占比不证明 wall time 更好。
+
+## 具体演示：一个分母会改变样本权重
+
+组奖励 [1,2,3] 的总体 std=√(2/3)，优势为 [−√1.5,0,√1.5]；[2,2] 或单元素组得到全零。
+
+两条回答的有效 token loss 为 [2] 和 [0,0,0]：先各自平均再平均得到 1；把所有有效 token 一起平均得到 .5。Dr. GRPO 若取固定长度 C=4，则 sum(loss)/(2×4)=.25。三种聚合的权重与尺度不同；代码检查只是算术例子，不是完整 RL 训练实验。
+
+## 实践任务：唯一代码填空题
+
+补齐组内优势的方差与零方差分支。
+
+规则：只能修改 `TODO`/`______` 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。
+
+```{python}
+#| course_role: exercise
+import math
+
+def group_advantages(rewards, eps=1e-8):
+    if not rewards:
+        raise ValueError("group cannot be empty")
+    mean = sum(rewards) / len(rewards)
+    var = ______
+    std = math.sqrt(var)
+    if std < eps:
+        return ______
+    return [(r - mean) / std for r in rewards]
+
+assert group_advantages([2., 2.]) == [0.0, 0.0]
+got = group_advantages([1., 2., 3.])
+assert abs(sum(got)) < 1e-12
+
+assert all(abs(a-b) < 1e-12 for a,b in zip(got, [-math.sqrt(1.5), 0., math.sqrt(1.5)]))
+assert group_advantages([1.]) == [0.]
+assert group_advantages([0., 1.]) == [-1., 1.]
+try:
+    group_advantages([])
+except ValueError:
+    pass
+else:
+    raise AssertionError("empty group must fail")
+
+# 相同 token loss，不同分母：三个配方不能互换。
+losses = [[2.], [0., 0., 0.]]
+response_mean = sum(sum(x)/len(x) for x in losses) / len(losses)
+token_mean = sum(map(sum, losses)) / sum(map(len, losses))
+fixed_length_mean = sum(map(sum, losses)) / (len(losses) * 4)
+assert (response_mean, token_mean, fixed_length_mean) == (1., .5, .25)
+# GSPO 是几何均值，不是 token ratio 的算术均值。
+ratios = [4., .25]
+assert abs(math.exp(sum(map(math.log, ratios))/len(ratios)) - 1.) < 1e-12
+assert sum(ratios)/len(ratios) == 2.125
+```
+
+### 检查方法
+
+运行断言，核对总体方差、全同分、单元素和空组边界；再解释回答平均与 token 平均为什么不同。空组不代表零优势，应明确拒绝。
+
+提交补齐后的代码、实际输出及边界解释；环境不可用时注明静态审查。
+
+### Q1
+
+不要背定义：请从输入、状态变化和输出三个阶段解释“GRPO 与组内相对优势”的工作机制。
+
+**你的答案：**
+
+### Q2
+
+跨 prompt 减全局均值，与各 prompt 内减均值并除组 std，分别如何改变优势与 prompt 权重？
+
+**你的答案：**
+
+### Q3
+
+固定 rollout 预算下，group size 与 prompt 数量如何权衡？
+
+**你的答案：**
+
+## 评分与通过规则
+
+- 代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。
+
+需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
+
+## 参考答案（仅 answer 分支）
+
+先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。
+
+```{python}
+#| course_role: solution
+import math
+
+def group_advantages(rewards, eps=1e-8):
+    if not rewards:
+        raise ValueError("group cannot be empty")
+    mean = sum(rewards) / len(rewards)
+    var = sum((r - mean) ** 2 for r in rewards) / len(rewards)
+    std = math.sqrt(var)
+    if std < eps:
+        return [0.0] * len(rewards)
+    return [(r - mean) / std for r in rewards]
+
+assert group_advantages([2., 2.]) == [0.0, 0.0]
+got = group_advantages([1., 2., 3.])
+assert abs(sum(got)) < 1e-12
+
+assert all(abs(a-b) < 1e-12 for a,b in zip(got, [-math.sqrt(1.5), 0., math.sqrt(1.5)]))
+assert group_advantages([1.]) == [0.]
+assert group_advantages([0., 1.]) == [-1., 1.]
+try:
+    group_advantages([])
+except ValueError:
+    pass
+else:
+    raise AssertionError("empty group must fail")
+
+# 相同 token loss，不同分母：三个配方不能互换。
+losses = [[2.], [0., 0., 0.]]
+response_mean = sum(sum(x)/len(x) for x in losses) / len(losses)
+token_mean = sum(map(sum, losses)) / sum(map(len, losses))
+fixed_length_mean = sum(map(sum, losses)) / (len(losses) * 4)
+assert (response_mean, token_mean, fixed_length_mean) == (1., .5, .25)
+# GSPO 是几何均值，不是 token ratio 的算术均值。
+ratios = [4., .25]
+assert abs(math.exp(sum(map(math.log, ratios))/len(ratios)) - 1.) < 1e-12
+assert sum(ratios)/len(ratios) == 2.125
+```
+
+### Q1 参考答案
+
+按 prompt 分组生成并打分，减组均值、除总体 std，广播到有效回答 token；token surrogate 用 πθ/πold，reference KL 是独立项。critic/GAE 被组统计替代，但采样成本和零方差组仍需处理。
+
+### Q2 参考答案
+
+全局均值会保留不同 prompt 的加性评分/难度差异，导致一个困难题的组内最好回答也可能得到负优势。组内 centering 避免这种比较，但除组 std 又按 1/std 重加权各题，低但非零方差的题可能被放大；两者都不是无条件正确的默认选择。
+
+### Q3 参考答案
+
+固定 N=B×G 时，G 从 4 增到 8 会让 prompt 数减半。比较非零优势组数量、题目覆盖、样本相关性及相同生成预算下的独立评估结果；若大量全对/全错组，先核对任务难度与采样多样性，补采样也必须计入预算。
+
+## 参考资料
+
+- [DeepSeekMath / GRPO（§4.1）](https://arxiv.org/html/2402.03300v2)
+- [DAPO（§3）](https://arxiv.org/html/2503.14476v1)
+- [Dr. GRPO（§3）](https://arxiv.org/html/2503.20783v1)
+- [GSPO（§4）](https://arxiv.org/html/2507.18071v2)
+- [MiniMax-M1 / CISPO](https://arxiv.org/html/2506.13585v1)
+
+这里只比较目标结构，不声称这些配方在任意模型/任务上都有收益。
+

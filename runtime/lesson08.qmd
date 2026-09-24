@@ -1,0 +1,136 @@
+---
+title: 框架运行时、数据与性能补充线 · 第 8/8 课：可复现性、回归定位与性能排障
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 逐课通过制：未完成代码、问答与边界解释前，不进入下一课。
+
+
+## 本课目标与完成标准
+
+本课产出：实现首个回归阶段定位，并建立“正确性→资源→时间线→规模”的排障顺序。
+
+通过要求：唯一代码填空题通过给定检查；Q1～Q3 都给出因果链；能指出一个正确性边界和一个性能/运营取舍；总分至少 8/10。
+
+## 与既有六条主线的边界
+
+本课把前七课收束成 runtime 面试流程；不新增另一套 profiler 或分布式算法。
+
+前置：Python、PyTorch、train 第 1～5 课、CUDA 基础。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
+
+## 核心心智模型
+
+### 它是什么、解决什么问题
+
+固定代码、数据版本、随机种子、环境和拓扑后建立 baseline；按阶段比较输出/指标，定位第一个偏离点，再用最小复现验证假设。
+
+### 数据与控制如何流动
+
+先验证输出和输入合同，再核对显存、CPU、网络等资源，之后读取时间线定位首个偏离点；最后沿 GPU 数、shape、数据和版本逐维二分，保留能触发问题的最小条件。
+
+### 正确性条件与常见误区
+
+deterministic 设置只覆盖已实现的确定性路径；多 rank 浮点归约顺序仍会改变低位。性能回归必须使用同等 warmup、shape、频率和并发条件。
+
+### 性能、成本与工程取舍
+
+完全确定性可能禁用快 kernel；最小复现提高定位速度但可能丢掉规模/拓扑触发条件。正确做法是逐步缩小并保留能复现的关键维度。
+
+## 具体演示
+
+pipeline stages baseline=[1.0,2.0,3.0]、current=[1.0,2.5,3.8]：第一个回归是 stage1（0 起），后续变慢可能只是传播结果。
+
+请先独立复述“输入 → 状态变化 → 输出/指标”，再开始填空。
+
+## 实践任务：唯一代码填空题
+
+补齐首个超过相对阈值的阶段；baseline 为 0 时使用绝对比较。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def first_regression(baseline, current, relative_threshold=0.05):
+    if len(baseline) != len(current):
+        raise ValueError("stage counts differ")
+    for i, (before, after) in enumerate(zip(baseline, current)):
+        limit = before * (1 + relative_threshold) if before else relative_threshold
+        if after > limit:
+            # TODO：返回最早回归位置和增量。
+            return ______
+    return None
+
+assert first_regression([1., 2., 3.], [1., 2.5, 3.8]) == (1, 0.5)
+assert first_regression([1., 2.], [1.01, 2.01]) is None
+```
+
+### 检查方法
+
+运行本单元格，所有断言必须通过；再补一个边界输入并解释预期。
+
+### Q1
+
+为什么先定位第一个错误/回归阶段，而不是优化最慢的最终阶段？
+
+**你的答案：**
+
+### Q2
+
+设置相同随机种子仍不逐位一致，可能有哪些原因？
+
+**你的答案：**
+
+### Q3
+
+性能回归只在 128 GPU 出现，单卡最小复现正常，下一步怎么缩小？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：正常输入 2 分、边界输入 1 分、解释 1 分；
+- Q1～Q3 各 2 分；
+- 一票否决：混淆测量与推测、忽略租户/请求隔离、用平均值掩盖尾延迟、删除失败路径。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请改变一个规模或故障条件重新推演。
+
+```{python}
+#| course_role: solution
+def first_regression(baseline, current, relative_threshold=0.05):
+    if len(baseline) != len(current):
+        raise ValueError("stage counts differ")
+    for i, (before, after) in enumerate(zip(baseline, current)):
+        limit = before * (1 + relative_threshold) if before else relative_threshold
+        if after > limit:
+            return i, after - before
+    return None
+
+assert first_regression([1., 2., 3.], [1., 2.5, 3.8]) == (1, 0.5)
+assert first_regression([1., 2.], [1.01, 2.01]) is None
+```
+
+### Q1 参考答案
+
+后续阶段可能消费了错误 shape、缓存状态或排队积压，症状是上游传播。修复第一个偏离点常会同时消除后续异常，避免在次生症状上浪费时间。
+
+### Q2 参考答案
+
+异步执行顺序、非确定性 kernel、collective 归约顺序、数据 worker seed、未固定数据顺序、硬件/库版本和未初始化内存都可能影响。要区分统计可复现与 bitwise。
+
+### Q3 参考答案
+
+保持跨节点/消息规模等关键条件，逐步减少节点、固定拓扑和流量；比较 collective、straggler、数据服务和调度指标。不能继续把问题缩成失去网络规模效应的单卡。
+
+## 参考资料
+
+- [torch.profiler](https://docs.pytorch.org/docs/stable/profiler.html)
+- [torch.compile](https://docs.pytorch.org/docs/stable/generated/torch.compile.html)
+- [PyTorch distributed](https://docs.pytorch.org/docs/stable/distributed.html)
+- [Distributed Checkpoint](https://docs.pytorch.org/docs/stable/distributed.checkpoint.html)
+
+API 与平台能力会演进；部署前应按目标版本重新核对。
+

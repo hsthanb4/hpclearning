@@ -1,0 +1,167 @@
+---
+title: 推理引擎源码与前沿优化 · 第 3/8 课：SGLang SRT 源码地图：Scheduler、ScheduleBatch 与 ModelRunner
+jupyter: python3
+---
+
+
+> 状态：**参考答案版**  
+> 源码审阅日期：2026-08-12；vLLM `8e958902eee5`；SGLang `9deb6952afa4`。
+
+
+## 本课目标与通过标准
+
+本课产出：能沿 SGLang SRT 的真实 event loop 追踪请求从 waiting queue 到 prefill/decode batch、TP worker、ModelRunner 和结果处理，并与 vLLM V1 的职责切分做源码级比较。
+
+通过要求：唯一代码填空题通过全部断言；Q1～Q3 都能沿源码对象给出因果链；能指出一个正确性不变量、一个性能边界和一个需要 benchmark 才能确认的结论；总分至少 8/10。
+
+## 源码版本与阅读方法
+
+本课程使用固定 commit 的永久链接保证行号可复现，同时链接 current docs 供核对最新变化。阅读时先画调用图和状态所有权，再进入分支；不要从大文件第一行机械顺读。
+
+建议阅读顺序：
+
+| 顺序 | 源码入口 | 关注对象 |
+|---:|---|---|
+| 1 | `python/sglang/srt/managers/scheduler.py::run_event_loop` | normal/overlap 两条主循环如何选择 |
+| 2 | `get_next_batch_to_run`、`get_new_batch_prefill`、`update_running_batch` | waiting、chunked request、running batch 怎样迁移 |
+| 3 | `managers/schedule_batch.py::Req`、`ScheduleBatch`、`NextBatchPlan` | 请求状态与 GPU batch tensor 的边界 |
+| 4 | `managers/tp_worker.py::TpModelWorker.forward_batch_generation` | scheduler 如何调用模型 worker |
+| 5 | `model_executor/model_runner.py::forward`、`_forward_raw`、`sample` | attention backend、CUDA graph、模型与 sampler 在哪里接合 |
+
+源码快照：SGLang `9deb6952afa4`。
+
+## 核心对象
+
+SGLang SRT 的 `Scheduler` 比教科书中的“排队策略”承担更多运行时编排：接收请求、维护 waiting/running/chunked 状态、选择 prefill 或 decode、协调 Radix/HiCache、调用 TP worker、处理结果、输出和健康检查。`Req` 是单请求持久状态；`ScheduleBatch` 是某次 forward 的批量视图；`NextBatchPlan` 显式返回 `batch_to_run` 和更新后的 `running_batch`。
+
+`TpModelWorker` 负责分布式 worker 包装；`ModelRunner` 负责模型加载、KV pool、attention backend、CUDA graph、forward 和 sample。不要把 `ScheduleBatch` 误认为 PyTorch DataLoader batch。
+
+## 调用链与状态变化
+
+请求经 scheduler receiver 进入 `handle_generate_request`，初始化 `Req` 并放入 waiting queue。每轮 `get_next_batch_to_run` 先合并上轮完成 prefill 的 batch、处理 chunked request/HiSparse，再尝试构造新 prefill；若没有 prefill，才更新并运行 decode batch。`run_batch` 把 `ScheduleBatch` 交给 TP worker；后者转换为 `ForwardBatch`，由 ModelRunner 执行 attention/model/sampling；`process_batch_result` 更新 `Req.output_ids`、finish reason、cache 与输出流。
+
+这是一条状态机，不是简单 `queue.get → model.generate`。batch copy、future map 和 stream barrier 用于 overlap 模式下保持上轮结果与本轮准备的依赖。
+
+## 正确性条件与常见误区
+
+正确性条件：`Req` 的 KV 长度、`seq_lens`、output ids 和 pool indices 必须一致；prefill 完成后才能安全进入 decode；retract/abort 必须释放 request slot 与 KV；chunked request 不能因为暂时移出 running batch 而丢失所有权；overlap 时读取共享 buffer 的阶段必须在写者复用前发布 WAR 完成。
+
+常见误区是只读 `scheduler.py` 的 `get_next_batch_to_run`，不追 `ScheduleBatch.prepare_for_extend/decode` 与 ModelRunner；这样看不到 CPU 列表何时变成设备 tensor、KV location 何时分配。
+
+## 当前前沿与工程取舍
+
+SGLang 当前代码同时容纳 overlap scheduling、PD disaggregation、DP attention、HiCache/HiSparse、spec V2 与多后端，所以 `scheduler.py` 很大。源码面试不要求背完分支，而要找到稳定骨架：接收 → 计划 → 准备 batch → forward/sample → 结果提交。与 vLLM 的主要差异应基于具体 snapshot 和 workload 讨论，不能用“RadixAttention 一定更快”作结论。
+
+## 具体推演
+
+当 waiting 中有可接纳 prefill 时，`get_next_batch_to_run` 优先返回新 prefill；否则把存活 running requests 准备为 decode。上轮 prefill batch 会先并入 running batch。这个策略解释了 TTFT 与 ITL 的竞争，也解释了 chunked prefill、prefill delayer 等机制存在的原因。
+
+请先口头复述“输入 → 状态所有者 → 状态迁移 → 输出/指标”，再做练习。
+
+## 实践任务：唯一代码填空题
+
+补齐 `NextBatchPlan` 的教学版选择逻辑：先合并上轮完成的 prefill，再优先运行新 prefill，否则运行 decode。
+
+只能修改 `TODO`/`______` 位置，不得删除断言或放宽通过条件。
+
+```{python}
+#| course_role: exercise
+def choose_sglang_batch(running, completed_prefill, new_prefill):
+    running = list(running)
+    # TODO：完成 prefill 的请求进入 running；新 prefill 优先于 decode。
+    ______
+    if new_prefill:
+        batch_to_run = ("prefill", list(new_prefill))
+    elif running:
+        batch_to_run = ("decode", list(running))
+    else:
+        batch_to_run = None
+    return {"batch_to_run": batch_to_run, "running_batch": running}
+
+assert choose_sglang_batch(["d0"], ["p_done"], ["p_new"]) == {
+    "batch_to_run": ("prefill", ["p_new"]),
+    "running_batch": ["d0", "p_done"],
+}
+assert choose_sglang_batch(["d0"], [], []) == {
+    "batch_to_run": ("decode", ["d0"]),
+    "running_batch": ["d0"],
+}
+```
+
+### 检查方法
+
+运行断言；补一个三者皆空的用例。再说明真实源码在哪些条件下不会简单优先新 prefill。
+
+### Q1
+
+`Req`、`ScheduleBatch`、`ForwardBatch` 三者为何不能合并成一个类？
+
+**你的答案：**
+
+### Q2
+
+为什么 `get_next_batch_to_run` 返回 plan 时还要返回更新后的 `running_batch`？
+
+**你的答案：**
+
+### Q3
+
+如何从源码判断性能问题在 scheduler CPU、batch preparation 还是 ModelRunner/kernel？
+
+**你的答案：**
+
+## 评分规则
+
+- 代码 4 分：主路径 2 分、边界条件 1 分、能映射回源码对象 1 分；
+- Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；
+- 一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。
+
+## 参考答案（仅 answer 分支）
+
+先独立完成。核对后请更换一个 batch、cache 或硬件条件重新推演，不能只复制。
+
+```{python}
+#| course_role: solution
+def choose_sglang_batch(running, completed_prefill, new_prefill):
+    running = list(running)
+    running.extend(completed_prefill)
+    if new_prefill:
+        batch_to_run = ("prefill", list(new_prefill))
+    elif running:
+        batch_to_run = ("decode", list(running))
+    else:
+        batch_to_run = None
+    return {"batch_to_run": batch_to_run, "running_batch": running}
+
+assert choose_sglang_batch(["d0"], ["p_done"], ["p_new"]) == {
+    "batch_to_run": ("prefill", ["p_new"]),
+    "running_batch": ["d0", "p_done"],
+}
+assert choose_sglang_batch(["d0"], [], []) == {
+    "batch_to_run": ("decode", ["d0"]),
+    "running_batch": ["d0"],
+}
+```
+
+### Q1 参考答案
+
+`Req` 跨多轮持有单请求语义状态、停止条件和 cache 引用；`ScheduleBatch` 是 scheduler 为某轮组合请求后的批量控制视图；`ForwardBatch` 是 ModelRunner/attention backend 消费的设备执行描述。三者生命周期、设备位置和写入者不同。合并后会让持久请求对象携带易过期 GPU tensor，或让 kernel 层修改业务状态，难以 overlap、retract 和测试。
+
+### Q2 参考答案
+
+本轮可能合并上轮 prefill、移出 chunked request、过滤完成/abort、接入 HiSparse ready requests 或 retract decode。即使最终运行的是新 prefill，持久 running 集合也已变化。显式返回能让调用者原子替换 scheduler 状态，避免只拿到执行 batch 却丢失跨轮请求所有权。
+
+### Q3 参考答案
+
+在 `run_event_loop/get_next_batch_to_run/prepare_*`、`run_batch/TpModelWorker`、`ModelRunner.forward/_forward_raw/sample` 分段打点并结合 GPU timeline。若 forward stream 间有 CPU 空洞且计划阶段长，是 scheduler/prepare；若 batch 已提交但 kernel 长，是模型/通信；若频繁 graph fallback 或 tensor copy，则看 ForwardBatch shape、CUDA graph 与 attention backend。必须用同一请求分布对照。
+
+## 参考资料
+
+- [SGLang Scheduler source](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/managers/scheduler.py#L1653-L3972)
+- [SGLang ScheduleBatch source](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/managers/schedule_batch.py#L810-L3390)
+- [SGLang TP worker source](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/managers/tp_worker.py#L298-L700)
+- [SGLang ModelRunner source](https://github.com/sgl-project/sglang/blob/9deb6952afa483e38f96385a375b96f463da5303/python/sglang/srt/model_executor/model_runner.py#L285-L1775)
+- [SGLang paper](https://arxiv.org/abs/2312.07104)
+
+源码链接固定到本课审阅 commit；current docs、支持矩阵和默认参数会变化，面试或部署前必须按目标版本重新核对。
+
