@@ -47,23 +47,68 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-softmax 需要行 max、指数和 sum 三步归约；Triton 将整行保留在片上，避免物化中间 tensor。
+Softmax 是 Transformer 注意力机制（Attention Score Normalization）与多分类输出层的绝对核心。数学公式为：
+$$ \text{Softmax}(x)_i = \frac{e^{x_i}}{\sum_{j=0}^{N-1} e^{x_j}} $$
+在浮点计算机体系结构中，直接计算 $e^{x_i}$ 极其危险：当 $x_i > 88.7$（对于 FP32）时，$e^{x_i}$ 会直接上溢出（Overflow）为 `+Inf`，导致除法产生 $\text{Inf} / \text{Inf} = \text{NaN}$。
+因此，业界普遍采用**数值稳定版 Softmax（Safe Softmax）**：
+$$ m = \max_{j} x_j, \quad \text{Softmax}(x)_i = \frac{e^{x_i - m}}{\sum_{j=0}^{N-1} e^{x_j - m}} $$
+由于 $x_i - m \le 0$，分子最大仅为 $e^0 = 1.0$，彻底消除了上溢出风险。
+在传统 PyTorch 执行流中，Safe Softmax 需要连续启动 4 个独立的 GPU 内核（Max 规约 $\to$ Sub 广播 $\to$ Exp 逐元素 $\to$ Sum 规约 $\to$ Div 归一化），中间张量多次在 HBM 显存与计算单元之间来回读写（如图 7-1 与图 7-2 所示）。
+本课解决的核心工程问题是：**在 Triton 中实现单 Program 容纳整行的全融合 Safe Softmax，利用负无穷大 $-\infty$ 作为 Padding 单位元实现双重数学保护（既不污染 Max，又使指数项自然归零），获得超越原生 PyTorch 数倍的极速性能**。
 
 ### 2. 它如何工作
 
-padding load 用 -inf，使其不影响 max 且 exp 后自然为 0；减 max 后再指数。
+融合 Softmax 的片上数据流与执行时序如图 7-1 与图 7-2 所示：
+
+1. **带 $-\infty$ 的向量化加载**：
+   以行优先划分网格 `grid = (M,)`，每行分配一个 Program 块，`BLOCK = triton.next_power_of_2(N)`。
+   执行 `values = tl.load(x + row * stride_m + cols, mask=mask, other=-float("inf"))`。
+   有效位置装载真实的 Logits；超出 $N$ 的 Padding 位置填充最大值代数单位元 $-\infty$。
+2. **片上防溢出局部最大值（Local Max Reduction）**：
+   调用 `m = tl.max(values, axis=0)`。由于任何实数与 $-\infty$ 取最大值均保持实数不变（$\max(x, -\infty) = x$），Padding 的 $-\infty$ 完全不会干扰真实最大值的判定。
+3. **中心化与指数计算（Exp Transformation）**：
+   执行广播减法：`shifted = values - m`。
+   - 对有效元素 $i < N$：$x_i - m \le 0$，数值稳定；
+   - 对 Padding 元素 $i \ge N$：$-\infty - m = -\infty$。
+   随后执行指数运算：`numer = tl.exp(shifted)`。
+   - 对有效元素：$e^{x_i - m} \in (0, 1]$；
+   - 对 Padding 元素：$e^{-\infty} = 0.0$！
+   这一代数性质极为优美：Padding 位置在经过指数变换后，**自动且自然地转化为了加法的绝对零元 $0.0$**，无需调用额外的 `tl.where` 掩码！
+4. **分母求和与除法归一化（Sum & Normalization）**：
+   调用 `tl.sum(numer, axis=0)`。由于 Padding 位置上的指数项恰好是 $0.0$，树状折半累加所得的分母 $\sum e^{x_j - m}$ 严格精准，不含任何虚假能量。
+   最终执行 `probs = numer / denom`，并在 `tl.store` 施加 `mask=mask` 仅将前 $N$ 个有效概率写回全局显存。
 
 ### 3. 正确性条件与常见误区
 
-全 mask 行会产生 -inf-(-inf)=NaN；普通 dense 行要求 N>0，attention mask 需专门处理。
+- **Padding 误填 0.0 的灾难性后果**：
+  若在 `tl.load` 中将 `other` 误写为 0.0：
+  如果一整行 Logits 全为负数（例如在语言模型尾部或带惩罚项的打分中，所有数值在 $[-15.0, -10.0]$ 之间），则 Padding 的 0.0 会反客为主被判定为整行的最大值 $m = 0.0$。
+  更严重的是，在后续求指数时，$e^0 = 1.0$。每个 Padding lane 都会贡献数值为 1.0 的虚假概率分母，导致真实分子的概率被严重稀释，产生完全错误的概率分布。
+- **全 Mask 行产生的 NaN 奇点**：
+  若在 Transformer Attention 中某一整行全部被 Mask 掉（全为 $-\infty$），则行最大值也是 $-\infty$。此时执行 `values - max` 会引发 $-\infty - (-\infty) = \text{NaN}$。因此对于可能出现全 Mask 行的因果注意核，必须加入条件保护或重置分支。
+- **Underflow 与极小值裁剪**：
+  虽然减去最大值防止了上溢（Overflow），但若某元素远小于最大值（例如 $x_i - m < -88.0$），$e^{x_i - m}$ 会下溢（Underflow）为 0.0。在概率语义中，极小分量下溢为 0.0 是安全且符合预期的。
 
 ### 4. 性能与工程取舍
 
-单 program 一行适合中等 N；超宽 softmax 需分块或专用算法。
+- **片上寄存器全融合的极致带宽收益**：
+  如图 7-1 的实测基准所示，原生 PyTorch 执行 Softmax 需要启动 Max、Sub、Exp、Sum、Div 多个内核，反复向显存读写多次中间张量，访存总量高达 $O(5MN)$。
+  而在 Triton 中，整个计算流完全在 SM 片上寄存器内部以流水线形式闭环，输入数据仅读取 1 次，输出概率仅写回 1 次，全局访存量骤降为 $2MN$，在 Memory-bound 场景下通常能取得 2~4 倍的加速比。
+- **单 Program 一行 vs FlashAttention 循环 Online Softmax**：
+  本课的实现要求单 Program 的 `BLOCK` 能容纳一整行。当序列长度 $N$ 极大（如 LLM 长文本 $N = 32k, 128k$）时，单 Program 无法分配这么大的静态向量，必须转向类似 FlashAttention 的 Online Softmax 算法（外层分块迭代并维护动态归一化系数 $(m_{new}, d_{new})$）。
 
 ## 具体演示
 
-[1000,1001] 减 max 后 [-1,0]；直接 exp 会溢出。
+以输入行 $x = [-10.0, -20.0]$、$N = 2, \text{BLOCK} = 4$ 为例：
+1. **加载状态**：`values = [-10.0, -20.0, -inf, -inf]`。
+2. **求最大值**：$m = \max(-10, -20, -\infty, -\infty) = -10.0$。
+3. **中心化与指数**：
+   - `shifted = [-10 - (-10), -20 - (-10), -inf - (-10), -inf - (-10)] = [0.0, -10.0, -inf, -inf]`
+   - `numer = exp(shifted) = [1.0, 0.0000454, 0.0, 0.0]`。注意后两位自动变为精确的 0.0！
+4. **分母与归一化**：
+   - 分母求和：$1.0 + 0.0000454 + 0.0 + 0.0 \approx 1.0000454$。
+   - `probs = [0.99995, 0.000045, 0.0, 0.0]`。
+5. **写回**：`mask` 截断后 2 位，仅写回前两项概率，与数学真实解分毫不差。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -173,15 +218,35 @@ for shape in ((2, 7), (4, 100), (8, 256)):
 
 ### Q1 参考答案
 
-padding load 用 -inf，使其不影响 max 且 exp 后自然为 0；减 max 后再指数。
+从三个阶段拆解其运行机制：
+1. **输入阶段（网格绑定与 $-\infty$ 代数保护）**：Python 层按矩阵行数发射一维网格，每个 Program 块负责独立的一行，列尺寸扩展至 2 的幂次。在 `mask = cols < N` 保护下，通过带 `other=-float("inf")` 的 `tl.load` 加载输入，超出 $N$ 的 Padding 位置在寄存器中赋予负无穷大 $-\infty$。
+2. **状态变化阶段（行内三步规约与指数归零）**：
+   - 步骤一（最大值规约）：调用 `tl.max` 抓取有效特征的真实最大值 $m$。由于 $-\infty$ 是最大值运算的单位元，Padding 元素完全隐形。
+   - 步骤二（数值稳定中心化与指数）：寄存器广播执行 `values - m`，有效值被平移至 $(-\infty, 0]$ 区间杜绝指数上溢，而 Padding 位置仍保持为 $-\infty$。随后调用 `tl.exp`，有效项映射为 $(0, 1]$，Padding 项由于 $e^{-\infty} = 0.0$ 自动蜕变为加法零元。
+   - 步骤三（分母求和与归一化）：调用 `tl.sum` 对指数项求和得到准确分母，随后向量除法计算出真实概率分布。
+3. **输出阶段（带掩码安全写回）**：通过 `tl.store` 配合 `mask` 仅将有效的前 $N$ 个归一化概率写回目标显存，Padding 位置不触发任何显存写事务。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：全 mask 行会产生 -inf-(-inf)=NaN；普通 dense 行要求 N>0，attention mask 需专门处理。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+若在 `tl.load` 时将 Padding 的默认填充值错误设为 `0.0`：
+当输入的 Logits 行向量全部为负数时（例如在分类网络低概率类别或大语言模型惩罚打分中，有效 Logits 全为负值，如 $[-5.0, -8.0, -3.0]$）：
+1. **最大值被错误篡改**：由于所有真实元素都小于 0，而 Padding 元素为 0.0，在执行 `tl.max` 时，虚构的 0.0 会被强行误判为整行的最大值（即 $m = 0.0$ 而非真实的 $-3.0$）。
+2. **指数项虚假爆发**：在计算 $e^{x_i - m}$ 时，Padding 处的计算为 $e^{0.0 - 0.0} = e^0 = 1.0$。每个 Padding lane 都会产生数值为 1.0 的巨大虚假概率分子。
+3. **真实概率被严重稀释崩溃**：在分母求和时，累加器不仅加进了真实分子的微小指数值（$e^{-5} \approx 0.0067$），还累加进了 $(\text{BLOCK} - N)$ 个高达 1.0 的虚假数值。最终真实有效项的 Softmax 概率被大幅摊薄数百倍，输出完全错误的预测结果。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：单 program 一行适合中等 N；超宽 softmax 需分块或专用算法。
+在 Transformer 的自注意力计算（Self-Attention）中，因果掩码（Causal Mask）要求当前 Query 位置 $i$ 只能看到小于等于自身位置的 Key 位置 $j$（即 $j \le i$），未来位置（$j > i$）必须被强行屏蔽。
+将其融入同一个 Softmax Kernel 的工程方法为：
+1. **获取行内逻辑位置**：
+   在 Kernel 中，当前 Program 处理的行索引 `row` 对应 Query 的序列位置 $i$，列索引 `cols = tl.arange(0, BLOCK)` 对应 Key 的序列位置 $j$。
+2. **构造因果组合谓词**：
+   将张量尺寸边界与因果未来位置结合为复合掩码：
+   `causal_mask = (cols < N) & (cols <= row)`
+3. **统一注入 $-\infty$**：
+   在 `tl.load` 加载输入 Attention 权重时直接施加此复合掩码：
+   `values = tl.load(q_k_ptr + row * stride_m + cols, mask=causal_mask, other=-float("inf"))`
+   被屏蔽的未来位置（$j > i$）与越界的 Padding 位置（$j \ge N$）均被赋为 $-\infty$。在后续执行 Safe Softmax 的减 Max 与 Exp 计算时，$e^{-\infty}$ 自动变为 0.0，从而在同一个 Kernel 内以零显存读写代价同时完成了因果掩码与 Softmax 归一化。
 
 ## 参考资料
 

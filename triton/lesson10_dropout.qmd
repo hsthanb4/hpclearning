@@ -51,23 +51,54 @@ flowchart TD
 
 ### 1. 它是什么，解决什么问题
 
-Triton 常用 counter-based RNG：随机值由 seed 与元素 offset 决定，不维护跨线程共享状态。
+在深度神经网络的正则化技术中，Dropout 以概率 $p$ 随机将神经元激活值置零（Drop），以抑制神经元之间的共适应性（Co-adaptation）。
+为了避免在测试推断阶段引入额外的缩放操作，现代深度学习框架普遍采用**反向丢弃（Inverted Dropout）**：
+$$ y_i = \begin{cases} \frac{x_i}{1 - p}, & \text{with probability } 1 - p \\ 0, & \text{with probability } p \end{cases} $$
+通过在前向训练时直接除以保留概率 $(1 - p)$，保证了输出激活值的数学期望恒等于输入（$\mathbb{E}[y_i] = x_i$）。
+在传统并行程序中，伪随机数生成器（PRNG，如线性同余 LCG 或梅森旋转 Mersenne Twister）依赖不断更新的**全局内部状态（Stateful RNG）**。在海量 GPU 线程并发时，维护共享状态会导致灾难性的线程锁争用或显存瓶颈。
+本课解决的核心工程问题是：**理解基于计数器的无状态随机数生成算法（Counter-based RNG，如 Philox），在 Triton 中利用 `tl.rand(seed, offsets)` 实现零共享状态、完全无锁、可任意并发且 100% 确定性可复现的 Dropout 掩码生成，以及如何通过反向重算（Recomputation）彻底免除物化 Mask 的显存开销**。
 
 ### 2. 它如何工作
 
-keep=rand>p；训练时保留值除以 1-p，使输出期望等于输入；同 seed/offset 重算同一 mask。
+Philox 无状态随机数与 Inverted Dropout 数据通路如图 10-1 与图 10-2 所示：
+
+1. **基于计数器的纯函数式映射（Counter-based Philox Engine）**：
+   Philox 算法的核心数学本质是一个轻量级的密码学置换函数（Feistel 网络与乘加变换）：
+   $$ R_i = \text{Philox}(K = \text{seed}, C = \text{offset}_i) $$
+   对于固定的密钥 $K$（即全局种子 `seed`）和唯一的计数器 $C$（即当前张量元素的全局一维物理偏移 `offset`），Philox 保证在恒定有限轮置换内输出一个统计学上完全独立且均匀分布的伪随机整数，并映射为区间 $[0, 1)$ 的浮点数。
+2. **纯寄存器层伯努利采样（In-Register Bernoulli Sampling）**：
+   内核无需任何跨线程协调，直接并发求值：
+   `keep = tl.rand(seed, offsets) > p`
+   生成布尔保留掩码 `keep`。此过程不读取任何显存，纯粹在 SM 算术逻辑单元（ALU）中完成。
+3. **条件缩放与写回**：
+   使用 `tl.where(keep, xv / (1.0 - p), 0.0)` 对有效元素施加 $\frac{1}{1-p}$ 的期望保持缩放，并置零被丢弃项。最后通过 `tl.store` 配合尾块掩码 `mask` 写回全局显存。
+4. **反向重算契约（Zero Memory Overhead Recompute）**：
+   在反向传播（Backward）中，原本需要从显存加载保存的 `bool` 掩码。而在 Triton 中，反向 Kernel 仅需传入完全相同的 `seed` 和 `offsets`，直接在寄存器中重新生成一模一样的 `keep` 掩码，从而彻底节省了保存 Mask 所需的巨额显存带宽与容量（省去 $N \times 1 \text{ Byte}$ 的 HBM 显存）。
 
 ### 3. 正确性条件与常见误区
 
-必须约束 0≤p<1；不同算子/层要避免复用相同 seed-offset 域导致相关 mask。
+- **概率定义域严格约束（$0 \le p < 1$）**：
+  若传入 $p = 1.0$，分母 $1.0 - p$ 会引发除零异常（Division by Zero）导致输出全部为 NaN 或 Inf。若传入 $p < 0$，采样逻辑完全失去概率论意义。Wrapper 必须在系统边界进行防御性断言。
+- **种子-偏移域重叠（Domain Overlap / Seed Collision）**：
+  若模型中有多层连续的 Dropout 算子（如 Attention Dropout 与 MLP Dropout），或者相邻训练 Step 之间复用了相同的 `(seed, offsets)` 空间，会导致不同层或不同时间步生成的随机掩码完全相同（高度相关）。必须为不同层分配不同的 `seed`，或者在偏移量上加上全局递增的步长基地址（Base Offset）。
+- **非连续张量与网格打散引发的随机数错位**：
+  `offsets` 必须是针对张量逻辑连续排布的一维绝对索引。若网格分块策略在 Forward 和 Backward 中不一致（例如 Forward 按一维展开、Backward 按二维分块），导致同一个逻辑元素两次计算出的 `offsets` 不相等，反向传播将使用完全错误的 Mask 进行梯度反传，导致模型训练彻底发散。
 
 ### 4. 性能与工程取舍
 
-不物化 mask 节省内存，但 backward 必须用相同映射重算；改变 grid 映射可能改变随机序列。
+- **算力换带宽（Compute vs Memory Tradeoff）**：
+  计算 Philox 随机数需要执行约十数条整型乘法与移位指令。对于现代 GPU，算术计算能力极度富余，而 HBM 显存带宽极度稀缺。用十几条 ALU 指令的开销换取消除一整次 $N$ 字节全局显存的写出与读回，在几乎所有场景下都能带来数倍的端到端吞吐提升。
+- **算子融合的极致收益**：
+  Dropout 通常紧随激活函数（如 GELU、SiLU）或 Bias 相加之后。在 Triton 中直接将“加偏置 $\to$ 激活 $\to$ Philox 采样 $\to$ 缩放”融合成单个 Kernel（如 [图 10-2](file:///Users/wujie/hpclearning/triton/lesson10_dropout.qmd) 所示），整个流水线除最初读取和最终写回外，中间所有数据始终停留在寄存器中，消除了所有中间特征图的显存物化。
 
 ## 具体演示
 
-p=.2 时保留值乘 1.25；全 1 输入的大样本均值应接近 1。
+以 $p = 0.2$、缩放因子 $1 / (1 - 0.2) = 1.25$、输入全为 1.0 的张量（$N = 10003$）为例：
+- 所有有效位置在经过 Philox 判定后，数值非 0 即 1.25。
+- 当传入相同种子 `seed=123` 运行两次时，`torch.equal(y1, y2)` 返回严格的 True（确定性位级复现）。
+- 统计 10003 个样本的均值：
+  $$ \mathbb{E}[y] = (1 - 0.2) \times 1.25 + 0.2 \times 0.0 = 1.0 $$
+  大样本实测均值严格波动在 $1.0 \pm 0.05$ 之间，证明了无状态随机数的统计独立性与期望守恒性。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -177,15 +208,31 @@ assert abs(y1.mean().item() - 1.0) < .05
 
 ### Q1 参考答案
 
-keep=rand>p；训练时保留值除以 1-p，使输出期望等于输入；同 seed/offset 重算同一 mask。
+从三个阶段拆解其运行机制：
+1. **输入阶段（种子传递与绝对偏移量生成）**：Python 调用层将只读种子 `seed` 与丢弃概率 $p$ 传入 Kernel。每个 Program 依据 `program_id` 与 `BLOCK` 步长生成唯一的全局物理偏移向量 `offsets`，并在 `mask = offsets < n` 保护下载入特征数据 `xv`。
+2. **状态变化阶段（无状态 Philox 采样与无分支条件缩放）**：
+   - 采样：调用 `tl.rand(seed, offsets)`。底层启动无状态 Philox 密码学置换引擎，仅依据 `(seed, offsets)` 纯函数式并发计算出一组 $[0, 1)$ 伪随机数。
+   - 比较与缩放：执行元素级裁决 `keep = rand > p`。利用 `tl.where` 原语，对被保留的元素乘以缩放因子 $\frac{1}{1-p}$，对丢弃项直接置为 0.0。整个过程完全在片上寄存器完成，不依赖任何共享内存或全局锁。
+3. **输出阶段（带掩码写回与反向重算支撑）**：通过 `tl.store` 配合 `mask` 写回输出张量。在反向传播求导时，反向 Kernel 无需读取任何前向保存的掩码张量，仅凭相同的 `(seed, offsets)` 即可在片上 100% 重新生成完全一致的 Mask，实现零显存额外占用的梯度反传。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：必须约束 0≤p<1；不同算子/层要避免复用相同 seed-offset 域导致相关 mask。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+传统伪随机数发生器（如 C 语言的 `rand()`）基于递推公式 $S_{n+1} = f(S_n)$，前一个状态是后一个状态的输入，强行并行必须对全局状态加锁或导致严重的争用。
+而以 Philox 为代表的**基于计数器的随机数发生器（Counter-based PRNG）**从数学原理上彻底打破了这种状态依赖链：
+1. **纯数学双射置换（Stateless Bijective Mapping）**：
+   Philox 将种子视为密钥 $K$，将每个线程对应的全局唯一偏移量 `offset` 视为计数器 $C$。它本质上是一个分组密码评估函数 $R = \text{Philox}(K, C)$。
+2. **计算完全正交独立**：
+   由于第 $i$ 个元素的结果仅由固定的 $K$ 和输入的整数 $i$ 唯一代数决定，计算之间不存在任何因果依赖或累加状态。任意两个 GPU 线程无论何时启动、以何种顺序执行、驻留在哪个 SM 上，只要输入相同的 $(K, i)$，均能在自己的私有寄存器中瞬间独立求出完全相同的伪随机数，天生具备无限并发、零同步、零通信、无锁的完美并行性质。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：不物化 mask 节省内存，但 backward 必须用相同映射重算；改变 grid 映射可能改变随机序列。
+在大型深度学习框架中，当算子发生深度融合时（例如前向将 Matmul、Bias、GELU 与 Dropout 融合成一个二维网格 Kernel，而反向可能以不同粒度调度）：
+若由于分块结构改变导致输入元素对应的 `offsets` 编号方式发生偏移，Forward 和 Backward 就会产生不一致的随机掩码，破坏梯度反传。保持其严格一致的工业级工程方案为：
+1. **基于全局线性绝对坐标（Logical Linear Indexing）**：
+   严禁使用局部 Tile 内部相对偏移。无论网格如何划分（1D 还是 2D），所有线程在调用 `tl.rand` 前，必须将自身当前处理的数据坐标严格折算为针对原始张量的全局一维平铺绝对线性索引：
+   $\text{global\_offset} = \text{global\_row} \times N + \text{global\_col}$。
+2. **种子域隔离与 Base Offset 传递**：
+   若同一个张量需要多次采样，保持全局线性索引不变，通过在 Python 调度层统一分发唯一的全局 `seed` 和 `base_offset`（例如 `offsets = base_offset + global_idx`），保证前向与反向在同一个张量元素上绑定的输入元组 `(seed, global_offset)` 具有严格且唯一的双射对应关系。
 
 ## 参考资料
 

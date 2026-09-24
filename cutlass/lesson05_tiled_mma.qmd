@@ -175,15 +175,36 @@ static_assert(MMA_M * MMA_N * MMA_K == 2048);
 
 ### Q1 参考答案
 
-instruction tile 先组成 warp tile，多个 warp 再组成 CTA tile；partition_A/B/C 必须来自同一 tiled MMA 才能让寄存器布局匹配。
+1. **输入阶段（Atom Encapsulation & Multi-Warp Replication）**：
+   - 算法声明底层硬件矩阵乘微指令（MMA Atom，如 $16 \times 8 \times 16$），固化单个 Warp 的操作数类型与物理线程排布；
+   - 结合指定的 Warp 拓扑网格（如 $2 \times 2$）调用 `make_tiled_mma`，在逻辑空间将 Atom 平铺扩展为涵盖整个 ThreadBlock 的 CTA 级计算架构（CTA Tile）；
+2. **状态变化阶段（SRAM Slicing & Accumulator Residency）**：
+   - 算法调用 `partition_A`、`partition_B` 与 `partition_C`，将片上共享内存和私有寄存器精准切割为对齐硬件输入端口的局部 Fragment；
+   - 在收缩维度 $K$ 的推进中，线程持续发射底层 `cute::gemm`。Tensor Core 硬件矩阵乘加单元从寄存器或共享内存抓取小切片，执行点积累加。**中间累加结果始终被锁定在各线程专享的 `rC` 累加寄存器中**，跨 $K$ 轮次零显存写回；
+3. **输出阶段（Accumulator Reduction & Epilogue Store）**：
+   - 当收缩维度全部累加完成，累加器 `rC` 中的全精度数据直接流经 Epilogue 管道（执行类型转换如 FP32 $\to$ FP16、偏置相加或激活函数融合），最后按输出矩阵的全局布局合并写回目标物理显存。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：M、N、K 方向的 tile 与 transpose/layout 模式必须对应；仅 shape 数字相等不能证明 fragment 语义相同。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+即使两个 Fragment 在逻辑上的 `Shape` 完全相同（例如逻辑形状同为 `(4, 1)`），也绝对不能相互替换，因为**Shape 仅仅代表几何维度，绝不代表硬件底层的线程—值映射契约（Thread-Value Layout）**：
+1. **输入端口布线的物理不对称性**：
+   - GPU Tensor Core 在硅片物理电路上对矩阵乘法操作数 $A$（行输入）、$B$（列输入）以及累加器 $C$（输出）的输入端口排布是完全正交异构的；
+   - 针对操作数 $A$，某个线程持有的 4 个元素对应当前 Warp Tile 的某特定行切片；而针对操作数 $B$，同样的 4 个元素则可能代表完全不同的列切片；
+2. **静默数据计算崩溃**：
+   - CuTe 依靠其类型系统中的强类型 Layout 严格区分 `partition_A` 与 `partition_B` 生成的 Fragment。若强行通过类型擦除或裸指针指针互换，线程会把本应作为矩阵行权重的寄存器输入硬塞进列输入端口；
+   - 硬件指令照常发射，但各物理线程参与点积的矩阵坐标完全错位，计算得出的矩阵乘法结果彻底沦为数值垃圾，且没有任何硬件报错提示。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：更大 warp/CTA tile 提高复用，但寄存器 fragment 变大；K tile 还影响流水级和 shared memory。
+当遇到编译器提示寄存器溢出（Register Spill to Local Memory）时，**必须绝对优先缩减 $M_{\text{tile}}$ 或 $N_{\text{tile}}$**，而不是盲目缩减 $K_{\text{tile}}$：
+1. **寄存器物理生命周期（Liveness）的决定性差异**：
+   - **累加器 $C$ 的独占性与长寿命**：累加器张量 `rC` 的寄存器大小直接由输出分块面积决定（$\text{Size}(C) \propto M_{\text{warp\_tile}} \times N_{\text{warp\_tile}}$）。由于矩阵乘法需要在 $K$ 维上全局累加，**`rC` 占用的寄存器必须在整个 Kernel 执行生命周期内全程驻留**，编译器无法将其复用给任何其他变量；
+   - **操作数 $A$ 与 $B$ 的短寿命**：操作数寄存器 `rA` 和 `rB` 的大小虽然与 $K_{\text{tile}}$ 相关，但在每一轮 $K$ 迭代计算完成后，其持有的寄存器即可立刻被下一轮数据覆盖复用（或仅需极少量的双缓冲寄存器）；
+   - **结论**：缩减 $M_{\text{tile}}$ 或 $N_{\text{tile}}$ 能够以二次方的倍率直接压缩常驻累加器数量，是斩断寄存器溢出最立竿见影的手段；
+2. **决策时必须审查的核心性能剖析证据**：
+   - **编译期构建报告（`ptxas -v`）**：审查 `Spill stores` / `Spill loads` 的具体字节数，以及每个线程分配的物理寄存器总量（确认是否超过了 128 或 255 的架构硬限制）；
+   - **Nsight Compute (NCU) 内存图表**：检查 `Local Memory Overhead`。若发现高延迟 Local Memory 带宽占用了显著比例，证明 Spill 正在严重拖垮性能；
+   - **Shared Memory 与流水级深度**：审查当前 $K_{\text{tile}}$ 与 Pipeline Stage 深度是否已将 Shared Memory 挤满；如果为了削减寄存器而把 $K_{\text{tile}}$ 缩得过小，会导致收缩维度的循环步进轮次暴增，反而加剧指令发射瓶颈。
 
 ## 参考资料
 

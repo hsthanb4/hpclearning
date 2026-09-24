@@ -51,23 +51,44 @@ flowchart TD
 
 ### 1. 它是什么，解决什么问题
 
-Triton pointer tensor 与 value tensor 逐 lane 对应；load/store 接受同 shape mask。
+Triton 与传统 CUDA 在内存模型上的本质区别在于：CUDA 编写的是单个线程（Thread-level）的标量指针寻址与操作，而 Triton 编写的是以 Program 块为单位、针对向量/张量块（Block of Tensors）的指针与数据操作。
+在 Triton 的向量加法中，指针不再是一个标量地址，而是一个**指针张量（Pointer Tensor）**：`ptr + offsets`。它与值张量（Value Tensor）在维度和形状上一一对应。解决的核心工程问题是如何将高维张量在显存中的线性地址映射为硬件向量加载指令，并在非块大小整数倍的数据尾部通过谓词掩码（Predicate Mask）安全切断非法的内存读写，防止越界访存（Out-of-Bounds Memory Fault）。
 
 ### 2. 它如何工作
 
-同一 offsets/mask 加载 x/y，相加后写 out；Python wrapper 负责 shape、device、contiguous 契约。
+整个向量加法的数据流与控制流遵循紧密的协同契约（如 [图 2-1](file:///Users/wujie/hpclearning/triton/lesson02_vector_add.qmd) 与 [图 2-2](file:///Users/wujie/hpclearning/triton/lesson02_vector_add.qmd) 所示）：
+
+1. **主机端发射与网格映射**：Python Wrapper 校验张量形状、数据类型与内存连续性后，以 `grid = (cdiv(n, BLOCK),)` 发射 Kernel。每个 Program 分配唯一的 `pid = tl.program_id(0)`。
+2. **块级基准指针与偏移量生成**：
+   $$ \text{offsets} = \text{pid} \times \text{BLOCK} + \text{arange}(0, \text{BLOCK}) $$
+   生成的 `offsets` 是一维 1D 张量，与基地址张量 `x_ptr` 相加形成 128/256 个连续内存地址构成的指针张量。
+3. **谓词生成与带掩码的合并加载（Masked Coalesced Load）**：
+   $$ \text{mask} = \text{offsets} < n $$
+   执行 `xv = tl.load(x + offsets, mask=mask)` 和 `yv = tl.load(y + offsets, mask=mask)`。在硬件底层，Triton 编译器（基于 MLIR Triton Dialect）将连续指针降低为宽位宽的全局内存向量合并读取（如 128-bit `LDG.E.128`），对 `mask == False` 的 lane 则自动抑制内存事务或填入默认填充值（默认为 0.0）。
+4. **寄存器级 SIMD 加法与写回**：
+   向量寄存器块直接执行元素加法 `zv = xv + yv`，并在写回时再次施加 `mask`：`tl.store(out + offsets, zv, mask=mask)`。非法 lane 被硬件写屏蔽抑制，杜绝踩踏显存。
 
 ### 3. 正确性条件与常见误区
 
-两个输入 shape/dtype/device 必须兼容；不能把越界 load 的垃圾值带到有效 store。
+- **指针与掩码的形状对齐**：`tl.load` 和 `tl.store` 的 `mask` 形状必须与指针张量完全一致。如果加载时使用了掩码，但写回 `tl.store` 时遗漏了 `mask=mask`，尾部 Program 会将无效寄存器值写入相邻显存地址，引发严重的显存越界污染或未定义行为。
+- **连续性（Contiguity）契约**：上述一维线性偏移公式 `offsets` 假定张量在物理显存中是密集且连续分布的（`stride = 1`）。若传入切片或转置后的非连续张量（如 `x[:, 0]`），`x + offsets` 将直接跳跃跨越错误的步长，读取完全风马牛不相及的内存数据。
+- **类型与广播安全**：两输入张量的 dtype 必须严格匹配；若混合 `fp16` 与 `fp32`，必须显式调用 `x.to(tl.float32)`，否则在 JIT 编译期会报类型不匹配错误。
 
 ### 4. 性能与工程取舍
 
-逐元素算子受带宽限制，融合相邻算子通常比调 BLOCK 收益更大。
+- **访存带宽受限（Memory Bound）与算子融合**：
+  向量加法的算术强度（Arithmetic Intensity）极低：每个元素完成 1 次浮点加法（1 FLOP），需要从显存读取 2 个数据并写回 1 个数据（对于 FP32 为 $3 \times 4 = 12$ 字节）。算术强度仅为 $\frac{1}{12} \approx 0.083 \text{ FLOP/Byte}$。在 A100/H100 等现代加速器上，算子性能完全卡死在 HBM 显存带宽上限。
+- **块大小（`BLOCK`）与硬件向量化对齐**：
+  `BLOCK` 应选择为 128、256、512 或 1024。必须保证为 32（Warp 大小）的倍数以维持合并访存（Memory Coalescing）。过小的 `BLOCK`（如 16）无法打满 GPU Warp 与内存总线带宽；过大的 `BLOCK`（如 4096）会增加寄存器压力，降低 Occupancy。
+- **融合的倍增收益**：若后续紧接 ReLU、GELU 或 Scale 等逐元素算子，在 Triton 中直接在寄存器层完成 `tl.maximum(xv + yv, 0.0)`，可彻底消除一整次显存写出和重新读取，直接减少 50% 的全局显存带宽开销。
 
 ## 具体演示
 
-n=513 时 3 个 256-lane programs，最后只用 1 lane。
+以 $n = 513$、$\text{BLOCK} = 256$ 为例：
+- 网格大小：$\lceil 513 / 256 \rceil = 3$ 个 Program 实例。
+- **Program 0** (`pid=0`)：处理索引 $[0, 255]$，$\text{mask}$ 全为 True。发射全宽合并访存。
+- **Program 1** (`pid=1`)：处理索引 $[256, 511]$，$\text{mask}$ 全为 True。发射全宽合并访存。
+- **Program 2** (`pid=2`)：处理索引 $[512, 767]$。仅第 0 个 lane（索引 512）的 $\text{mask}$ 为 True，其余 255 个 lane 的 $\text{mask}$ 全部为 False。硬件安全读取单个标量，计算后仅写回第 512 位，剩余 255 个 lane 被硬件抑制，保证绝对内存安全。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -169,15 +190,28 @@ for n in (1, 513, 8193):
 
 ### Q1 参考答案
 
-同一 offsets/mask 加载 x/y，相加后写 out；Python wrapper 负责 shape、device、contiguous 契约。
+从三个阶段拆解其运行机制：
+1. **输入阶段（地址生成与指针绑定）**：Python 调度层将张量首地址传递给 Kernel，Program 块依据自身的 `program_id` 与步长网格计算出长度为 `BLOCK` 的线性偏移向量 `offsets`，生成并发的物理内存指针 `x + offsets` 和 `y + offsets`，并生成边界保护布尔掩码 `mask = offsets < n`。
+2. **状态变化阶段（向量合并加载与 SIMD 计算）**：内存控制器在 `mask` 保护下执行宽位宽合并读取，将显存数据搬运至片上寄存器文件 `xv` 和 `yv`。随后 SM 执行单元在寄存器层直接执行单指令多数据（SIMD）浮点向量加法运算，产生输出寄存器张量 `zv = xv + yv`。整个过程数据始终停留在高速寄存器内，不经过共享内存。
+3. **输出阶段（带掩码写回与流同步）**：通过 `tl.store` 配合相同的 `mask` 谓词，将计算结果原子化写回全局显存 `out + offsets`。未击中掩码的无效 lane 被硬件写屏蔽抑制，防止越界踩踏。所有 Program 块无需任何全局同步壁垒，各自独立退役。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：两个输入 shape/dtype/device 必须兼容；不能把越界 load 的垃圾值带到有效 store。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+在 PyTorch 中，张量是“元数据（Storage Offset, Shape, Strides）+ 底层一维连续存储区（Storage）”的抽象。
+若未在 Python Wrapper 中检查 `x.is_contiguous()`，当用户传入非连续张量（例如对二维张量做转置切片 `x = raw_tensor.t()` 或列步长不为 1 的切片 `x = raw_tensor[:, ::2]`）时：
+Triton 内核中的一维寻址逻辑 `x + offsets` 隐式假定了底层存储是连续的一维数组（物理步长恒为 1）。由于非连续张量的内存逻辑索引与物理偏移之间存在跨步映射（$\text{offset} = \text{row} \times \text{stride}[0] + \text{col} \times \text{stride}[1]$），一维线性相加 `x + offsets` 会直接按照原始物理地址顺次读取，导致行与列之间的数据交错错位，读取到完全风马牛不相及的脏数据，彻底破坏计算正确性。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：逐元素算子受带宽限制，融合相邻算子通常比调 BLOCK 收益更大。
+1. **未融合时的访存开销**：
+   - 独立加法算子 `add(x, y)`：读 $x$（$N$ 元素）、读 $y$（$N$ 元素）、写临时张量 $t$（$N$ 元素）$\to$ 访存量 $3N$。
+   - 独立激活算子 `relu(t)`：读临时张量 $t$（$N$ 元素）、写最终结果 $out$（$N$ 元素）$\to$ 访存量 $2N$。
+   - 总访存数据量为 $5N$ 个元素，且需要额外分配显存保存中间张量 $t$。
+2. **算子融合后的访存开销**：
+   - 融合内核 `out = tl.maximum(xv + yv, 0.0)`：直接在寄存器中对加法结果执行最大值比较，随后立即写回 $out$。
+   - 仅需读 $x$（$N$ 元素）、读 $y$（$N$ 元素）、写 $out$（$N$ 元素）$\to$ 总访存数据量仅为 $3N$。
+3. **收益量化**：
+   中间临时变量 $t$ 完全不落全局显存（HBM），读写量减少了 $\frac{5N - 3N}{5N} = 40\%$，显存带宽压力直接降低 $40\%$，且节省了 $N \times \text{sizeof(dtype)}$ 的临时显存占用，避免了二次 Kernel 启动开销。
 
 ## 参考资料
 

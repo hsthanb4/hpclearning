@@ -62,23 +62,53 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-MLIR 的统一节点是 Operation；Module、函数、循环都通过 operation 嵌套 region/block 表达，多结果 SSA 连接数据流。
+在现代异构编译基础设施中，传统编译器的中间表示（如 LLVM IR）以一维指令流与基本块（Basic Block）CFG 为中心，虽然极其适合底层标量优化与机器码生成，但丢失了高层张量算子结构、循环多面体多维嵌套以及硬件特定语义。
+为了统一从高层图计算（PyTorch / TensorFlow / JAX）到底层 GPU / NPU 汇编的全栈表示，**MLIR（Multi-Level Intermediate Representation）**提出了彻底递归正交的层次化抽象：
+整个编译世界由一个统一的核心原语构成——**Operation（操作）**。
+顶层模块（`builtin.module`）、函数（`func.func`）、仿射循环（`affine.for`）、结构化条件控制（`scf.if`）以及基本算术计算（`arith.addi`），在 MLIR 统一对象模型中全部是 Operation！
+本课解决的核心工程问题是：**理解 Operation、Region、Block 与 SSA（静态单赋值）的递归嵌套树状结构，掌握基于 Block Argument 的现代无 $\phi$ 节点控制流，以及手写符合 MLIR 验证器（Verifier）严密契约的语法树**。
 
 ### 2. 它如何工作
 
-operation 消费 operands，产生 SSA results；region 含 blocks，block arguments 表达控制流入口值，terminator 结束 region。
+MLIR 递归嵌套层次与内存验证流程如图 1-1 与图 1-2 所示：
+
+1. **统一递归包含层次（Operation Tree）**：
+   $$ \text{Operation} \longrightarrow \text{Region} \longrightarrow \text{Block} \longrightarrow \text{Operation} $$
+   - **Operation**：语义执行单元。它可以拥有 0 或多个操作数（Operands）、产生 0 或多个静态单赋值返回值（SSA Results）、绑定一组编译期属性（Attributes）、拥有特定类型（Types），并嵌套 0 或多个 Region。
+   - **Region**：封装一个局部的控制流与局部作用域容器。例如 `func.func` 的函数体是一个 Region，`scf.if` 的 then/else 分支各是一个 Region。
+   - **Block**：Region 内部的基本块（如 `^bb0`）。Block 包含线性排列的 Operation 列表，并强制以终止操作（Terminator Operation，如 `func.return`、`scf.yield` 或 `cf.br`）结尾。
+2. **消灭 $\phi$ 节点的 Block Arguments（块参数控制流）**：
+   在传统 LLVM IR 中，基本块汇聚控制流必须依赖 $\phi$ 节点（Phi Node），这极易在优化 Pass 移动指令时产生隐蔽的悬空引用 Bug。
+   MLIR 革命性地废弃了 $\phi$ 节点，转而采用类似函数调用的**块参数（Block Arguments）**：每个 Block 可以声明参数列表（如 `^bb1(%x: i32):`），上游块通过跳转指令 `cf.br ^bb1(%val)` 显式传参。
+3. **文本解析与语义验证（Verifier Pipeline）**：
+   如图 1-2 所示，文本源码经过 `AsmParser` 词法/语法解析生成内存中的 Operation AST。随后进入 `verify()` 阶段：验证所有操作数的类型、属性的合法性、支配关系（Dominance）、以及终止操作与外层 Region 的类型签名匹配。
 
 ### 3. 正确性条件与常见误区
 
-SSA 值必须先定义后使用且类型精确匹配；每个 region 的 terminator 和 symbol 可见性规则必须满足。
+- **SSA 值的严格支配约束（Dominance Invariant）**：
+  在同一个 Block 或存在嵌套关系的 Region 中，SSA 值必须**先定值（Definition），后使用（Use）**。这不仅是文本的书写顺序，更是支配树（Dominance Tree）的物理拓扑约束。未定义的 SSA 值无法通过符号绑定，会直接触发 `use of undeclared SSA value` 诊断错误。
+- **孤儿块与终止指令缺失（Missing Terminator）**：
+  每个基本块（Block）的最后一条操作必须是具备 `IsTerminator` Trait 的终止操作。若遗漏 `func.return` 或 `scf.yield`，Verifier 会抛出 `block must end with a terminator` 语法校验失败。
+- **Region 隔离与符号可见性（IsolatedFromAbove Trait）**：
+  拥有 `IsolatedFromAbove` 特征的操作（如 `func.func`、`builtin.module`）其内部 Region 是完全封闭的，**绝对不能直接捕获外层作用域的 SSA 变量**。任何外部数据必须显式通过参数传递进入。
 
 ### 4. 性能与工程取舍
 
-结构化 region 便于高层变换，但比线性三地址码多一层嵌套；打印 generic form 有助于消除语法糖误解。
+- **结构化控制流（Structured Control Flow）的分析优势**：
+  MLIR 倡导在前端阶段保留结构化控制流（如 `scf.if`、`scf.for`、`affine.for`），其循环边界和条件分支作为 Operation 的属性或操作数显式存在。这使得循环展开、仿射多面体变换、并行化分析极为简明，避免了过早将循环打散成 CFG 跳转图后导致难以逆向分析控制流拓扑。
+- **内存树开销 vs 表达力**：
+  相比于扁平线性的传统三地址码，MLIR 在内存中维护的是一颗深度嵌套的 C++ 指针树（每个 Operation 包含 Operand 链表、Result 数组与 Region 向量）。这带来了一定的内存常数开销，但为多层级 Dialect 逐步降级（Lowering）提供了无可替代的灵活性。
 
 ## 具体演示
 
-`%0 = arith.addi %a,%b : i32` 中 `%0` 是 result，`%a/%b` 是 operands，`arith.addi` 无 region。
+以文本指令 `%sum = arith.addi %a, %b : i32` 为例：
+- **Operation 标识**：`arith.addi`（隶属于算术方言 `arith` 的整数加法操作）。
+- **Operands**：`%a` 与 `%b`，必须为合法的 SSA 值且类型均为 `i32`。
+- **Result**：产生唯一的 SSA 变量 `%sum`，类型为 `i32`。
+- **Generic 展开形式**：
+  该语句的语法糖底层完全等价于通用规范形式：
+  `"arith.addi"(%a, %b) : (i32, i32) -> i32`
+  通用格式暴露了 MLIR 一切皆 Operation 的统一内存模型本质。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -150,15 +180,35 @@ module {
 
 ### Q1 参考答案
 
-operation 消费 operands，产生 SSA results；region 含 blocks，block arguments 表达控制流入口值，terminator 结束 region。
+从三个阶段拆解其运行机制：
+1. **输入阶段（操作数解析与局部作用域绑定）**：调用方将输入张量/标量绑定到函数或基本块参数（Block Arguments，如 `%a: i32, %b: i32`）。外层 Operation（如 `func.func`）开辟包含入口 Block `^bb0` 的 Region 局部作用域，建立局部 SSA 符号表。
+2. **状态变化阶段（Operation 序列求值与 SSA 链条传递）**：顺序执行 Block 内的 Operation 序列。每个 Operation 消费上游的 SSA 操作数（Operands），根据自身语义规则（如 `arith.addi` 执行补码加法）计算并产生全新的强类型 SSA 结果变量（Results，如 `%sum`）。数据流严格沿着由 Def-Use 边构成的有向无环图流动，中间状态不可变。
+3. **输出阶段（终止操作截断与 Region 结果向上回传）**：Block 的最后一条指令必须是 Terminator 操作（如 `func.return %sum : i32`）。终止操作捕获当前的 SSA 状态，验证返回类型与函数外层签名的严格一致性，随后将控制流和计算结果移交给调用方，退出当前 Region。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：SSA 值必须先定义后使用且类型精确匹配；每个 region 的 terminator 和 symbol 可见性规则必须满足。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+在 SSA（静态单赋值）语义和编译器数据流分析中，在定值之前使用变量绝对不只是简单的代码文本行数先后问题，而是触碰了编译器的核心代数不变式：
+1. **支配性（Dominance）与因果链崩溃**：SSA 的核心形式化基础是**支配性（Dominance）**——定义点必须在控制流图（CFG）中严格支配（Dominate）所有的使用点。如果在使用点之前该变量尚未被定义，意味着存在一条控制流路径使得该变量未经初始化就被读取，在物理机器上对应读取未初始化的悬空寄存器或脏内存。
+2. **数据流依赖（Def-Use Chain）的不可构造性**：MLIR 在构建内存 IR 树时，每个 SSA Value 维护着一条引用它的 User 双向链表。若在使用时尚无定义实体，编译器无法绑定操作数的来源指针，无法进行常量折叠、活性分析（Liveness Analysis）以及寄存器生命周期分配，直接破坏编译器的数据结构完整性。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：结构化 region 便于高层变换，但比线性三地址码多一层嵌套；打印 generic form 有助于消除语法糖误解。
+在 MLIR 中，表达 `if-else` 双分支均产生返回值有两种标准范式，其中现代高层 MLIR 最推崇**结构化控制流（SCF: Structured Control Flow）**：
+1. **结构化控制流范式（`scf.if`）**：
+   `scf.if` 操作自身直接产生 SSA 返回值，then 和 else 分支 Region 各自以 `scf.yield` 将分支内计算的值传出：
+   ```mlir
+   %res = scf.if %cond -> (i32) {
+     %val1 = arith.constant 1 : i32
+     scf.yield %val1 : i32
+   } else {
+     %val2 = arith.constant 2 : i32
+     scf.yield %val2 : i32
+   }
+   ```
+   此种结构下完全不需要 $\phi$ 节点，数据流与控制流高度结构化闭环。
+2. **底层 CFG 块参数范式（`cf.cond_br` + Block Arguments）**：
+   在降级到底层控制流方言时，通过条件跳转进入两个分支 Block，两个分支在汇合块 `^merge(%phi_val: i32)` 处通过显式 Block Argument 传参：
+   `cf.br ^merge(%val1 : i32)` 与 `cf.br ^merge(%val2 : i32)`。
 
 ## 参考资料
 

@@ -58,23 +58,53 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-Dialect 是可组合 IR 词汇表；Type 描述 SSA 值的类别，Attribute 是编译期常量/配置，Interface 提供不依赖具体 op 名的能力契约。
+在传统的单一中间表示（如 GCC GIMPLE 或 LLVM IR）中，所有的优化分析都被迫适配在同一套封闭固化的指令集和类型系统上，导致上层领域特定（Domain-specific）语义在过早降级中被永久抹杀。
+MLIR 提出了模块化、可无限扩展的**Dialect（方言）**生态系统。每个 Dialect 是一组语义自洽、命名隔离的 IR 词汇表（如 `arith` 负责算术、`linalg` 负责线性代数、`memref` 负责显式物理内存、`llvm` 负责底层硬件映射）。
+在 Dialect 内部，四大核心正交正规化概念支撑起整个语义大厦：
+- **Type（类型）**：描述 SSA 变量的物理/抽象取值范围与数学类别（如 `tensor<2x?xf32>`, `f32`, `i64`）。
+- **Attribute（属性）**：挂载在 Operation 上的**编译期已知静态常量或元数据配置**（如张量维度的静态排布、浮点常量数值、轴向索引 `{axis = 1 : i64}`）。
+- **Interface（接口）**：跨 Dialect 的通用行为契约（如 `MemoryEffectOpInterface` 描述副作用、`InferTypeOpInterface` 描述形状推导）。
+本课解决的核心工程问题是：**深刻辨析 Type 与 Attribute 的物理分界，理解 Dialect 命名隔离机制，以及如何利用 Interface 实现跨方言的解耦多态分析与优化**。
 
 ### 2. 它如何工作
 
-parser 根据 `dialect.op` 找定义；operation verifier 检查 operand/result/type/attribute 约束，interfaces 让 pass 对一组 op 统一工作。
+多方言协同与 OpInterface 动态多态分发流程如图 2-1 与图 2-2 所示：
+
+1. **方言前缀路由与语法解析**：
+   MLIR 源码以 `dialect.op`（如 `arith.constant`、`linalg.matmul`）为唯一标识。解析器 `AsmParser` 依据方言前缀路由到对应的 C++ 方言定义，构建 Operation 节点。
+2. **Type 与 Attribute 的正交约束**：
+   - SSA 值（Value）严格绑定单一 Type，运行时数据在 SSA 管道中流转；
+   - 属性（Attribute）直接嵌入 Operation 的存储字典中，无需任何 SSA 依赖。
+   - 例如语句 `%c = arith.constant dense<[1.0, 2.0]> : tensor<2xf32>` 中，`dense<[1.0, 2.0]>` 是一个属性实例（`DenseElementsAttr`），作为常量的字面值载荷；而 `tensor<2xf32>` 是 Type，约束 `%c` 的静态形状与元素类型。
+3. **接口动态查询与多态分发（Interface Dispatch）**：
+   如图 2-2 所示，优化 Pass 在遍历 IR 时，绝不需要使用硬编码的 `if (op->getName() == "xxx")`。
+   Pass 通过 C++ RTTI 模式进行概念建模：`if (auto memOp = dyn_cast<MemoryEffectOpInterface>(op))`。
+   若该 Operation 实现了该接口，则直接调用接口方法查询其是否具有内存读写副作用，从而将 DCE（死代码消除）或 CSE（公共子表达式消除）算法与具体 Dialect 的具体 Op 完全解耦。
 
 ### 3. 正确性条件与常见误区
 
-不能把运行时 SSA 值塞进 attribute；未知 dialect 是否允许取决于工具注册与选项，验证通过也不代表语义已实现。
+- **运行时数据与编译期属性的混淆（Attribute vs SSA Value）**：
+  Attribute 的值必须在**编译期是完全已知且不可变的字面常量**。若张量的维度或步长是由输入数据的运行时计算决定的（例如根据网络包大小动态决定的 `batch_size`），该数值必须以 SSA Value（`index` 或 `i64` 类型操作数）传递，绝对不能试图塞入编译期的 Attribute 中。
+- **动态维度标记（Dynamic Dimension `?`）**：
+  在静态类型中，未知维度用 `?` 表示（如 `tensor<?x128xf32>`）。动态维度的真实尺寸必须在运行时通过 `tensor.dim` 等操作动态获取为 SSA 值。
+- **未注册方言与语义空洞（Unregistered Dialect Trap）**：
+  若在 `mlir-opt` 中开启 `-allow-unregistered-dialect`，编译器允许解析任何任意前缀的未知 Op（如 `foo.bar`）。但此时该 Op 不具备任何 Verifier 校验规则、无法执行 Interface 查询，只能作为黑盒语法树节点存在。
 
 ### 4. 性能与工程取舍
 
-高层专用 type 保留语义、利于优化；过早降成 memref/LLVM pointer 会丢失 shape 与别名信息。
+- **高层抽象类型保留 vs 过早降级（Lowering Timing）**：
+  保留高层类型（如 `tensor<4x16xf32>`）能够完整携带张量的高阶数学代数语义，使得切片融合、转置消除、分块 Tiling 等高层图优化极易进行；
+  若过早将 `tensor` 降级为带物理步长的 `memref` 或底层 `llvm.ptr` 指针，指针别名（Aliasing）与扁平物理跨步会使编译器无法再恢复高维几何形状，造成严重的优化阻断。
+- **Interface 虚表分发开销**：
+  Interface 底层通过类似 C++ Concept 或轻量级虚表分发实现。虽然有极轻微的寻址开销，但相比于硬编码匹配，它换来了整个编译器架构极高的可维护性与正交扩展性。
 
 ## 具体演示
 
-`tensor<4x?xf32>` 是 type；`{axis = 1 : i64}` 中 axis 是 attribute；动态维度大小仍由 SSA 值携带。
+以 `%c = arith.constant dense<[1.0, 2.0]> : tensor<2xf32>` 为例：
+- `arith`：方言命名空间，避免与其它自定义方言的 `constant` 命名冲突。
+- `dense<[1.0, 2.0]>`：DenseElementsAttr 属性，在编译器内存中以紧凑字节数组高效存储常量数据。
+- `tensor<2xf32>`：RankedTensorType，静态声明该张量阶数为 1，长度为 2，元素为 32 位浮点数。
+- 若将返回值错误声明为 `tensor<3xf32>`，MLIR Verifier 在构建期会立即捕获类型与属性形状不匹配的断言，从编译前端杜绝非法张量。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -146,15 +176,26 @@ module {
 
 ### Q1 参考答案
 
-parser 根据 `dialect.op` 找定义；operation verifier 检查 operand/result/type/attribute 约束，interfaces 让 pass 对一组 op 统一工作。
+从三个阶段拆解其运行机制：
+1. **输入阶段（方言命名空间解析与静态属性绑定）**：Parser 遇到以命名空间隔离的 Operation 字符串（如 `arith.constant`），将其路由至已在 `MLIRContext` 注册的方言模块。解析器解析挂载的编译期常量属性字典（如 `dense<[1.0, 2.0]>`），验证属性语法并存入 Operation 内部。
+2. **状态变化阶段（类型验证与接口多态判定）**：Operation 实例化后调用自身的 `verify()` 逻辑，严格验证操作数类型、属性类型与结果类型三者间的静态约束契约（例如检查 DenseElementsAttr 的元素个数是否严格等于目标 RankedTensorType 的形状容量）。在此期间，Pass 框架可通过 `dyn_cast<OpInterface>` 动态探测并调用该 Operation 实现的能力，完成类型推导或副作用标记。
+3. **输出阶段（SSA 强类型赋值与 Def-Use 节点注入）**：Operation 生成绑定了严格 Type（如 `tensor<2xf32>`）的全新 SSA 变量 `%c`。该 SSA 变量被正式注册进编译器的 Def-Use 依赖链条中，作为强类型操作数供给下游 Operation 安全使用。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：不能把运行时 SSA 值塞进 attribute；未知 dialect 是否允许取决于工具注册与选项，验证通过也不代表语义已实现。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+在编译原理与系统体系结构中，“编译期元数据（Attribute）”与“运行时数据（SSA Value）”具有本质不可逾越的边界：
+1. **执行时机的根本矛盾**：Attribute 的生命周期是在编译器运行阶段（Compile-Time），其值必须由编译器在编译生成二进制机器码时就完全知晓并固化在指令或只读数据段中。而动态 Shape（如变长 Prompt 的序列长度、动态 Batch 大小）的真实数值只有当程序部署在真实硬件上被具体数据触发执行时（Runtime）才会诞生。
+2. **内存分配与参数依赖**：如果动态 Shape 的具体大小是基于前序算子的计算结果（例如 `torch.nonzero` 或动态掩码过滤出的有效元素个数），该尺寸本身就是一个必须通过 GPU 寄存器或显存传递的 SSA Value。试图将运行时才能确定的值写成编译期静态 Attribute，在因果律上无法实现。因此在 MLIR 中，动态维度在 Type 中标注为 `?`，而其具体的整数维度必须以 SSA Value 形式通过操作数动态传递。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：高层专用 type 保留语义、利于优化；过早降成 memref/LLVM pointer 会丢失 shape 与别名信息。
+在构建新领域 Dialect 时，复用 Builtin Type 还是创建 Custom Type 的决策矩阵如下：
+1. **必须复用 Builtin Type（如 `f32`, `i32`, `tensor`, `memref`）的场景**：
+   - 当数据的底层物理语义、位宽或多维数组排布与标准体系完全兼容时；
+   - 当希望无缝复用 MLIR 上游已有的海量标准 Pass（如 `arith` 基础代数优化、`tensor-bufferization` 内存分配、`linalg` 分块融合）时。如果自定义了私有 Tensor 类型，上游的所有标准化优化管道将全部失效。
+2. **必须创建自定义 Custom Type 的场景**：
+   - **领域特定抽象（Domain Invariants）**：当类型携带现有 Builtin 无法表达的核心不变式时（例如量化模型中的非均匀量化标尺类型、通信拓扑中的分布式通信器句柄 `!mpi.comm`、硬件专有的寄存器片段布局 `!nvgpu.warp_matrix`）；
+   - **语义隔离与类型安全**：防止类型混用导致的静默错误，通过自定义 Type 强制要求调用方使用专用的转换算子显式转换，在编译前端拦截非法数据流。
 
 ## 参考资料
 

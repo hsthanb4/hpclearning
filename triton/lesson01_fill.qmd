@@ -51,25 +51,64 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-Triton 的 program 类似一个向量化 CTA：一个 program 同时处理 BLOCK 个 lane，而不是显式写单线程代码。
+**Triton 编程范式（Program、Block 与 Mask）** 彻底颠覆了传统 CUDA C++ 基于单线程（SIMT Thread-level）的手工繁琐编程，开启了基于 **分块级单程序多数据（Block-level SPMD）** 的现代 GPU 算子开发新纪元。
 
-### 2. 它如何工作
+**CUDA SIMT 痛点 vs. Triton 块级抽象（结合图 1-1 与图 1-2）**：
+- **传统 CUDA 的心智负担**：开发者必须在脑海中手动折算“Warp 内 32 个线程的交错排布、寄存器 Bank Conflict、Shared Memory Padding”，极易出错；
+- **Triton 的分块心智模型（图 1-1）**：
+  - 开发者编写的代码不是针对“单个线程”，而是针对一个 **Program 实例（相当于 CUDA 的一个 CTA / ThreadBlock）**；
+  - 变量不是单个标量，而是**多维向量/块张量（Block of Data）**，例如 `tl.arange(0, BLOCK)` 一次性声明了一个长度为 `BLOCK` 的向量切片；
+  - 编译器（Triton-MLIR 编译器）自动负责将其映射到底层的物理 Warp、分配通用寄存器与 Tensor Core 指令；
+- **边界防御武器：Mask（图 1-2）**：真实世界的数据规模 $N$ 极少能被 2 的幂次分块大小（如 128、256）整除。Triton 强制引入条件布尔掩码（Mask），在硬件层面彻底掐灭尾部越界访问。
 
-`program_id` 选择块，`arange` 生成 lane，mask 保护最后一个非完整块；grid 决定 program 数。
+### 2. 它如何工作（结合图 1-1 与图 1-2）
+
+以一维数组填充操作（Fill Kernel）为例，执行流程如下：
+1. **全局网格调度（Grid Launch）**：
+   - 算法通过天花板除法确定启动的 Program 实例总数：$\text{grid} = \lceil N / \text{BLOCK} \rceil$；
+   - 每个 Program 拥有全局唯一的身份标识 `pid = tl.program_id(0)`；
+2. **块级指针向量代数（图 1-1）**：
+   - 基础偏移量：当前 Program 的起始全局索引为 $\text{start} = \text{pid} \times \text{BLOCK}$；
+   - 向量下标生成：`offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)`；
+   - 此时 `offsets` 是一个在各 Lane 上均匀递增的 1D 整数向量：$[\text{start}, \text{start}+1, \dots, \text{start}+\text{BLOCK}-1]$；
+3. **谓词掩码解算与边界防御（图 1-2）**：
+   - 生成布尔向量掩码：`mask = offsets < N`；
+   - 对前部的完整块，`mask` 全为 `True`；而在最后一个尾块中，超出真实长度 $N$ 的尾部槽位自动被置为 `False`；
+4. **安全向量写入（`tl.store`）**：
+   - 执行 `tl.store(out + offsets, value, mask=mask)`；
+   - 编译出的底层汇编指令自动带有 `@p` 谓词保护，越界槽位的写入被 GPU 内存子系统硬件级自动过滤抑制。
 
 ### 3. 正确性条件与常见误区
 
-所有可能越界的 load/store 都要 mask；运行时标量不应无故设为 constexpr。
+1. **尾部 Program 越界写入引发静默内存撕裂**：
+   - **致命误区**：在分配了 `cdiv(N, BLOCK)` 个 Program 的情况下，若省略 `mask=mask`；
+   - **因果必然**：最后一个 Program 必定会向 $[N, \text{grid} \times \text{BLOCK})$ 的未知非法区域强行写入数据，直接踩踏 PyTorch 显存池中属于其他张量的活跃内存，造成不可逆的脏数据污染；
+2. **`constexpr` 误用引发编译风暴（Cache Thrashing）**：
+   - 很多初学者误把运行时动态传入的浮点标量（如 `value`）标记为 `tl.constexpr`；
+   - **严重后果**：Triton 会把所有 `constexpr` 的具体取值作为 JIT 编译特化的缓存 Key！若传入不同的数值，Triton 每次都会被迫重新触发完整的 Python-to-PTX 编译耗时（数十毫秒到数秒），导致严重的运行时卡顿。
 
-### 4. 性能与工程取舍
+### 4. 性能与工程取舍（Block 尺寸与 JIT 调优）
 
-BLOCK 越大减少 program 数但提高寄存器/编译压力；先正确再 autotune。
+1. **BLOCK 尺寸的权衡艺术**：
+   - **过大 BLOCK（如 1024/2048）**：单个 Program 所需寄存器文件急剧膨胀，容易引发寄存器溢出（Spill），且在数据量小的时候无法激活足够的 SM 核心；
+   - **过小 BLOCK（如 16/32）**：无法打满 GPU 的 128 字节合并访存事务，指令发射开销过高；
+   - **工业标准**：通常将 BLOCK 设置为 2 的整数次幂（128、256 或 512），并通过 `@triton.autotune` 自动化搜索最优组合。
 
-## 具体演示
+## 具体演示：尾块物理槽位与掩码过滤实证
 
-n=10000、BLOCK=256 时 grid=40，最后 program 只有 16 个有效 lane。
-
-请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+考虑数据规模 $N = 10000$，分块尺寸 $\text{BLOCK} = 256$：
+- **Program 划分**：
+  $$\text{grid} = \lceil 10000 / 256 \rceil = 40 \text{ 个 Program (ID 为 } 0 \sim 39\text{)}$$
+- **完全满载 Program（ID = $0 \sim 38$）**：
+  - 每个 Program 覆盖 256 个元素；
+  - 累计已处理有效元素：$39 \times 256 = 9984$ 个元素；
+  - 对应的 `mask` 均为 256 个全 `True`。
+- **边界尾块 Program（最后一个 ID = 39）**：
+  - 起始偏移：$\text{start} = 39 \times 256 = 9984$；
+  - 向量下标范围：$[9984, 9985, \dots, 10239]$；
+  - 该块内有效数据数量：$10000 - 9984 = 16$ 个元素；
+  - 生成的掩码形态：前 16 个槽位为 `True`，后 $256 - 16 = 240$ 个槽位全部被精确置为 `False`！
+  - 硬件据此精准写入仅存的 16 个有效数字，其余 240 个非法显存地址被 100% 抑制，捍卫了系统边界完整性。
 
 ## 实践任务：唯一代码填空题
 
@@ -161,15 +200,37 @@ for n in (1, 257, 10000):
 
 ### Q1 参考答案
 
-`program_id` 选择块，`arange` 生成 lane，mask 保护最后一个非完整块；grid 决定 program 数。
+1. **输入阶段（Grid Partitioning & Block Offset Ingestion）**：
+   - 调度系统根据张量总长 $N$ 和分块大小 $\text{BLOCK}$，通过天花板除法 $\lceil N / \text{BLOCK} \rceil$ 启动对应数量的 Program 实例；
+   - 每个 Program 根据自己的唯一标识 `tl.program_id(0)` 计算所属瓦片的起始基准，并结合向量生成原语 `tl.arange(0, BLOCK)` 构造出覆盖整个 Block 的一维整数偏移张量 `offsets = pid * BLOCK + tl.arange(0, BLOCK)`；
+2. **状态变化阶段（Vectorized Predication Evaluation）**：
+   - Program 对整个偏移向量执行逐元素逻辑比较 `mask = offsets < n`，在寄存器中生成布尔条件张量；
+   - 内部满载的 Program 获得全为 True 的掩码；最后一个负责处理边界余数的 Program，超出 $n$ 的尾部槽位被精准置为 False；
+3. **输出阶段（Predicated Hardware Vector Store）**：
+   - 执行 `tl.store(out + offsets, value, mask=mask)`；
+   - Triton 编译器将其编译为底层带有 `@p` 谓词保护的 128 位向量写指令。仅有掩码为 True 的有效内存被安全写入目标数值，非法地址被硬件完全过滤抑制，零内存越界风险。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：所有可能越界的 load/store 都要 mask；运行时标量不应无故设为 constexpr。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+若在 `tl.store` 中删除了 `mask=mask`，越界访存会**精确发生在最后一个 Program 实例中（即 $\text{Program ID} = \lceil N / \text{BLOCK} \rceil - 1$）**，引发严重的内存破坏：
+1. **越界物理区间的数学定位**：
+   - 设总长度 $N = 10000$，$\text{BLOCK} = 256$。总计启动 $P = \lceil 10000 / 256 \rceil = 40$ 个 Program，编号为 $0 \sim 39$；
+   - 前 39 个 Program（$pid = 0 \dots 38$）处理的物理范围是 $[0, 39 \times 256) = [0, 9984)$，均严格落在有效区间 $[0, 10000)$ 之内，绝对不会越界；
+   - **唯一发生越界的实体是最后一个 Program（$pid = 39$）**：
+     该 Program 计算出的偏移量为 $[39 \times 256, 40 \times 256) = [9984, 10240)$；
+   - 其中合法索引仅有 $9984 \sim 9999$（共 16 个元素）；从索引 $10000$ 到 $10239$（整整 240 个浮点数、即 960 字节）全部属于未分配的非法越界内存；
+2. **毁灭性后果**：
+   - 若无 Mask 保护，这 240 个浮点数会强行写入显存，直接覆写 PyTorch 内存池中紧邻该张量的其他活跃权重、激活值或梯度数据，引发极难排查的静默数值错乱（Silent Data Corruption）或触发 `cudaErrorIllegalAddress` 崩溃。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：BLOCK 越大减少 program 数但提高寄存器/编译压力；先正确再 autotune。
+若将普通浮点数入参 `value` 错误地声明为编译期常量 `tl.constexpr`，会对 Triton 的 JIT 编译缓存体系造成**灾难性的编译风暴（Compilation Storm）与缓存击穿（Cache Bloat）**：
+1. **JIT 编译特化机制的核心原理**：
+   - 在 Triton 中，被标记为 `tl.constexpr` 的形参会被深度嵌入 AST 语法树，作为生成硬件 PTX 汇编时的常量字面量（Constant Folding），并且**其具体的数值会作为 JIT 编译缓存哈希 Key 的核心组成部分**；
+2. **连锁恶果（Cache Invalidation & Compilation Stutter）**：
+   - **频繁触发昂贵的重新编译**：当调用方传入不同的 `value`（例如第一次传 `3.25`、第二次传 `3.26`、第三次传 `0.0`），Triton 会判定函数签名发生了根本性变动，强制每次都退回 Python 解释器并调用 LLVM/MLIR 执行完整的全流程编译。单次 JIT 耗时通常在 50ms 到 1s 不等，使得原本微秒级的轻量 Kernel 发射瞬间卡死主线程；
+   - **磁盘与内存缓存无谓膨胀**：磁盘上的 `~/.triton/cache` 目录会被塞满成千上万个仅有单个常量数值不同、逻辑完全冗余的独立 `.so` / `.cubin` 二进制文件，造成严重的文件系统碎片化；
+3. **架构准则**：`tl.constexpr` 仅用于修饰影响代码展开与分块几何形状的元参数（如 `BLOCK_SIZE`、`NUM_STAGES`、数据类型枚举）；所有随业务数据动态波动的张量与标量数值，必须严格作为普通运行时参数传递。
 
 ## 参考资料
 

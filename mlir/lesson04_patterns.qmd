@@ -60,23 +60,56 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-Pass 决定遍历/阶段，RewritePattern 匹配局部 IR；PatternRewriter 记录替换，维护 def-use 与监听器不变量。
+在编译器优化与方言转换中，代码变换绝大多数可以形式化为“树/图局部重写（DAG Pattern Matching & Rewriting）”：识别一个局部的子图模式（如代数恒等式 $x + 0 \to x$、乘 0 折叠 $x \times 0 \to 0$、算子融合与降级），并将其原子化替换为一个更简明或更底层的子图。
+若采用传统手写嵌套循环遍历 AST，不仅代码极度臃肿，且在边遍历边修改 IR 时极易引发迭代器失效（Iterator Invalidation）与悬空指针。
+MLIR 提供了极其工业级、自动维护图拓扑不变式的核心引擎——**GreedyPatternRewriteDriver 与 PatternRewriter**。
+本课解决的核心工程问题是：**理解基于工作队列（Worklist）的不动点迭代（Fixed-Point Iteration）机制，掌握严格通过 `PatternRewriter` 纪律修改 IR 的防崩溃契约，以及设计严格单调递减度量消除重写死循环（振荡）**。
 
 ### 2. 它如何工作
 
-pattern 检查根 op 与额外条件，创建新 op 后 `replaceOp`；greedy driver 反复应用直到固定点或达到限制。
+贪心模式驱动器状态机与不动点收敛流程如图 4-1 与图 4-2 所示：
+
+1. **工作队列初始化与拓扑遍历**：
+   Pass 收集一组已注册的 `RewritePattern`，创建 `GreedyPatternRewriteDriver` 并将目标 Region 内的所有 Operation 压入工作队列（Worklist）。
+2. **模式匹配与原子重写（`matchAndRewrite`）**：
+   - 驱动器从 Worklist 中 Pop 出一个候选根节点 `op`；
+   - 按照预设的优先级（Benefit）从高到低依次尝试匹配注册的 Pattern；
+   - 若匹配成功，进入 `rewrite` 阶段。必须通过传入的 `PatternRewriter &rewriter` 执行修改，如：
+     `rewriter.replaceOp(op, newValues);`
+     `rewriter.eraseOp(op);`
+3. **监听器通知与连锁反应（Listener Notification & Re-queuing）**：
+   如图 4-1 所示，`PatternRewriter` 内部挂载了监听器（`RewriterListener`）。当执行 `replaceOp` 时：
+   - 驱动器自动将旧 `op` 的所有使用方（Users）、操作数的生产者以及新创建的 Operation 重新压回 Worklist；
+   - 因为替换旧节点可能使下游节点的某些代数化简条件瞬间满足（例如下游原本是 `y = addi(%0, 0)`，当 `%0` 被消除后，下游可能进一步化简）。
+4. **不动点收敛（Fixed-Point Convergence）**：
+   循环往复推进，直到 Worklist 彻底清空（达到 IR 不动点），或者达到预设的最大迭代次数上限（避免死循环），整个 Pass 顺利收敛退役。
 
 ### 3. 正确性条件与常见误区
 
-不能绕过 rewriter 直接 erase/replace 被管理的 op；A→B 与 B→A 会振荡，pattern 必须有单调度量。
+- **严禁绕过 Rewriter 直接调用底层指针 API（Direct Mutation Violation）**：
+  在 Pattern 内部**绝对严禁直接调用 `op->erase()` 或 `op->replaceAllUsesWith()`**！
+  因为底层指针被强行释放后，`GreedyPatternRewriteDriver` 的 Worklist 并不知道该节点已死。当驱动器后续尝试从 Worklist 访问该指针时，会直接触发野指针访问段错误（Use-After-Free Crash）。必须全部通过 `rewriter.eraseOp()` 或 `rewriter.replaceOp()` 通知监听器同步更新队列。
+- **重写振荡与死循环（Rewriting Oscillation）**：
+  若 Pattern A 将 $X$ 变换为 $Y$（例如将除法变为乘倒数：$a / b \to a \times (1/b)$），而 Pattern B 又将 $Y$ 变换回 $X$（将乘倒数合并为除法：$a \times (1/b) \to a / b$），两个 Pattern 会在同一个节点上反复交替命中并互相重排，导致 Worklist 永远无法清空，编译器彻底卡死在死循环中。
+- **单调性度量（Monotonicity Metric）**：
+  每个规范化 Pattern 必须具备明确的“单调性度量”（例如 Operation 总数严格减少、常量向右折叠排序、或类型层级单向降低），杜绝等价互换。
 
 ### 4. 性能与工程取舍
 
-小 pattern 易组合，但贪心结果受 benefit 与可匹配顺序影响；复杂全局优化可能需要专用算法。
+- **Benefit 优先级调优**：
+  每个 Pattern 具备一个 `PatternBenefit`（无符号整数）。Benefit 越高的 Pattern 会被优先尝试匹配。将计算代价小、收益明确的简单折叠（如常量消除）赋予高 Benefit，能大幅减少复杂大子图 Pattern 的无效匹配计算。
+- **局部贪心 vs 全局最佳（Greedy vs Global Dynamic Programming）**：
+  贪心驱动器寻找的是局部不动点，执行速度极快；但局部贪心替换可能会错失需要跨作用域全局收益评估的最优代码生成方案。对于复杂的内存布局选择或张量降级，往往结合专用图搜索或 Transform 方言控制。
 
 ## 具体演示
 
-`x+0→x` 减少 operation 数，是明显单调的 canonicalization；`x→x+0` 则破坏终止。
+以恒等式代数化简 `x + 0 -> x` 为例：
+- 输入 IR：`%1 = arith.addi %x, %c0 : i32`（其中 `%c0` 是常量 0）。
+- Pattern 命中：`op.getLhs()` 获取到 `%x`。
+- 执行重写：`rewriter.replaceOp(op, x);`。
+- 状态转移：所有原本消费 `%1` 的下游指令，其操作数指针被原子化无缝重定向（RAUW: Replace All Uses With）至 `%x`。
+- 清理与重入：旧的 `arith.addi` 指令被安全移出 AST 并析构；`%x` 的所有新旧使用者被重新压入 Worklist 触发连锁化简。
+- 单调性：Operation 节点总数净减 1，严格单调收敛，绝无反向膨胀可能。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -147,15 +180,29 @@ LogicalResult matchAndRewrite(arith::AddIOp op,
 
 ### Q1 参考答案
 
-pattern 检查根 op 与额外条件，创建新 op 后 `replaceOp`；greedy driver 反复应用直到固定点或达到限制。
+从三个阶段拆解其运行机制：
+1. **输入阶段（工作队列装载与模式优先级排序）**：Pass 将目标 Region 下的全部 Operation 压入 `GreedyPatternRewriteDriver` 的工作队列（Worklist），并将已注册的 RewritePattern 按照 `PatternBenefit` 严格从大到小建立决策树。驱动器以拓扑或逆序弹出待处理的候选 Operation。
+2. **状态变化阶段（受控匹配与监听器级联感知）**：对候选 Op 依次执行 Pattern 的 `matchAndRewrite`。一旦命中，所有 IR 拓扑修改严格通过 `PatternRewriter` 代理执行（如 `replaceOp`、`eraseOp`）。Rewriter 自动将旧结果的所有使用边重定向到新值，并在后台通知 Driver 监听器，将受影响的上游生产者与下游使用者重新加回工作队列。
+3. **输出阶段（不动点收敛与无缝移交）**：驱动器持续循环消化工作队列中的连锁反应。当队列完全清空且没有任何 Pattern 能够再次触发时，IR 状态达到数学意义上的“不动点（Fixed Point）”，驱动器验证无悬空引用后退出，将纯净、紧凑的高质量 IR 交付给后续编译阶段。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：不能绕过 rewriter 直接 erase/replace 被管理的 op；A→B 与 B→A 会振荡，pattern 必须有单调度量。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+在 `GreedyPatternRewriteDriver` 框架下，直接绕过 Rewriter 调用 `op.erase()` 会引发极其致命的内存与数据流不一致问题：
+1. **野指针悬空与内存段错误（Use-After-Free）**：
+   驱动器内部维护着包含待处理 Op 指针的工作队列（Worklist）与活跃节点哈希集合。若直接调用 `op.erase()`，C++ 底层堆内存被立即释放或回收；但驱动器完全未被通知，其队列中依然残留着该指针。在后续轮次驱动器从队列中取出该指针并调用虚函数时，会立即发生非法内存解引用，导致编译器崩溃。
+2. **破坏 Def-Use 链与图拓扑完整性**：
+   `rewriter.replaceOp()` 会负责把旧节点产生的所有 SSA Result 安全重定向给替代变量，然后再安排销毁。若直接 `op.erase()`，所有依赖该节点的下游操作数指针将直接悬空，破坏 SSA 形式的不变式。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：小 pattern 易组合，但贪心结果受 benefit 与可匹配顺序影响；复杂全局优化可能需要专用算法。
+消除两个逆向规范化规则振荡（Oscillation）的标准编译工程方法是**建立严格的全序单调性度量（Strictly Monotonic Order）**：
+1. **确立规范化单一黄金标准（Canonical Form）**：
+   编译器架构设计必须强制约定唯一的标准规范形式。例如，若规定乘加操作必须融合成 `fma(a, b, c)`，就绝对不能在同一个重写集合中注册将 `fma` 拆解回 `add(mul(a, b), c)` 的反向 Pattern。
+2. **设计不可逆的单调递减势函数（Potential Function）**：
+   若两个形式在不同场景下各有优势，必须引入严格的守卫条件（Guard Condition）。例如：
+   - 规则 A 仅当操作数可立即被常量折叠时才展开；
+   - 规则 B 仅当能消除重复子表达式时才合并；
+   保证 IR 在度量指标（如 Operation 总数、嵌套深度、或常量操作数按字典序严格向右放置）上沿着单向不可逆的有向无环图（DAG）演进，从而在数学上证明不动点必定在有限步内收敛。
 
 ## 参考资料
 

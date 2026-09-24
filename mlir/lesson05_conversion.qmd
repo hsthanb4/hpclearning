@@ -56,23 +56,55 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-Dialect Conversion 把合法性定义与 rewrite patterns 组合，用于系统性 lower 一个 dialect；它不仅是字符串替换。
+在多层级编译器设计中，方言降级（Dialect Lowering）是把高层抽象（如高层线性代数 `linalg` 或领域专用语言 `toy`）系统性转换到底层方言（如 `arith`、`memref`、`llvm`）的核心桥梁。
+简单的贪心 PatternRewrite 仅能处理局部的同构或弱类型替换；而当降级过程伴随着**全局类型系统剧烈变化（Type Conversion）**（例如将值语义的无副作用不可变 `tensor` 转换为具备物理内存指针与步长的可变 `memref`）时，贪心驱动器会因为类型不匹配、操作数签名失效与回滚机制缺失而崩溃。
+为此，MLIR 提供了工业级的形式化降级框架——**Dialect Conversion**。
+本课解决的核心工程问题是：**理解 Dialect Conversion 的三位一体核心（ConversionTarget、TypeConverter、ConversionPattern），掌握类型转换物化（Materialization）机制，以及辨析全量转换（Full Conversion）与局部增量转换（Partial Conversion）的工程边界**。
 
 ### 2. 它如何工作
 
-ConversionTarget 声明最终允许的 ops；TypeConverter 改签名和 SSA 类型，materialization 连接新旧类型；conversion patterns 完成操作替换。
+Dialect Conversion 目标判定与类型降级流程如图 5-1 与图 5-2 所示：
+
+1. **三位一体架构定义**：
+   - **`ConversionTarget`（合法性规范）**：声明哪些方言/Op 是合法的（Legal）、非法的（Illegal）或动态合法的（Dynamically Legal，例如仅当张量是一维时合法）。
+   - **`TypeConverter`（类型映射与物化）**：定义源类型到目标类型的转换规则（如 `addConversion([](TensorType t) -> MemRefType { ... })`），并提供源类型与目标类型之间的桥接物化函数（`addSourceMaterialization` / `addTargetMaterialization`，通常生成 `builtin.unrealized_conversion_cast`）。
+   - **`ConversionPattern`（带类型自适应的重写模式）**：通过特殊的 `adaptor` 参数获取已被自动转换为新类型的操作数，生成目标方言的新 Operation。
+2. **两阶段拓扑变换与类型物化（Two-Phase Commit）**：
+   - 第一阶段（匹配与试探转换）：驱动器遍历包含非法 Op 的 IR。每当 Pattern 生成新 Op 时，若操作数类型与新 Op 期望不符，驱动器自动插入类型转换投射（Cast）确保当前局部 IR 满足静态类型系统。
+   - 第二阶段（合法性全局检验与折叠）：转换完成后，驱动器运行内置折叠器消除成对产生的反向 Cast；随后扫描全局 IR，严格比对 `ConversionTarget`。
+3. **事务性提交与回滚（Transaction Commit/Rollback）**：
+   与贪心驱动器的即时原地破坏不同，Dialect Conversion 内部记录完整的修改事务日志。若在全量转换（`applyFullConversion`）结束时仍残留任何一个未被消除的 Illegal Op，整个转换过程将**原子化完全回滚（Rollback）**，保留原始 IR 并抛出硬错误，绝不产生破坏性的半死半生半降级 IR。
 
 ### 3. 正确性条件与常见误区
 
-full conversion 结束后所有 illegal op 必须消失；函数签名、block arguments 与 call sites 必须一致转换。
+- **全量转换的不变量（Full Conversion Post-Condition）**：
+  调用 `applyFullConversion(module, target, patterns)` 后，目标代码树中**绝对不允许存在任何被标记为 Illegal 的 Operation**，也不允许遗留无法被折叠消除的 `unrealized_conversion_cast`。若有一处分支或不常见算子遗漏了 Pattern，Pass 会直接报告转换失败。
+- **签名与块参数协同降级（Function Signature & Block Arguments）**：
+  若修改了算子的输入/输出类型，函数的函数签名（`func.func`）以及基本块入口参数（Block Arguments）必须同步注册针对性的签名转换模式（`populateFunctionOpInterfaceTypeConverter`），否则调用点与函数体将产生不可调和的类型割裂。
+- **动态合法性（Dynamically Legal）闭环死锁**：
+  若在 `target.addDynamicallyLegalOp<...>` 中设置了条件，但对应的 ConversionPattern 在转换后产生的新 Op 依然无法满足动态合法条件，会导致转换器尝试无尽转换或陷入失败。
 
 ### 4. 性能与工程取舍
 
-partial conversion 便于渐进迁移但可能留下混合 IR；full conversion 边界清晰却要求覆盖所有路径。
+- **`applyFullConversion` vs `applyPartialConversion`**：
+  - **Full Conversion（全量转换）**：保证严密的大步推进降级。适用于完整的阶段交接（例如将整个前端方言彻底抹除，进入中间端）。任何未覆盖的边缘情况都会被立即捕获，杜绝语义漏网之鱼；
+  - **Partial Conversion（局部增量转换）**：允许未被处理的 Illegal Op 暂时保留在 IR 中，允许存在合法的类型物化投射。适用于多方言渐进混合降级，或分多步 Pipeline 逐步消除高层语义。
+- **物化开销（Materialization Overhead）**：
+  若类型转换逻辑设计不良，会导致 IR 中散落大量未配对的 `unrealized_conversion_cast`，若后续没有 Pass 消费这些 Cast，将导致最终向 LLVM 生成机器码时抛出未实现指令错误。
 
 ## 具体演示
 
-把 toy.add lower 到 arith.addf 时，若 tensor type 也变为 memref，函数参数和使用者都需同步适配。
+以将自定义 `toy` 方言降级到 `arith` + `func` 为例：
+- 配置目标：
+  ```cpp
+  ConversionTarget target(ctx);
+  target.addLegalDialect<arith::ArithDialect, func::FuncDialect>();
+  target.addIllegalDialect<toy::ToyDialect>();
+  ```
+- 若输入 IR 包含 `%0 = toy.add %a, %b : tensor<2xf32>`：
+  - 目标已将 `toy` 整体宣称为 Illegal；
+  - 驱动器匹配到针对 `toy.add` 的降级 Pattern，将其替换为 `%sum = arith.addf %a, %b : tensor<2xf32>`；
+  - 若某个冷门算子 `toy.transpose` 遗漏了降级 Pattern，在 `applyFullConversion` 终检时检测到 `toy.transpose` 依然存在，立即报错并安全回滚。
 
 请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
 
@@ -142,15 +174,26 @@ if (failed(applyFullConversion(module, target, std::move(patterns))))
 
 ### Q1 参考答案
 
-ConversionTarget 声明最终允许的 ops；TypeConverter 改签名和 SSA 类型，materialization 连接新旧类型；conversion patterns 完成操作替换。
+从三个阶段拆解其运行机制：
+1. **输入阶段（合法性规范配置与类型注册）**：配置 `ConversionTarget` 显式圈定合法方言与非法方言白黑名单；配置 `TypeConverter` 建立源方言高阶类型到目标方言物理类型的映射关系与桥接物化函数；收集所有降级 `ConversionPattern`，以事务性驱动器启动转换。
+2. **状态变化阶段（类型自适应重写与事务性试探）**：驱动器遍历非法 Op，通过 Pattern 将其替换为目标方言的操作。期间若出现新旧类型不匹配，驱动器自动插入类型物化投射操作（如 `unrealized_conversion_cast`）维持操作数的强类型自洽，并将全部修改记录在内存事务日志中，保持数据流图在变换过程中的临时局部合法。
+3. **输出阶段（投射折叠、合法性全局终检验收与原子提交）**：转换完成后，驱动器运行对消重写消除成对出现的投射节点。随后对全局 IR 进行严格终检：若所有 Operation 与类型均严格满足 `ConversionTarget`（全量模式下无任何非法节点残留），则正式提交（Commit）修改；若存在任何未降级的非法节点，则完全回滚（Rollback）至初始状态并报错。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：full conversion 结束后所有 illegal op 必须消失；函数签名、block arguments 与 call sites 必须一致转换。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+在 MLIR 方言转换框架中，如果只向集合中注册了 `RewritePattern`，却**没有在 `ConversionTarget` 中将源方言明确标记为 Illegal**：
+1. **驱动器丧失降级驱动力（No Conversion Obligation）**：
+   Dialect Conversion 驱动器的工作逻辑是以“消灭所有被标记为 Illegal 或不符合 Dynamically Legal 条件的 Operation”为终极目标导向的。如果源方言没有被标记为 Illegal，驱动器会认为当前 IR 中的源方言算子已经是合法的最终状态，因此**完全没有必须对其执行匹配与重写的契约约束**。
+2. **静默漏转换与后续编译崩溃**：
+   驱动器在遍历时可能直接跳过部分甚至全部源算子。全量转换检查（`applyFullConversion`）会因为没有检测到任何非法算子而误判为成功退出。高层的源方言算子被原封不动地泄露到后续更底层的编译器阶段（如 LLVM 生成阶段），最终在硬件代码生成阶段因遇到未知的高层算子而爆发严重的无法降级错误，破坏了编译流水线的阶段隔离性。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：partial conversion 便于渐进迁移但可能留下混合 IR；full conversion 边界清晰却要求覆盖所有路径。
+在工业级编译器工程中，选择 Partial Conversion（局部增量转换）而非 Full Conversion（全量转换）的典型场景包括：
+1. **混合方言与渐进式分阶段降级（Multi-stage Incremental Lowering）**：
+   在复杂编译体系中（例如从包含前端高层图、控制流与线性代数的混合 IR 降级），某个 Pass 的职责仅仅是将张量计算 `linalg.matmul` 降级为仿射循环 `affine.for`，而故意保留外部的控制流（`scf.if`）和顶层函数（`func.func`）供后续 Pass 分析。此时若使用 Full Conversion，必须被迫一次性提供所有外层方言的降级规则，这破坏了 Pass 的单一职责原则（Single Responsibility Principle）。
+2. **部分算子硬件卸载（Heterogeneous Target Offloading）**：
+   针对异构加速芯片（CPU + NPU / GPU），编译器需要仅将具备 NPU 硬件加速能力的算子转换为 NPU 指令方言，而将不支持的复杂通用动态算子安全保留在 CPU 原生方言中。此时通过 Partial Conversion 允许两者合法共存，并通过插入桥接投射（Cast）维持模块级协同。
 
 ## 参考资料
 
