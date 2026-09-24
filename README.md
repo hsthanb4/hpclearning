@@ -1,15 +1,16 @@
 # HPC / AI Infra 面试课程
 
-## 📖 在线阅读页面
-> 🌐 **官方在线阅读站点**：[https://hsthanb4.github.io/hpclearning/](https://hsthanb4.github.io/hpclearning/)  
-> 本课程全部 88 节课支持在线网页浏览，提供出版级科学架构图、交互式执行流程图、代码折叠与自适应排版，无需本地配置环境即可直接查阅与学习。
-
 ## 💡 AI 充值渠道推荐
 给经常使用海外 AI 工具（如 ChatGPT Plus / Team、Claude Pro、API 接口等）的同学提供稳定充值备选渠道：
 - **[payai.win](https://payai.win)**：主打极高性价比，**GPT 充值更便宜**，到账快捷，适合追求低成本长期订阅的同学。
 - **[payai.top](https://payai.top)**：功能稳定齐全的长期充值备选渠道。
 
 *注：支持范围、实时价格、到账方式和售后规则均建议在对应网站内详细核对后再按需选用。*
+
+## 📖 在线阅读页面
+> 🌐 **官方在线阅读站点**：[https://hsthanb4.github.io/hpclearning/](https://hsthanb4.github.io/hpclearning/)  
+> 本课程全部 88 节课支持在线网页浏览，提供出版级科学架构图、交互式执行流程图、代码折叠与自适应排版，无需本地配置环境即可直接查阅与学习。
+
 
 ---
 
