@@ -1,5 +1,5 @@
 ---
-title: CUDA Kernel 面试主线 · 第 3/12 课：GEMV 与行级并行
+title: "第 3 课：GEMV 与行级并行"
 jupyter: python3
 ---
 
@@ -27,6 +27,71 @@ jupyter: python3
 - 本课在路线中的作用：GEMV 每个输出是矩阵一行与向量的点积，算术强度低，通常受内存带宽限制。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart LR
+    subgraph Matrix["矩阵 A (M × K)"]
+        Row0["Row 0 ➔ 分配给 Warp 0"]
+        Row1["Row 1 ➔ 分配给 Warp 1"]
+        RowM["Row M ➔ 分配给 Warp M"]
+    end
+    subgraph Vector["向量 x (K × 1)"]
+        Vx["常驻 L1/L2 Cache 广播读取"]
+    end
+    subgraph Out["输出 y (M × 1)"]
+        Y0["y[0]"]
+        Y1["y[1]"]
+        YM["y[M]"]
+    end
+    Row0 & Vx --> Y0
+    Row1 & Vx --> Y1
+    RowM & Vx --> YM
+```
+<p class="caption" align="center"><em>图 3-1：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em></p>
+
+```mermaid
+flowchart TD
+    Init["Warp 绑定矩阵第 row 行"] --> Loop["Warp 内各线程跨步读取 A[row, c] 并与 x[c] 做乘积累加"]
+    Loop --> Reduce["Warp 内执行 Shuffle 求和归约"]
+    Reduce --> Write["Lane 0 将点积和加上偏置写回全局内存 y[row]"]
+```
+<p class="caption" align="center"><em>图 3-2：GEMV 单行点积累加与 Warp 归约执行流水</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart LR
+    subgraph Matrix["矩阵 A (M × K)"]
+        Row0["Row 0 ➔ 分配给 Warp 0"]
+        Row1["Row 1 ➔ 分配给 Warp 1"]
+        RowM["Row M ➔ 分配给 Warp M"]
+    end
+    subgraph Vector["向量 x (K × 1)"]
+        Vx["常驻 L1/L2 Cache 广播读取"]
+    end
+    subgraph Out["输出 y (M × 1)"]
+        Y0["y[0]"]
+        Y1["y[1]"]
+        YM["y[M]"]
+    end
+    Row0 & Vx --> Y0
+    Row1 & Vx --> Y1
+    RowM & Vx --> YM
+```
+<p class="caption" align="center"><em>图 3-1：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em></p>
+
+```{mermaid}
+flowchart TD
+    Init["Warp 绑定矩阵第 row 行"] --> Loop["Warp 内各线程跨步读取 A[row, c] 并与 x[c] 做乘积累加"]
+    Loop --> Reduce["Warp 内执行 Shuffle 求和归约"]
+    Reduce --> Write["Lane 0 将点积和加上偏置写回全局内存 y[row]"]
+```
+<p class="caption" align="center"><em>图 3-2：GEMV 单行点积累加与 Warp 归约执行流水</em></p>
+
 
 ### 1. 它是什么，解决什么问题
 

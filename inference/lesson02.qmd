@@ -1,5 +1,5 @@
 ---
-title: 推理引擎源码与前沿优化 · 第 2/8 课：vLLM V1 统一调度器、KVCacheManager 与 Prefix Cache
+title: "第 2 课：vLLM V1 统一调度器、KVCacheManager 与 Prefix Cache"
 jupyter: python3
 ---
 
@@ -32,29 +32,45 @@ jupyter: python3
 
 ## 核心对象
 
-```{mermaid}
-flowchart LR
-    subgraph Logical["逻辑 KV Cache 序列"]
-        L0["Block 0: Token 0~15"]
-        L1["Block 1: Token 16~31"]
-        L2["Block 2: Token 32~47"]
-    end
-    subgraph PageTable["Page Table 逻辑/物理映射表"]
-        M0["Block 0 ➔ 物理槽位 #8"]
-        M1["Block 1 ➔ 物理槽位 #3"]
-        M2["Block 2 ➔ 物理槽位 #12"]
-    end
-    subgraph Physical["非连续物理显存池 (GPU HBM)"]
-        P3["Physical Block #3"]
-        P8["Physical Block #8"]
-        P12["Physical Block #12"]
-        PFree["空闲 Block 池 (零内部碎片)"]
-    end
-    L0 --> M0 --> P8
-    L1 --> M1 --> P3
-    L2 --> M2 --> P12
-```
 
+### 核心操作与执行流程图解
+
+::: {.img-card}
+![](assets/figs/kvcache_memory_growth.png){width="85%"}
+<p class="caption">图 2-1：Llama-3 8B 不同并发度与上下文长度下 KV Cache 显存暴涨曲线（基于 scientific-figure-making 绘制）</p>
+:::
+
+```mermaid
+flowchart TD
+    ScheduleStart["进入 step() 调度周期"] --> CheckWaiting["检查等待队列 (Waiting Queue)"]
+    CheckWaiting --> MatchPrefix["查询 Prefix Cache 命中已有块"]
+    MatchPrefix --> Budget{"Token 预算与物理 Block 是否充足以容纳新请求?"}
+    Budget -->|充足| Promote["晋升至运行队列 (Running Queue) 触发 Prefill"]
+    Budget -->|不足| PreemptCheck{"Running 队列能否满足 Decode 扩张?"}
+    PreemptCheck -->|受阻| Preempt["抢占低优先级请求 (Preempt / Recompute)"]
+    PreemptCheck -->|充足| Exec["构造当前批次元数据并下发 GPU"]
+```
+<p class="caption" align="center"><em>图 2-2：vLLM V1 统一调度器动态分发与抢占决策流程</em></p>
+
+
+### 核心操作与执行流程图解
+
+::: {.img-card}
+![](assets/figs/kvcache_memory_growth.png){width="85%"}
+<p class="caption">图 2-1：Llama-3 8B 不同并发度与上下文长度下 KV Cache 显存暴涨曲线（基于 scientific-figure-making 绘制）</p>
+:::
+
+```{mermaid}
+flowchart TD
+    ScheduleStart["进入 step() 调度周期"] --> CheckWaiting["检查等待队列 (Waiting Queue)"]
+    CheckWaiting --> MatchPrefix["查询 Prefix Cache 命中已有块"]
+    MatchPrefix --> Budget{"Token 预算与物理 Block 是否充足以容纳新请求?"}
+    Budget -->|充足| Promote["晋升至运行队列 (Running Queue) 触发 Prefill"]
+    Budget -->|不足| PreemptCheck{"Running 队列能否满足 Decode 扩张?"}
+    PreemptCheck -->|受阻| Preempt["抢占低优先级请求 (Preempt / Recompute)"]
+    PreemptCheck -->|充足| Exec["构造当前批次元数据并下发 GPU"]
+```
+<p class="caption" align="center"><em>图 2-2：vLLM V1 统一调度器动态分发与抢占决策流程</em></p>
 
 
 V1 scheduler 不把请求硬分成 prefill batch 和 decode batch。每个请求只有 `num_computed_tokens` 与 `num_tokens_with_spec`；本轮缺口就是待计算 token。固定的全局 token budget 被依次分给请求，因此 chunked prefill、普通 decode、prefix hit 后续算和 speculative verification 共享一套调度表达。

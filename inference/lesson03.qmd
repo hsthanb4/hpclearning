@@ -1,5 +1,5 @@
 ---
-title: 推理引擎源码与前沿优化 · 第 3/8 课：SGLang SRT 源码地图：Scheduler、ScheduleBatch 与 ModelRunner
+title: "第 3 课：SGLang SRT 源码地图：Scheduler、ScheduleBatch 与 ModelRunner"
 jupyter: python3
 ---
 
@@ -33,6 +33,69 @@ jupyter: python3
 源码快照：SGLang `9deb6952afa4`。
 
 ## 核心对象
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart TD
+    subgraph TokenizerLayer["TokenizerManager (多进程)"]
+        Tok["并行 Tokenizer 编解码"]
+    end
+    subgraph SchedulerLayer["SRT Scheduler"]
+        Batch["ScheduleBatch 动态合批容器"]
+        Radix["Radix Tree 索引空间"]
+    end
+    subgraph ModelLayer["ModelRunner (TP / CUDA Graph)"]
+        Graph["CUDA Graph 捕获执行图"]
+        Kernels["FlashInfer / PagedAttention 算子"]
+    end
+    Tok --> SchedulerLayer --> ModelLayer
+```
+<p class="caption" align="center"><em>图 3-1：SGLang SRT 运行时分层交互与 ScheduleBatch 容器拓扑</em></p>
+
+```mermaid
+flowchart LR
+    Req["接收批次请求"] --> RadixMatch["Radix Tree 快速最长前缀检索"]
+    RadixMatch --> FormBatch["构造混合批次 (Prefill + Decode ScheduleBatch)"]
+    FormBatch --> GraphExec{"命中捕获尺寸的 CUDA Graph?"}
+    GraphExec -->|是| FastRun["重放 CUDA Graph (超低调度开销)"]
+    GraphExec -->|否| EagerRun["回退 Eager 动态形状前向执行"]
+    FastRun & EagerRun --> Sample["多项式采样与树节点更新"]
+```
+<p class="caption" align="center"><em>图 3-2：SGLang SRT 混合批处理与 CUDA Graph 捕获分发时序流程</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart TD
+    subgraph TokenizerLayer["TokenizerManager (多进程)"]
+        Tok["并行 Tokenizer 编解码"]
+    end
+    subgraph SchedulerLayer["SRT Scheduler"]
+        Batch["ScheduleBatch 动态合批容器"]
+        Radix["Radix Tree 索引空间"]
+    end
+    subgraph ModelLayer["ModelRunner (TP / CUDA Graph)"]
+        Graph["CUDA Graph 捕获执行图"]
+        Kernels["FlashInfer / PagedAttention 算子"]
+    end
+    Tok --> SchedulerLayer --> ModelLayer
+```
+<p class="caption" align="center"><em>图 3-1：SGLang SRT 运行时分层交互与 ScheduleBatch 容器拓扑</em></p>
+
+```{mermaid}
+flowchart LR
+    Req["接收批次请求"] --> RadixMatch["Radix Tree 快速最长前缀检索"]
+    RadixMatch --> FormBatch["构造混合批次 (Prefill + Decode ScheduleBatch)"]
+    FormBatch --> GraphExec{"命中捕获尺寸的 CUDA Graph?"}
+    GraphExec -->|是| FastRun["重放 CUDA Graph (超低调度开销)"]
+    GraphExec -->|否| EagerRun["回退 Eager 动态形状前向执行"]
+    FastRun & EagerRun --> Sample["多项式采样与树节点更新"]
+```
+<p class="caption" align="center"><em>图 3-2：SGLang SRT 混合批处理与 CUDA Graph 捕获分发时序流程</em></p>
+
 
 SGLang SRT 的 `Scheduler` 比教科书中的“排队策略”承担更多运行时编排：接收请求、维护 waiting/running/chunked 状态、选择 prefill 或 decode、协调 Radix/HiCache、调用 TP worker、处理结果、输出和健康检查。`Req` 是单请求持久状态；`ScheduleBatch` 是某次 forward 的批量视图；`NextBatchPlan` 显式返回 `batch_to_run` 和更新后的 `running_batch`。
 

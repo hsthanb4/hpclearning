@@ -1,5 +1,5 @@
 ---
-title: 推理引擎源码与前沿优化 · 第 4/8 课：SGLang RadixAttention、内存池与 Overlap Scheduling
+title: "第 4 课：SGLang RadixAttention、内存池与 Overlap Scheduling"
 jupyter: python3
 ---
 
@@ -31,6 +31,63 @@ jupyter: python3
 源码快照：SGLang `9deb6952afa4`。
 
 ## 核心对象
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart LR
+    Root["根节点: []"] --> S1["[Hello, World] (Len=2, Ref=3)"]
+    S1 --> S2["[How are you?] (Len=4, Ref=1)"]
+    S1 --> S3["[Explain CUDA] (Len=3, Ref=2)"]
+    subgraph LRU["LRU 淘汰双向链表"]
+        Head["最久未访问节点 (Ref=0)"] <--> Tail["最新访问节点"]
+    end
+    S2 -.->|Ref降为0| Head
+```
+<p class="caption" align="center"><em>图 4-1：SGLang RadixAttention 基数树与 LRU 引用淘汰拓扑机制</em></p>
+
+```mermaid
+flowchart TD
+    subgraph CPU["CPU 调度线程 (Thread 1)"]
+        Prep["Batch N+1: Radix 匹配与显存块分配"] --> Prepare["准备输入张量与元数据"]
+    end
+    subgraph GPU["GPU 计算流 (Stream 1)"]
+        ExecN["Batch N: 模型前向计算与 Attention 计算"]
+    end
+    Prep -->|重叠并行 (Overlap)| ExecN
+    Prepare -->|流水衔接| ExecNext["Batch N+1: 立即进入 GPU 计算"]
+```
+<p class="caption" align="center"><em>图 4-2：SGLang CPU 调度准备与 GPU 执行重叠掩盖 (Overlap) 工作流</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart LR
+    Root["根节点: []"] --> S1["[Hello, World] (Len=2, Ref=3)"]
+    S1 --> S2["[How are you?] (Len=4, Ref=1)"]
+    S1 --> S3["[Explain CUDA] (Len=3, Ref=2)"]
+    subgraph LRU["LRU 淘汰双向链表"]
+        Head["最久未访问节点 (Ref=0)"] <--> Tail["最新访问节点"]
+    end
+    S2 -.->|Ref降为0| Head
+```
+<p class="caption" align="center"><em>图 4-1：SGLang RadixAttention 基数树与 LRU 引用淘汰拓扑机制</em></p>
+
+```{mermaid}
+flowchart TD
+    subgraph CPU["CPU 调度线程 (Thread 1)"]
+        Prep["Batch N+1: Radix 匹配与显存块分配"] --> Prepare["准备输入张量与元数据"]
+    end
+    subgraph GPU["GPU 计算流 (Stream 1)"]
+        ExecN["Batch N: 模型前向计算与 Attention 计算"]
+    end
+    Prep -->|重叠并行 (Overlap)| ExecN
+    Prepare -->|流水衔接| ExecNext["Batch N+1: 立即进入 GPU 计算"]
+```
+<p class="caption" align="center"><em>图 4-2：SGLang CPU 调度准备与 GPU 执行重叠掩盖 (Overlap) 工作流</em></p>
+
 
 RadixAttention 用 token prefix 构造压缩 radix tree，节点 value 指向 KV pool indices。共同前缀只存一份树路径，多轮对话、few-shot 和共享 system prompt 可复用。它与 PagedAttention 不是互斥概念：前者决定跨请求如何索引/共享前缀，后者/内存池决定物理 KV 如何分页和分配。
 

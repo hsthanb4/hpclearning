@@ -1,6 +1,5 @@
 ---
-title: "训练系统 · 第 10/14 课：专家并行 EP"
-subtitle: "Ultra-Scale Playbook 训练系统"
+title: "第 10 课：专家并行 EP"
 jupyter: python3
 ---
 
@@ -17,7 +16,6 @@ jupyter: python3
 :::
 
 
-# 第 10 课：专家并行 EP
 
 - 对应官方章节：Expert Parallelism
 - 前置：第 3 课（all-to-all 概念）、《Switch Transformers》等 MoE 基础（教材要求读者先了解 MoE）
@@ -33,6 +31,54 @@ jupyter: python3
 - 解释 DeepSeek-V3 的节点限制路由（每 token ≤ M 个节点）的设计动机。
 
 ## 核心概念
+
+```mermaid
+flowchart TD
+    Tokens["输入 Token 序列"] --> Router["Top-K 门控路由网络 (Softmax / Sigmoid)"]
+    Router --> E0["专家 0 (Rank 0)"]
+    Router --> E1["专家 1 (Rank 1)"]
+    Router --> E2["专家 2 (Rank 2)"]
+    Router --> E3["专家 3 (Rank 3)"]
+```
+<p class="caption" align="center"><em>图 10-1：MoE 门控路由网络与跨 GPU 专家切分架构</em></p>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as 本地 Tokens
+    participant R as Gating Router
+    participant A2A1 as All-to-All 调度通信
+    participant Exp as 跨卡 Expert FFN
+    participant A2A2 as All-to-All 恢复通信
+    
+    T->>R: 计算各 Token 对各专家的亲和度分数
+    R->>A2A1: 将 Token 打包根据专家所在 Rank 进行 All-to-All 分发
+    A2A1->>Exp: 各卡专家并行计算前向 FFN
+    Exp->>A2A2: 结果通过反向 All-to-All 汇聚送回原始输入 Rank
+    A2A2-->>T: 按门控权重加权求和，输出混合结果
+```
+<p class="caption" align="center"><em>图 10-2：MoE 专家并行双向 All-to-All 通信与计算全流程</em></p>
+
+<p class="caption" align="center"><em>图 10-1：MoE 门控路由网络与跨 GPU 专家切分架构</em></p>
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant T as 本地 Tokens
+    participant R as Gating Router
+    participant A2A1 as All-to-All 调度通信
+    participant Exp as 跨卡 Expert FFN
+    participant A2A2 as All-to-All 恢复通信
+    
+    T->>R: 计算各 Token 对各专家的亲和度分数
+    R->>A2A1: 将 Token 打包根据专家所在 Rank 进行 All-to-All 分发
+    A2A1->>Exp: 各卡专家并行计算前向 FFN
+    Exp->>A2A2: 结果通过反向 All-to-All 汇聚送回原始输入 Rank
+    A2A2-->>T: 按门控权重加权求和，输出混合结果
+```
+<p class="caption" align="center"><em>图 10-2：MoE 专家并行双向 All-to-All 通信与计算全流程</em></p>
+
+
 
 ### 1. MoE 与 EP
 
@@ -206,7 +252,6 @@ if __name__ == "__main__":
     print("专家映射示例:", expert_to_rank(256, 32))   # 每 rank 32 个专家
 ```
 
-# 第 10 课参考答案（复盘用，先提交再打开）
 
 ## 补全后的代码（关键填空处）
 

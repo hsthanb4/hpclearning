@@ -1,5 +1,5 @@
 ---
-title: CUDA Kernel 面试主线 · 第 4/12 课：RMSNorm：统计量与两遍访问
+title: "第 4 课：RMSNorm：统计量与两遍访问"
 jupyter: python3
 ---
 
@@ -27,6 +27,69 @@ jupyter: python3
 - 本课在路线中的作用：RMSNorm 只按均方根缩放，不减均值；LLM 中常按最后一维做归一化。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart LR
+    subgraph RMSNormMath["RMSNorm 核心计算链路"]
+        direction TB
+        X["输入向量 x"] --> Square["平方累加: sum(x_i^2)"]
+        Square --> Mean["均方根: RMS = sqrt(mean(x^2) + eps)"]
+        Mean --> Scale["归一化并仿射: y_i = (x_i / RMS) * weight_i"]
+    end
+```
+<p class="caption" align="center"><em>图 4-1：RMSNorm 均方根归一化与缩放系数计算图</em></p>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as 线程束 (Threads)
+    participant S as 共享内存 (SMem)
+    participant GM as 全局内存 (HBM)
+    
+    Note over T,GM: 第一遍遍历 (Pass 1: 计算平方和)
+    T->>GM: 读取 x 并累加本地局部平方和
+    T->>S: 块内归约得出整行平方均值，计算 1 / RMS
+    Note over T,S: 同步屏障 __syncthreads()
+    Note over T,GM: 第二遍遍历 (Pass 2: 归一化与写回)
+    T->>GM: 重新加载 x[i]，乘以 1/RMS 与 weight[i]
+    T->>GM: 将归一化结果写回全局内存 y[i]
+```
+<p class="caption" align="center"><em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart LR
+    subgraph RMSNormMath["RMSNorm 核心计算链路"]
+        direction TB
+        X["输入向量 x"] --> Square["平方累加: sum(x_i^2)"]
+        Square --> Mean["均方根: RMS = sqrt(mean(x^2) + eps)"]
+        Mean --> Scale["归一化并仿射: y_i = (x_i / RMS) * weight_i"]
+    end
+```
+<p class="caption" align="center"><em>图 4-1：RMSNorm 均方根归一化与缩放系数计算图</em></p>
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant T as 线程束 (Threads)
+    participant S as 共享内存 (SMem)
+    participant GM as 全局内存 (HBM)
+    
+    Note over T,GM: 第一遍遍历 (Pass 1: 计算平方和)
+    T->>GM: 读取 x 并累加本地局部平方和
+    T->>S: 块内归约得出整行平方均值，计算 1 / RMS
+    Note over T,S: 同步屏障 __syncthreads()
+    Note over T,GM: 第二遍遍历 (Pass 2: 归一化与写回)
+    T->>GM: 重新加载 x[i]，乘以 1/RMS 与 weight[i]
+    T->>GM: 将归一化结果写回全局内存 y[i]
+```
+<p class="caption" align="center"><em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em></p>
+
 
 ### 1. 它是什么，解决什么问题
 

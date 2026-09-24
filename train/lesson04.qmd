@@ -1,6 +1,5 @@
 ---
-title: "训练系统 · 第 4/14 课：数据并行 DP"
-subtitle: "Ultra-Scale Playbook 训练系统"
+title: "第 4 课：数据并行 DP 与 DDP"
 jupyter: python3
 ---
 
@@ -17,7 +16,6 @@ jupyter: python3
 :::
 
 
-# 第 4 课：数据并行 DP
 
 - 对应官方章节：Data Parallelism（含 Revisiting global batch size、Our journey up to now）
 - 前置：第 2 课（梯度累积）、第 3 课（all-reduce）
@@ -35,10 +33,28 @@ jupyter: python3
 
 ## 核心概念
 
-```{mermaid}
+```mermaid
+flowchart TD
+    subgraph DataParallel["数据并行架构 (DDP)"]
+        Data["全局 Batch 训练数据"] --> Split1["分片 0 (Rank 0)"]
+        Data --> Split2["分片 1 (Rank 1)"]
+        Data --> Split3["分片 2 (Rank 2)"]
+        Split1 --> Model0["卡 0: 模型完整副本 W"]
+        Split2 --> Model1["卡 1: 模型完整副本 W"]
+        Split3 --> Model2["卡 2: 模型完整副本 W"]
+        Model0 --> Grad0["本地梯度 g_0"]
+        Model1 --> Grad1["本地梯度 g_1"]
+        Model2 --> Grad2["本地梯度 g_2"]
+        Grad0 & Grad1 & Grad2 --> AR["Ring AllReduce 全局同步"]
+        AR --> Update["各卡同步更新同构参数 W_new"]
+    end
+```
+<p class="caption" align="center"><em>图 4-1：数据并行（DDP）同构副本前向与全量梯度归约架构</em></p>
+
+```mermaid
 sequenceDiagram
     autonumber
-    participant B as 反向传播 (Backward Compute)
+    participant B as 反向求导 (Backward Compute)
     participant Bucket as 梯度分桶 (Bucket 0 / Bucket 1)
     participant NCCL as 异步通信流 (Ring AllReduce)
     Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线
@@ -51,8 +67,27 @@ sequenceDiagram
     Bucket->>NCCL: 异步触发 AllReduce (Bucket 1)
     NCCL-->>NCCL: 全部 Bucket 同步完毕
 ```
+<p class="caption" align="center"><em>图 4-2：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em></p>
 
+<p class="caption" align="center"><em>图 4-1：数据并行（DDP）同构副本前向与全量梯度归约架构</em></p>
 
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant B as 反向求导 (Backward Compute)
+    participant Bucket as 梯度分桶 (Bucket 0 / Bucket 1)
+    participant NCCL as 异步通信流 (Ring AllReduce)
+    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线
+    B->>Bucket: 逐层反向求导 (Layer N)
+    Bucket-->>Bucket: 梯度写入，达到阈值 (如 25MB)
+    Bucket->>NCCL: 异步触发 AllReduce (Bucket 0)
+    B->>Bucket: 继续求导上一层 (Layer N-1, N-2)
+    Note right of NCCL: 环形通信与计算并行执行
+    NCCL-->>NCCL: Bucket 0 同步完成
+    Bucket->>NCCL: 异步触发 AllReduce (Bucket 1)
+    NCCL-->>NCCL: 全部 Bucket 同步完毕
+```
+<p class="caption" align="center"><em>图 4-2：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em></p>
 
 ### 1. DP = 并行的梯度累积
 
@@ -357,7 +392,6 @@ if __name__ == "__main__":
     print("gbs_tokens:", gbs_tokens(mbs=2, grad_acc=4, dp=128, seq=4096))
 ```
 
-# 第 4 课参考答案（复盘用，先提交再打开）
 
 ## 补全后的代码（关键填空处）
 

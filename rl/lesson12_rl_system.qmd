@@ -1,5 +1,5 @@
 ---
-title: 强化学习与大模型后训练 · 第 12/12 课：大规模 RL 系统：rollout、训练与评测
+title: "第 12 课：大规模 RL 系统：rollout、训练与评测"
 jupyter: python3
 ---
 
@@ -27,6 +27,71 @@ jupyter: python3
 - 本课在路线中的作用：大规模 RL 系统由采样引擎、奖励/规则评估、经验缓冲和训练引擎组成；瓶颈常在生成而非反向。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart TD
+    subgraph InferenceCluster["Rollout 生成集群 (vLLM / SGLang)"]
+        W1["Worker 1 (Prompt 吞吐)"]
+        W2["Worker 2 (KV Cache 优化)"]
+    end
+    subgraph StorageQueue["解耦中转层"]
+        Queue["高吞吐经验队列 (Shared Memory / Redis / Ray Object Store)"]
+    end
+    subgraph TrainingCluster["训练更新集群 (Megatron / ZeRO-3)"]
+        L1["Learner GPU 0"]
+        L2["Learner GPU 1"]
+    end
+    W1 & W2 -->|推送采样轨迹| Queue
+    Queue -->|拉取 Batch 经验| L1 & L2
+    L1 -.->|异步参数广播 / 权重热加载| W1 & W2
+```
+<p class="caption" align="center"><em>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构</em></p>
+
+```mermaid
+flowchart LR
+    Gen["Rollout 引擎并发生成轨迹"] --> Put["压入异步 FIFO 轨迹队列"]
+    Put --> CheckStaleness{"轨迹延迟 Staleness ≤ 阈值?"}
+    CheckStaleness -->|有效| Train["Learner 取出执行并行梯度计算"]
+    CheckStaleness -->|过期| Drop["丢弃过期轨迹，防止策略梯度发散"]
+    Train --> WeightSync["NCCL 广播最新权重至 Rollout Worker 内存"]
+```
+<p class="caption" align="center"><em>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart TD
+    subgraph InferenceCluster["Rollout 生成集群 (vLLM / SGLang)"]
+        W1["Worker 1 (Prompt 吞吐)"]
+        W2["Worker 2 (KV Cache 优化)"]
+    end
+    subgraph StorageQueue["解耦中转层"]
+        Queue["高吞吐经验队列 (Shared Memory / Redis / Ray Object Store)"]
+    end
+    subgraph TrainingCluster["训练更新集群 (Megatron / ZeRO-3)"]
+        L1["Learner GPU 0"]
+        L2["Learner GPU 1"]
+    end
+    W1 & W2 -->|推送采样轨迹| Queue
+    Queue -->|拉取 Batch 经验| L1 & L2
+    L1 -.->|异步参数广播 / 权重热加载| W1 & W2
+```
+<p class="caption" align="center"><em>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构</em></p>
+
+```{mermaid}
+flowchart LR
+    Gen["Rollout 引擎并发生成轨迹"] --> Put["压入异步 FIFO 轨迹队列"]
+    Put --> CheckStaleness{"轨迹延迟 Staleness ≤ 阈值?"}
+    CheckStaleness -->|有效| Train["Learner 取出执行并行梯度计算"]
+    CheckStaleness -->|过期| Drop["丢弃过期轨迹，防止策略梯度发散"]
+    Train --> WeightSync["NCCL 广播最新权重至 Rollout Worker 内存"]
+```
+<p class="caption" align="center"><em>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程</em></p>
+
 
 ### 1. 从权重版本到可重放样本
 

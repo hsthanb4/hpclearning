@@ -1,6 +1,5 @@
 ---
-title: "训练系统 · 第 13/14 课：GPU 内核与 FlashAttention"
-subtitle: "Ultra-Scale Playbook 训练系统"
+title: "第 13 课：GPU 内核与 FlashAttention"
 jupyter: python3
 ---
 
@@ -17,7 +16,6 @@ jupyter: python3
 :::
 
 
-# 第 13 课：GPU 内核与 FlashAttention
 
 - 对应官方章节：Diving into the GPUs（A primer on GPUs / Improving performance with kernels / Fused kernels / FlashAttention）+ 附录 A1（kernel 剖析）
 - 前置：第 2 课（激活、softmax 的注意力）、第 8 课（online softmax 概念）
@@ -33,6 +31,42 @@ jupyter: python3
 - 用代码实现 FlashAttention 的 online softmax 分块算法并验证与标准实现一致。
 
 ## 核心概念
+
+```mermaid
+flowchart TD
+    subgraph StandardAttn["传统 Attention: O(N^2) 频繁往返 HBM"]
+        QKV["Q, K, V (GMEM)"] --> S["S = Q K^T (写入 HBM)"]
+        S --> P["P = Softmax(S) (写入 HBM)"]
+        P --> O["O = P V (写回 HBM)"]
+    end
+    subgraph FlashAttn["FlashAttention: Tile 块驻留 SRAM 融合计算"]
+        Q_tile["Q Block"] & K_tile["K Block"] --> SRAM["SRAM 内部 Online Softmax + Matmul"]
+        SRAM --> O_tile["直接写回最终 O (节省 10x 访存)"]
+    end
+```
+<p class="caption" align="center"><em>图 13-1：传统注意力大量读写高带宽内存 vs FlashAttention 片上瓦片融合对比</em></p>
+
+```mermaid
+flowchart LR
+    Outer["外层循环: 遍历 K, V 分块 (加载至 SRAM)"] --> Inner["内层循环: 遍历 Q 分块 (加载至 SRAM)"]
+    Inner --> Kernel["计算局部 S = Q K^T 并执行 Online Softmax 状态更新"]
+    Kernel --> Acc["增量累加更新局部输出矩阵 O_block"]
+    Acc --> Inner
+```
+<p class="caption" align="center"><em>图 13-2：FlashAttention 前向分块双层循环流水与增量更新流</em></p>
+
+<p class="caption" align="center"><em>图 13-1：传统注意力大量读写高带宽内存 vs FlashAttention 片上瓦片融合对比</em></p>
+
+```{mermaid}
+flowchart LR
+    Outer["外层循环: 遍历 K, V 分块 (加载至 SRAM)"] --> Inner["内层循环: 遍历 Q 分块 (加载至 SRAM)"]
+    Inner --> Kernel["计算局部 S = Q K^T 并执行 Online Softmax 状态更新"]
+    Kernel --> Acc["增量累加更新局部输出矩阵 O_block"]
+    Acc --> Inner
+```
+<p class="caption" align="center"><em>图 13-2：FlashAttention 前向分块双层循环流水与增量更新流</em></p>
+
+
 
 ### 1. GPU 组织（教材 primer）
 
@@ -263,7 +297,6 @@ if __name__ == "__main__":
     print("与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）")
 ```
 
-# 第 13 课参考答案（复盘用，先提交再打开）
 
 ## 补全后的代码（关键填空处）
 

@@ -1,5 +1,5 @@
 ---
-title: MLIR 编译器主线 · 第 8/8 课：Transform Dialect、Pipeline 调试与面试设计
+title: "第 8 课：Transform Dialect、Pipeline 调试与面试设计"
 jupyter: python3
 ---
 
@@ -27,6 +27,63 @@ jupyter: python3
 - 本课在路线中的作用：Transform dialect 用 handle 匹配 payload IR 并显式编排 tile/fuse/vectorize 等变换；它把调优策略表示成可检查 IR。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart TD
+    subgraph TransformScript["Transform Dialect 脚本"]
+        Match["%target = transform.structured.match ops{['linalg.matmul']}"]
+        Tile["%tiled, %loops = transform.structured.tile_to_scf_for %target [32, 32]"]
+        Vector["transform.structured.vectorize %tiled"]
+    end
+    subgraph PayloadIR["Payload 计算图"]
+        Matmul["linalg.matmul"] --> TiledLoops["scf.for i ... scf.for j ... linalg.matmul (32x32)"]
+        TiledLoops --> VectorOps["vector.contract / vector.fma"]
+    end
+    TransformScript -.->|解释器解释并就地变异| PayloadIR
+```
+<p class="caption" align="center"><em>图 8-1：Transform Dialect 元调度脚本与被变换 Payload IR 的解耦驱动体系</em></p>
+
+```mermaid
+flowchart LR
+    Bug["Pass 出现崩溃或语义错误"] --> Opt["启动调试: mlir-opt --pass-pipeline=..."]
+    Opt --> Print["添加 --mlir-print-ir-after-all 输出各阶段 IR"]
+    Print --> CrashRepro["生成 --mlir-generate-crash-reproducer 独立复现用例"]
+    CrashRepro --> Delta["利用 mlir-reduce 自动化精简缩小问题 IR 块"]
+    Delta --> Fix["定位违背 Invariant 的 Pass 并修复断言"]
+```
+<p class="caption" align="center"><em>图 8-2：MLIR 编译管线排错、最小化复现与诊断全流程</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart TD
+    subgraph TransformScript["Transform Dialect 脚本"]
+        Match["%target = transform.structured.match ops{['linalg.matmul']}"]
+        Tile["%tiled, %loops = transform.structured.tile_to_scf_for %target [32, 32]"]
+        Vector["transform.structured.vectorize %tiled"]
+    end
+    subgraph PayloadIR["Payload 计算图"]
+        Matmul["linalg.matmul"] --> TiledLoops["scf.for i ... scf.for j ... linalg.matmul (32x32)"]
+        TiledLoops --> VectorOps["vector.contract / vector.fma"]
+    end
+    TransformScript -.->|解释器解释并就地变异| PayloadIR
+```
+<p class="caption" align="center"><em>图 8-1：Transform Dialect 元调度脚本与被变换 Payload IR 的解耦驱动体系</em></p>
+
+```{mermaid}
+flowchart LR
+    Bug["Pass 出现崩溃或语义错误"] --> Opt["启动调试: mlir-opt --pass-pipeline=..."]
+    Opt --> Print["添加 --mlir-print-ir-after-all 输出各阶段 IR"]
+    Print --> CrashRepro["生成 --mlir-generate-crash-reproducer 独立复现用例"]
+    CrashRepro --> Delta["利用 mlir-reduce 自动化精简缩小问题 IR 块"]
+    Delta --> Fix["定位违背 Invariant 的 Pass 并修复断言"]
+```
+<p class="caption" align="center"><em>图 8-2：MLIR 编译管线排错、最小化复现与诊断全流程</em></p>
+
 
 ### 1. 它是什么，解决什么问题
 

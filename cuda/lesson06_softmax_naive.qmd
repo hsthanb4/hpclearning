@@ -1,5 +1,5 @@
 ---
-title: CUDA Kernel 面试主线 · 第 6/12 课：稳定 Softmax 与朴素复杂度
+title: "第 6 课：稳定 Softmax 与朴素复杂度"
 jupyter: python3
 ---
 
@@ -27,6 +27,67 @@ jupyter: python3
 - 本课在路线中的作用：Softmax 把 logits 变成正且和为 1 的分布；指数使它对溢出和下溢敏感。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart LR
+    subgraph StableSoftmax["安全防溢出 Softmax 技巧"]
+        direction TB
+        Raw["原始分数 x_i (可能极大)"] --> Max["求全局最大值 m = max(x_i)"]
+        Max --> Shift["平移指数: exp(x_i - m) (指数区间 <= 0，绝不溢出)"]
+        Shift --> Sum["累加和: d = sum(exp(x_i - m))"]
+        Sum --> Div["归一化输出: y_i = exp(x_i - m) / d"]
+    end
+```
+<p class="caption" align="center"><em>图 6-1：数值安全 Softmax 减最大值平移与归一化机制</em></p>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as 线程集合
+    participant S as 共享内存 (SMem)
+    participant G as 全局内存 (GMEM)
+    
+    T->>G: 第一次遍历: 读取 x[i]，归约求全局最大值 m
+    T->>S: 广播最大值 m
+    T->>G: 第二次遍历: 重新读取 x[i]，计算 exp(x[i]-m) 并累加总和 d
+    T->>S: 广播分母 d
+    T->>G: 第三次遍历: 计算最终概率值并写回全局内存
+```
+<p class="caption" align="center"><em>图 6-2：朴素 Softmax 三遍访存流水线与内存开销瓶颈</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart LR
+    subgraph StableSoftmax["安全防溢出 Softmax 技巧"]
+        direction TB
+        Raw["原始分数 x_i (可能极大)"] --> Max["求全局最大值 m = max(x_i)"]
+        Max --> Shift["平移指数: exp(x_i - m) (指数区间 <= 0，绝不溢出)"]
+        Shift --> Sum["累加和: d = sum(exp(x_i - m))"]
+        Sum --> Div["归一化输出: y_i = exp(x_i - m) / d"]
+    end
+```
+<p class="caption" align="center"><em>图 6-1：数值安全 Softmax 减最大值平移与归一化机制</em></p>
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant T as 线程集合
+    participant S as 共享内存 (SMem)
+    participant G as 全局内存 (GMEM)
+    
+    T->>G: 第一次遍历: 读取 x[i]，归约求全局最大值 m
+    T->>S: 广播最大值 m
+    T->>G: 第二次遍历: 重新读取 x[i]，计算 exp(x[i]-m) 并累加总和 d
+    T->>S: 广播分母 d
+    T->>G: 第三次遍历: 计算最终概率值并写回全局内存
+```
+<p class="caption" align="center"><em>图 6-2：朴素 Softmax 三遍访存流水线与内存开销瓶颈</em></p>
+
 
 ### 1. 它是什么，解决什么问题
 

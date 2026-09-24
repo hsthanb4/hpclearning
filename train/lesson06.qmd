@@ -1,6 +1,5 @@
 ---
-title: "训练系统 · 第 6/14 课：张量并行 TP"
-subtitle: "Ultra-Scale Playbook 训练系统"
+title: "第 6 课：张量并行 TP"
 jupyter: python3
 ---
 
@@ -17,7 +16,6 @@ jupyter: python3
 :::
 
 
-# 第 6 课：张量并行 TP
 
 - 对应官方章节：Tensor Parallelism / Tensor parallelism in a transformer block
 - 前置：第 3 课（all-gather / all-reduce / broadcast / scatter）、第 5 课（为什么 ZeRO 之后还需要 TP）
@@ -34,23 +32,57 @@ jupyter: python3
 
 ## 核心概念
 
-```{mermaid}
+```mermaid
 flowchart LR
-    subgraph MLP["Megatron-LM MLP 层张量并行切分"]
+    subgraph MegatronMLP["Megatron-LM MLP 列行切分架构"]
         direction TB
-        X["输入 X (b × s × h)"] --> C1["GPU 0: W1 列分片 (h × 4h/2)"]
-        X --> C2["GPU 1: W1 列分片 (h × 4h/2)"]
-        C1 --> GELU1["GeLU 激活"]
-        C2 --> GELU2["GeLU 激活"]
-        GELU1 --> R1["GPU 0: W2 行分片 (4h/2 × h)"]
-        GELU2 --> R2["GPU 1: W2 行分片 (4h/2 × h)"]
-        R1 --> AR["AllReduce (Sum 求和)"]
-        R2 --> AR
-        AR --> Y["输出 Y (b × s × h)"]
+        X["输入 X"] --> C0["GPU 0: 列切分 W1_0"]
+        X --> C1["GPU 1: 列切分 W1_1"]
+        C0 --> Act0["GeLU"]
+        C1 --> Act1["GeLU"]
+        Act0 --> R0["GPU 0: 行切分 W2_0"]
+        Act1 --> R1["GPU 1: 行切分 W2_1"]
+        R0 & R1 --> AR["AllReduce (Sum)"]
+        AR --> Y["最终输出 Y"]
     end
 ```
+<p class="caption" align="center"><em>图 6-1：Megatron-LM MLP 模块列分片与行分片矩阵乘法拓扑</em></p>
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Input as 输入张量 X
+    participant Column as Column Linear (QKV Projection)
+    participant Core as Multi-Head Attention Compute
+    participant Row as Row Linear (Out Projection)
+    participant Comm as 通信原语 (AllReduce)
+    
+    Input->>Column: 无通信广播输入 X
+    Column->>Core: 各卡计算本地注意力头 (Heads / TP)
+    Core->>Row: 局部注意力上下文乘本地行分片
+    Row->>Comm: 触发一次 AllReduce 同步各卡部分和
+    Comm-->>Input: 输出完整特征向量进入下层
+```
+<p class="caption" align="center"><em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em></p>
 
+<p class="caption" align="center"><em>图 6-1：Megatron-LM MLP 模块列分片与行分片矩阵乘法拓扑</em></p>
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Input as 输入张量 X
+    participant Column as Column Linear (QKV Projection)
+    participant Core as Multi-Head Attention Compute
+    participant Row as Row Linear (Out Projection)
+    participant Comm as 通信原语 (AllReduce)
+    
+    Input->>Column: 无通信广播输入 X
+    Column->>Core: 各卡计算本地注意力头 (Heads / TP)
+    Core->>Row: 局部注意力上下文乘本地行分片
+    Row->>Comm: 触发一次 AllReduce 同步各卡部分和
+    Comm-->>Input: 输出完整特征向量进入下层
+```
+<p class="caption" align="center"><em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em></p>
 
 ### 1. 两个恒等式
 
@@ -284,7 +316,6 @@ if __name__ == "__main__":
     print("TP-MLP 与完整 MLP 等价 ✓（中间无需 all-reduce）")
 ```
 
-# 第 6 课参考答案（复盘用，先提交再打开）
 
 ## 补全后的代码（关键填空处）
 

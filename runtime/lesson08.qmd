@@ -1,5 +1,5 @@
 ---
-title: 框架运行时、数据与性能补充线 · 第 8/8 课：可复现性、回归定位与性能排障
+title: "第 8 课：可复现性、回归定位与性能排障"
 jupyter: python3
 ---
 
@@ -23,6 +23,57 @@ jupyter: python3
 前置：Python、PyTorch、train 第 1～5 课、CUDA 基础。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart TD
+    subgraph JitterSources["训练性能抖动与吞吐下降核心诱因"]
+        Straggler["掉队卡 (Straggler): 降频 / ECC 双位错误重试"]
+        NCCLWait["集合通信悬停 (NCCL Barrier Stall): 负载不均"]
+        GC["Python GC 停顿与 CPU 调度抖动"]
+        IOContention["分布式存储 IO 拥塞导致 GPU 饥饿"]
+    end
+```
+<p class="caption" align="center"><em>图 8-1：分布式集群性能回归与抖动诱因排查矩阵</em></p>
+
+```mermaid
+flowchart TD
+    Alert["监控报警: 训练 TFLOPS / Step Time 出现异常回归"] --> Step1["抓取全节点 Profiler Timeline 查看 GPU 空闲气泡"]
+    Step1 --> CheckBubble{"主要气泡出现在 IO 还是 通信?"}
+    CheckBubble -->|IO 等待| FixIO["调优 DataLoader worker 数、开启 pin_memory 或本地缓存"]
+    CheckBubble -->|NCCL 等待| CheckRank{"各卡 Step Time 是否严重不均?"}
+    CheckRank -->|是| FindStraggler["定位单卡硬件故障 / 动态序列过长木桶短板"]
+    CheckRank -->|否| OptComm["排查网络拓扑配对 / 开启通信重叠或梯度分桶"]
+```
+<p class="caption" align="center"><em>图 8-2：系统级性能回归二分分段排查与根因定位决策流</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart TD
+    subgraph JitterSources["训练性能抖动与吞吐下降核心诱因"]
+        Straggler["掉队卡 (Straggler): 降频 / ECC 双位错误重试"]
+        NCCLWait["集合通信悬停 (NCCL Barrier Stall): 负载不均"]
+        GC["Python GC 停顿与 CPU 调度抖动"]
+        IOContention["分布式存储 IO 拥塞导致 GPU 饥饿"]
+    end
+```
+<p class="caption" align="center"><em>图 8-1：分布式集群性能回归与抖动诱因排查矩阵</em></p>
+
+```{mermaid}
+flowchart TD
+    Alert["监控报警: 训练 TFLOPS / Step Time 出现异常回归"] --> Step1["抓取全节点 Profiler Timeline 查看 GPU 空闲气泡"]
+    Step1 --> CheckBubble{"主要气泡出现在 IO 还是 通信?"}
+    CheckBubble -->|IO 等待| FixIO["调优 DataLoader worker 数、开启 pin_memory 或本地缓存"]
+    CheckBubble -->|NCCL 等待| CheckRank{"各卡 Step Time 是否严重不均?"}
+    CheckRank -->|是| FindStraggler["定位单卡硬件故障 / 动态序列过长木桶短板"]
+    CheckRank -->|否| OptComm["排查网络拓扑配对 / 开启通信重叠或梯度分桶"]
+```
+<p class="caption" align="center"><em>图 8-2：系统级性能回归二分分段排查与根因定位决策流</em></p>
+
 
 ### 它是什么、解决什么问题
 

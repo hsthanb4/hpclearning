@@ -1,5 +1,5 @@
 ---
-title: 集群平台、网络存储与可靠性补充线 · 第 5/8 课：Gang Scheduling 与拓扑感知放置
+title: "第 5 课：Gang Scheduling 与拓扑感知放置"
 jupyter: python3
 ---
 
@@ -23,6 +23,69 @@ jupyter: python3
 前置：Linux/网络基础、runtime 补充线、train 分布式章节。本课只补 AI Infra 缺口，不重复已经完成的 kernel 或并行算法推导。
 
 ## 核心心智模型
+
+
+### 核心操作与执行流程图解
+
+```mermaid
+flowchart TD
+    subgraph NonGang["传统调度器 (可能引发死锁)"]
+        JobA_Part["任务 A: 申请到 4 卡 (等待另外 4 卡)"]
+        JobB_Part["任务 B: 申请到 4 卡 (等待另外 4 卡)"]
+        Deadlock["资源互相锁死，均无法启动"]
+        JobA_Part -.-> Deadlock
+        JobB_Part -.-> Deadlock
+    end
+    subgraph Gang["Gang 调度器 (All-or-Nothing)"]
+        Pool["集群空闲卡池: 4 卡"]
+        Queue["任务队列: 任务 A 需 8 卡"]
+        Wait["任务 A 保持整体排队，不占用任何资源，彻底避免死锁"]
+        Pool & Queue --> Wait
+    end
+```
+<p class="caption" align="center"><em>图 5-1：分布式训练 All-or-Nothing Gang 调度防死锁核心机制</em></p>
+
+```mermaid
+flowchart TD
+    Job["新提交分布式作业 (请求 32 卡)"] --> CheckLevel1{"是否有单机柜满足全量卡数?"}
+    CheckLevel1 -->|是| PlaceRack["机柜内放置: 极小化跨 ToR 核心交换机流量 (最优)"]
+    CheckLevel1 -->|否| CheckLevel2{"是否有同属于同一汇聚交换机的相邻机柜?"}
+    CheckLevel2 -->|是| PlaceAgg["同 Spine 汇聚层放置: 保证次优 RDMA 带宽"]
+    CheckLevel2 -->|否| Reject["排队等待拓扑资源空出，拒绝散布放置"]
+```
+<p class="caption" align="center"><em>图 5-2：集群拓扑感知调度放置 (Topology-Aware Scheduling) 决策树</em></p>
+
+
+### 核心操作与执行流程图解
+
+```{mermaid}
+flowchart TD
+    subgraph NonGang["传统调度器 (可能引发死锁)"]
+        JobA_Part["任务 A: 申请到 4 卡 (等待另外 4 卡)"]
+        JobB_Part["任务 B: 申请到 4 卡 (等待另外 4 卡)"]
+        Deadlock["资源互相锁死，均无法启动"]
+        JobA_Part -.-> Deadlock
+        JobB_Part -.-> Deadlock
+    end
+    subgraph Gang["Gang 调度器 (All-or-Nothing)"]
+        Pool["集群空闲卡池: 4 卡"]
+        Queue["任务队列: 任务 A 需 8 卡"]
+        Wait["任务 A 保持整体排队，不占用任何资源，彻底避免死锁"]
+        Pool & Queue --> Wait
+    end
+```
+<p class="caption" align="center"><em>图 5-1：分布式训练 All-or-Nothing Gang 调度防死锁核心机制</em></p>
+
+```{mermaid}
+flowchart TD
+    Job["新提交分布式作业 (请求 32 卡)"] --> CheckLevel1{"是否有单机柜满足全量卡数?"}
+    CheckLevel1 -->|是| PlaceRack["机柜内放置: 极小化跨 ToR 核心交换机流量 (最优)"]
+    CheckLevel1 -->|否| CheckLevel2{"是否有同属于同一汇聚交换机的相邻机柜?"}
+    CheckLevel2 -->|是| PlaceAgg["同 Spine 汇聚层放置: 保证次优 RDMA 带宽"]
+    CheckLevel2 -->|否| Reject["排队等待拓扑资源空出，拒绝散布放置"]
+```
+<p class="caption" align="center"><em>图 5-2：集群拓扑感知调度放置 (Topology-Aware Scheduling) 决策树</em></p>
+
 
 ### 它是什么、解决什么问题
 
