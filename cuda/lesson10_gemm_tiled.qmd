@@ -50,25 +50,63 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-Tiled GEMM 让一个 A/B 子块被 block 内多个输出复用，降低每次 FMA 对 global memory 的需求。
+**分块矩阵乘法（Tiled GEMM with Shared Memory）** 是高性能计算（HPC）与深度学习算子开发中最具里程碑意义的优化技术。它求解通用矩阵乘法：
+$$C = A \cdot B, \quad A \in \mathbb{R}^{M \times K}, \ B \in \mathbb{R}^{K \times N}, \ C \in \mathbb{R}^{M \times N}$$
 
-### 2. 它如何工作
+**朴素 GEMM 的“内存墙”灾难（结合图 10-1 Roofline 模型）**：
+- 在朴素实现中，每个输出元素 $C_{i, j} = \sum_{k=0}^{K-1} A_{i, k} B_{k, j}$。为了执行 1 次乘加运算（FMA，包含 1 次乘法和 1 次加法，共 2 FLOP），线程必须分别从高延迟的全局显存（Global Memory）加载 1 个 float 的 $A_{i, k}$（4 字节）和 1 个 float 的 $B_{k, j}$（4 字节）；
+- 朴素计算的算术强度（Arithmetic Intensity）仅为：
+  $$\text{AI}_{\text{naive}} = \frac{2 \text{ FLOP}}{4\text{ B} + 4\text{ B}} = 0.25 \text{ FLOP/Byte}$$
+- 以 NVIDIA H100 为例，其 FP32 向量理论算力约为 67 TFLOPS，而 HBM3 显存带宽仅为 3.35 TB/s。Roofline 模型的硬件算力拐点高达 $\frac{67}{3.35} \approx 20 \text{ FLOP/Byte}$。朴素 GEMM 深陷严重的“显存带宽受限区（Memory-Bound）”，硬件计算单元利用率甚至不足 2%！
+- **分块复用解法（Tiling）**：将输入矩阵切分为 $T \times T$ 的片上瓦片（Tiles），利用极高速的 Shared Memory 暂存数据。瓦片内的数据被 Block 内全体线程重复读取 $T$ 次，算术强度线性提升至 $\frac{T}{4} \text{ FLOP/Byte}$，使算子迅速逼近甚至进入 Compute-Bound 饱和区。
 
-每轮协作加载 A、B tile，同步后线程计算一个 C 元素的 K 子段，再同步防止下一轮覆盖。
+### 2. 它如何工作（结合图 10-2）
+
+以 $T = 16$ 为例，一个 ThreadBlock 包含 $16 \times 16 = 256$ 个线程，负责计算 $C$ 矩阵中一个 $16 \times 16$ 大小的子块：
+1. **外层分块推进循环（$K$-Loop）**：
+   - 沿收缩维度 $K$ 以步长 $T=16$ 步进（`for (int k0 = 0; k0 < K; k0 += TILE)`）；
+   - 在每轮迭代中，Block 内 256 个线程协同将当前 $A$ 矩阵的 $16 \times 16$ 分块和 $B$ 矩阵的 $16 \times 16$ 分块加载到共享内存 `As[16][16]` 与 `Bs[16][16]` 中。
+2. **第一同步点：写后读保护（Sync 1: RAW Hazard Barrier）**：
+   - 调用 `__syncthreads()`。强制所有线程必须在此等待，直到整个 $16 \times 16$ 瓦片的数据全部从全局显存写入共享内存完毕，杜绝过早读取未初始化脏数据。
+3. **片上乘加累加（Compute & Register Accumulation）**：
+   - 线程从低延迟的 Shared Memory 中依次读取对应的行与列，在本地私有寄存器 `acc` 中完成当前分块的 $16$ 次 FMA 累加：
+     $$\text{acc} \mathrel{+}= \sum_{k=0}^{T-1} A_s[\text{threadIdx.y}][k] \times B_s[k][\text{threadIdx.x}]$$
+4. **第二同步点：读后写保护（Sync 2: WAR Hazard Barrier）**：
+   - 计算完成后，**必须执行第二次 `__syncthreads()`**！确保全体线程都已将当前瓦片的数据消费完毕，防止跑得快的线程开启下一轮循环将新的分块数据覆写进 `As/Bs`，覆盖掉跑得慢的线程尚未读取的数据。
+5. **边界检查与写回**：
+   - 当 $K$ 维循环结束，每个线程将各自寄存器中累加出的最终标量 `acc` 合并写回全局显存 `C[row * N + col]`。
 
 ### 3. 正确性条件与常见误区
 
-越界加载要填 0；K 尾块也必须执行相同同步，不能让部分线程提前 return。
+1. **边界线程“中途 Return”导致全 Block 永久死锁**：
+   - 当 $M$ 或 $N$ 不是 $T$ 的整数倍时，边缘 Block 包含越界线程（$row \ge M$ 或 $col \ge N$）；
+   - **一票否决级致命错误**：绝不能在 Kernel 开头写 `if (row >= M || col >= N) return;`！根据 CUDA 规范，`__syncthreads()` 必须由 Block 内的所有物理线程协同调用。若部分线程提前退出，剩余线程将在循环内的栅障处无限等待死锁，最终触发驱动超时挂起；
+   - **正确做法**：越界线程必须完整参与全流程与每一次 `__syncthreads()`，仅在加载显存时填 0（`0.0f`），并在最终写回 $C$ 矩阵时通过条件守卫跳过写入。
+2. **缺漏第二个 `__syncthreads()` 的读后写数据冒险**：
+   - 很多初学者误以为每轮循环只需要一次同步。如果没有 Sync 2，不同 Warp 的进度差异会使部分线程过早向 `As` 写入下一个 Tile，摧毁正在执行上一轮计算的线程数据。
 
 ### 4. 性能与工程取舍
 
-每线程一个输出易懂但寄存器复用低；高性能实现使用 register tile、向量化和异步流水。
+1. **瓦片尺寸 $T$ 的扩展权衡（$16 \to 32$）**：
+   - 数据复用率随 $T$ 增大而线性增长（复用率由 16 倍翻倍到 32 倍），算术强度提升到 $8 \text{ FLOP/B}$；
+   - 但 Block 线程数将从 256 暴增到 1024（达到单 Block 允许的硬件上限），Shared Memory 占用从 2 KB 增加到 8 KB，可能大幅压缩 SM 上的活跃线程块总数（Occupancy），增加尾块浪费。
+2. **从 Scalar Tile 到 Register Tiling 与 Tensor Core**：
+   - 当前单线程仅计算 1 个输出元素，数据虽然在 Shared Memory 复用了，但在寄存器级别并未复用（每个线程每次都要从 SMEM 读数据）；
+   - 工业级高性能算子（如 cuBLAS、CUTLASS）采用 **2D Register Tiling（如每线程计算 $8 \times 8$ 个输出）**，并在现代架构上调用硬件原生的 Tensor Core（如 HMMA、MMA PTX 指令），将算力发挥到极致。
 
-## 具体演示
+## 具体演示：数据复用率与访存放大对比演算
 
-16×16 tile 每轮加载 512 个数，产生 16³ 次 FMA；相较每次 FMA 都读 global 有 16 倍级复用。
-
-请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+考虑矩阵尺寸为 $1024 \times 1024$ 的方阵乘法（$M = N = K = 1024$）：
+- **全矩阵浮点计算量**：$2 \times 1024^3 \approx 2.147 \times 10^9 \text{ FLOP}$（约 2.15 GFLOP）；
+- **朴素无分块版本（Naive GEMM）**：
+  - 计算每一个 $C$ 元素，线程都必须从 HBM 读取整整一行 $A$（1024 个数）和整整一列 $B$（1024 个数）；
+  - 全局内存总读取次数：$1024^2 \times (1024 + 1024) = 2 \times 1024^3 \text{ 次读取} \approx 8.59 \text{ GB}$ 流量；
+  - 算术强度：$\frac{2.15\text{ GFLOP}}{8.59\text{ GB}} \approx 0.25 \text{ FLOP/Byte}$。
+- **共享内存分块版本（$T = 16$ Tiled GEMM）**：
+  - 矩阵被划分为 $(1024/16) \times (1024/16) = 64 \times 64 = 4096$ 个分块；
+  - 每个分块在 $K$ 维推进 64 轮，每轮协同加载 $16 \times 16 \times 2 = 512$ 个浮点数；
+  - 全局内存总读取次数：$4096 \times 64 \times 512 = 1.34 \times 10^8 \text{ 次读取} \approx 536.87 \text{ MB}$ 流量；
+  - **总访存量精确减少为朴素版本的 $\frac{1}{16}$**！算术强度跃升为 $4.0 \text{ FLOP/Byte}$，显存总线压力骤降 93.75%。
 
 ## 实践任务：唯一代码填空题
 
@@ -282,15 +320,41 @@ void launch_gemm_tiled(
 
 ### Q1 参考答案
 
-每轮协作加载 A、B tile，同步后线程计算一个 C 元素的 K 子段，再同步防止下一轮覆盖。
+1. **输入阶段（Grid-to-Block Tile Mapping & Collaborative Load）**：
+   - 算法将输出矩阵 $C$ 划分成二维网格，每个 Block 包含 $16 \times 16 = 256$ 个线程，负责计算 $C$ 的一个 $16 \times 16$ 子块。线程在本地寄存器中初始化累加变量 `acc = 0.0f`；
+   - 沿收缩维度 $K$ 步进（步长为 16），在每个步进轮次中，Block 内全部 256 个线程协同从全局显存分别加载 $A$ 矩阵的 $16 \times 16$ 切片与 $B$ 矩阵的 $16 \times 16$ 切片到共享内存 `As` 与 `Bs` 中。遇到边界外的虚拟位置直接填充浮点数 `0.0f`；
+2. **状态变化阶段（Double Barrier & Inner-Tile Matrix Multiplication）**：
+   - **第一同步点（Sync 1 / RAW 保护）**：调用 `__syncthreads()`，强制全体线程阻塞等待，直到片上两个 $16 \times 16$ 瓦片的数据全部写入完毕；
+   - **寄存器级乘加累加**：每个线程从 `As` 读取所属行的 16 个值，从 `Bs` 读取所属列的 16 个值，通过循环展开执行 16 次乘加运算累积到私有寄存器 `acc` 中。这一步实现了瓦片内数据被复用 16 次的巨大收益；
+   - **第二同步点（Sync 2 / WAR 保护）**：计算完毕后再次调用 `__syncthreads()`，确保全 Block 线程都已完全读取完当前瓦片，杜绝执行过快的线程提前开启下一轮循环覆写 `As` 和 `Bs`；
+3. **输出阶段（Boundary-Guarded Global Write）**：
+   - 当 $K$ 维全部推进完毕，每个有效线程（$row < M$ 且 $col < N$）将本地私有寄存器中沉淀出的完整点积结果 `acc` 单次写入目标全局显存 `C[row * N + col]`。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：越界加载要填 0；K 尾块也必须执行相同同步，不能让部分线程提前 return。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+将边界线程直接执行 `return` 退出 Kernel 会破坏 CUDA 硬件同步协议，必然导致同 Block 内的其余有效线程**陷入永久死锁（Hardware Deadlock）**：
+1. **CUDA 栅障指令（Bar.Sync）的物理约束**：
+   - `__syncthreads()` 在硬件 PTX 层面对应 `bar.sync` 指令。该指令要求当前 ThreadBlock 内**处于存活状态的全部预期线程（Expected Thread Count）协同到达屏障计数器**，硬件计数器达标后才会统一释放所有线程继续向下执行；
+2. **死锁形成的确定性因果链**：
+   - 当矩阵边界不能被分块大小整除时，边界 Block 内的部分线程满足 `row >= M || col >= N`；
+   - 若这些越界线程直接 `return` 提前终止了物理生命周期，硬件调度器中该 Block 的实际存活执行线程数减少；
+   - 留在循环内计算有效数据的正常线程执行到 `__syncthreads()` 栅障时，硬件控制器仍在无限期等待已经死掉的越界线程到达该栅障；
+   - 剩余线程被永久挂起，SM 调度单元无法释放该 Block，GPU 执行流被彻底卡死，数秒后触发驱动层看门狗超时机制（`cudaErrorLaunchTimeout`）导致程序崩溃；
+3. **铁律**：Block 内所有线程的控制流分支中，`__syncthreads()` 必须在全 Block 范围内是聚合一致的。越界线程必须保持存活并按相同次数调用 `__syncthreads()`，仅通过 `0.0f` 参与虚拟计算，最后写回时通过分支跳过。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：每线程一个输出易懂但寄存器复用低；高性能实现使用 register tile、向量化和异步流水。
+将分块尺寸从 $\text{TILE}=16$ 扩大到 $\text{TILE}=32$ 会对硬件资源和 SM Occupancy（占用率）产生剧烈的结构性重塑：
+1. **线程数与硬件限制**：
+   - 单 Block 线程数从 $16 \times 16 = 256$ 暴增到 $32 \times 32 = 1024$。1024 正是 NVIDIA 现代 GPU（如 Ampere、Hopper）允许的单 Block 最大物理线程上限；
+2. **共享内存用量激增**：
+   - 瓦片元素数由 $2 \times 16^2 = 512$ 个浮点数（2 KB）剧增至 $2 \times 32^2 = 2048$ 个浮点数（8 KB）。虽然 8 KB 仍在现代 SM（通常拥有 100~228 KB SMEM）的安全范围内，但空间放大了 4 倍；
+3. **Occupancy（占用率）与延迟隐藏能力受挫**：
+   - 单 SM 的最大并发物理线程数通常为 2048；
+   - 当 $\text{TILE}=16$（256 线程/Block）时，单个 SM 最多可容纳 $2048 / 256 = 8$ 个并发 Block，Warp 调度器拥有极其充裕的 Candidate Warps 来掩盖显存访问延迟，理论 Occupancy 可达 100%；
+   - 当 $\text{TILE}=32$（1024 线程/Block）时，单个 SM 理论上最多只能驻留 $2048 / 1024 = 2$ 个 Block。一旦每个线程使用的寄存器数量稍有增加（例如超过 32 个），SM 就会因为寄存器文件耗尽而被迫降级为只能驻留 1 个 Block（Occupancy 瞬间跌至 50%），削弱了 GPU 动态隐藏内存延迟的能力；
+4. **性能收益的权衡**：
+   - 尽管 Occupancy 可能下降，但每个元素在片上的复用次数由 16 倍提升到 32 倍，全局访存流量直接减半，算术强度翻倍。在显存带宽极度受限（Memory-Bound）的超大矩阵场景下，这种访存压缩带来的增益往往能压倒 Occupancy 下降的损失。
 
 ## 参考资料
 

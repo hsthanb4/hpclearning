@@ -60,27 +60,85 @@ sequenceDiagram
 <p class="caption" align="center"><em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em></p>
 
 
-### 1. 它是什么，解决什么问题
+### 1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势
 
-RMSNorm 只按均方根缩放，不减均值；LLM 中常按最后一维做归一化。
+均方根层归一化（Root Mean Square Layer Normalization, RMSNorm）是现代大语言模型（如 LLaMA 系列、Mistral、Qwen、DeepSeek）中近乎通用的归一化层标准，全面替代了经典的 LayerNorm。
 
-### 2. 它如何工作
+#### A. 核心数学公式推导（如**图 4-1** 所示）
+对于输入特征向量 $x \in \mathbb{R}^N$（通常为 Transformer 隐藏层维度 $h$），其均方根（RMS）定义为：
+$$\text{RMS}(x) = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2 + \epsilon}$$
+归一化并施加可学习仿射缩放系数 $w \in \mathbb{R}^N$（Weight / Gamma）：
+$$y_i = \frac{x_i}{\text{RMS}(x)} \cdot w_i \quad (i = 1, \dots, N)$$
+为了避免在除法中出现浮点除以零，通常计算其倒数：$\text{inv\_rms} = \frac{1}{\sqrt{\frac{1}{N} \sum x_i^2 + \epsilon}} = \text{rsqrt}\left(\frac{\sum x_i^2}{N} + \epsilon\right)$。
 
-第一遍归约 sum(x²)，得到 inv_rms=rsqrt(sum/N+eps)；同步后第二遍乘输入和 weight。
+#### B. 相比传统 LayerNorm 的核心优势
+在传统 LayerNorm 中：
+$$\mu = \frac{1}{N} \sum_{i=1}^N x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=1}^N (x_i - \mu)^2, \quad y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot w_i + b_i$$
+- **消除了均值中心化（Zero-Mean Shift）**：Zhang et al. (2019) 发现，LayerNorm 保持训练数值稳定的核心是其**尺度不变性（Scaling Invariance）**，平移方差中心化（减均值）对模型收敛的贡献微乎其微。
+- **计算与显存开销双重削减**：
+  1. LayerNorm 需要计算两次全局统计约简（一次均值 $\mu$、一次方差 $\sigma^2$）；而 RMSNorm **仅需一次单规约（$\sum x_i^2$）**；
+  2. 移除了偏置参数 $b$（Beta），减少了可训练参数量并降低了参数读取带宽；
+  3. 算子执行耗时直接下降 10%~20%，显著提升了小 Batch 推理场景的执行速度。
 
-### 3. 正确性条件与常见误区
+### 2. 两阶段扫描（Two-Pass Scanning）与片上同步时序（如**图 4-2** 所示）
 
-eps 加在均值之后、开方之前；统计与累积应使用足够精度，且 N 必须大于 0。
+在大模型中，每一行（Row）通常代表一个 Token 的隐藏维度（如 $N = 4096 \sim 8192$）。单个 Block 绑定处理一行：
 
-### 4. 性能与工程取舍
+#### A. 第一遍扫描（Pass 1：平方和规约）
+- Block 内各线程沿列方向跨步遍历该行：
+  ```cuda
+  for (int col = tid; col < N; col += BLOCK_SIZE) {
+      local_sq_sum += row_in[col] * row_in[col];
+  }
+  ```
+- 相邻线程读取相邻列，满足 128 字节对齐合并读取；
+- 调用 `block_reduce_sum` 将 Block 内所有线程的局部平方和累加为全局行平方和 `sq_sum`；
+- 由 `tid == 0` 线程调用硬件单周期快速指令 `rsqrtf(sq_sum / N + eps)` 计算出全行共享的 `inv_rms`，并存入共享内存 `smem_inv_rms`。
 
-少一个 sum 统计且无 beta，但仍需读两遍输入；融合残差/量化可减少 HBM 流量。
+#### B. 显式障栅同步（`__syncthreads()`）
+在进入第二阶段之前，**必须显式调用 `__syncthreads()`**！
+若遗漏该同步屏障，非 0 号 Warp 的线程在读取 `smem_inv_rms` 时，0 号线程可能尚未完成倒数平方根的写回，导致后续计算读入未初始化的脏数据或 NaN。
 
-## 具体演示
+#### C. 第二遍扫描（Pass 2：归一化与写回）
+- 同步完成后，全体线程并发从共享内存中加载统一的 `inv_rms` 广播标量；
+- 线程再次沿列方向遍历，重新从全局内存读取该行输入 `row_in[col]`，并同步读取权重 `weight[col]`；
+- 在寄存器中完成连续乘法：`row_out[col] = row_in[col] * inv_rms * weight[col]`；
+- 最终以合并写入事务写回全局内存 `output`。
 
-输入 [3,4]、eps=0 时 rms=sqrt(12.5)，输出按同一个 inv_rms 缩放。
+### 3. 正确性不变量与数值防御
 
-请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+1. **数值下溢防御常数 $\epsilon$ 的添加位置**：
+   - 极其关键的不变量：$\epsilon$ **必须加在均方根的均值项上、开方符号之前**（即 $\sqrt{\frac{\sum x^2}{N} + \epsilon}$），严禁误写为 $\frac{\sqrt{\sum x^2}}{N} + \epsilon$。
+   - 典型设置：$\epsilon = 10^{-5}$ 或 $10^{-6}$。当输入向量全为 0 时，$\epsilon$ 确保开方后分母不为 0，防止除以零产生 `NaN`。
+2. **高精度平方累积（FP32 Accumulation）**：
+   - 即便输入数据是 FP16 或 BF16 格式，在循环计算 `x * x` 并在 Block 内求和时，**必须强制提升至 FP32 寄存器进行累加**。
+   - 否则在 $N = 8192$ 等长隐藏维下，成千上万个小浮点数的平方和极易在低精度浮点下发生精度饱和下溢或指数溢出。
+
+### 4. 性能与工程进阶：残差连接融合（Fused Add-RMSNorm）
+
+在标准 Transformer Block 中，RMSNorm 紧随残差连接之后（即 $y = \text{RMSNorm}(x + \text{residual})$）。
+- **未融合状态下的内存往返灾难**：
+  先启动一个单独的 Elementwise Add Kernel 将 $x + \text{residual}$ 写回 HBM；随后 RMSNorm 内核再两次从 HBM 读取该结果。
+- **算子融合（Fused Kernel）**：
+  在 Pass 1 中，线程就地加载 $x$ 与 $\text{residual}$ 相加并累加平方和，同时就地写回残差结果；在 Pass 2 中直接使用该结果计算归一化输出。
+  **一次融合消除了 2 次全局内存往返读写**，在大模型前向传播中带来近 $2\times$ 的 Norm 层端到端加速。
+
+## 具体演示与数值推演
+
+设输入向量为二维简单数组，单行 $N = 2$：$x = [3.0, 4.0]$，权重 $w = [1.0, 2.0]$，设置 $\epsilon = 0.0$：
+
+- **平方和累加推演（Pass 1）**：
+  $$\sum_{i=1}^2 x_i^2 = 3.0^2 + 4.0^2 = 9.0 + 16.0 = 25.0$$
+- **均方根计算**：
+  $$\text{Mean} = \frac{25.0}{N} = \frac{25.0}{2} = 12.5$$
+  $$\text{RMS} = \sqrt{12.5} \approx 3.5355339$$
+  $$\text{inv\_rms} = \frac{1}{\text{RMS}} = \frac{1}{\sqrt{12.5}} \approx 0.2828427$$
+- **归一化与仿射写回（Pass 2）**：
+  - 第 0 列输出：
+    $$y_0 = x_0 \times \text{inv\_rms} \times w_0 = 3.0 \times 0.2828427 \times 1.0 \approx 0.848528$$
+  - 第 1 列输出：
+    $$y_1 = x_1 \times \text{inv\_rms} \times w_1 = 4.0 \times 0.2828427 \times 2.0 \approx 2.262742$$
+- **方差校验**：归一化后的中间项 $\hat{x} = [\frac{3}{\sqrt{12.5}}, \frac{4}{\sqrt{12.5}}]$ 其均方根严格为 $\sqrt{\frac{9/12.5 + 16/12.5}{2}} = \sqrt{\frac{25/12.5}{2}} = \sqrt{1.0} = 1.0$，数学上完美自洽。
 
 ## 实践任务：唯一代码填空题
 
@@ -356,15 +414,31 @@ void launch_rmsnorm(
 
 ### Q1 参考答案
 
-第一遍归约 sum(x²)，得到 inv_rms=rsqrt(sum/N+eps)；同步后第二遍乘输入和 weight。
+- **输入状态**：全局显存中连续存放的输入张量 $X \in \mathbb{R}^{M \times N}$、可学习权重向量 $w \in \mathbb{R}^N$、极小正数 $\epsilon$ 以及发射配置 `<<<M, BLOCK_SIZE>>>`。
+- **状态变化（两阶段扫描与片上规约）**：
+  1. **第一阶段（平方和汇聚）**：每个 Block 绑定一行，线程沿列方向跨步加载 $x_i$，在私有寄存器中累加局部平方和 $x_i^2$；随后通过 Warp Shuffle 与 Shared Memory 快速树状折叠出该行的全局平方和 $\sum x^2$；
+  2. **片上倒数标量广播**：由 `tid == 0` 线程计算 $\text{inv\_rms} = \text{rsqrtf}(\frac{\sum x^2}{N} + \epsilon)$，写入共享内存并通过 `__syncthreads()` 广播同步给 Block 内所有线程；
+  3. **第二阶段（归一化与仿射写回）**：所有线程并发从共享内存读取 `inv_rms`，重新从全局显存读取对应的输入 $x_i$ 与权重 $w_i$，在寄存器中计算 $y_i = x_i \cdot \text{inv\_rms} \cdot w_i$。
+- **输出状态**：输出张量 $Y \in \mathbb{R}^{M \times N}$ 写回全局显存，各行特征向量均方根被精确拉齐至 1.0 附近，数值方差达到归一化标准。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：eps 加在均值之后、开方之前；统计与累积应使用足够精度，且 N 必须大于 0。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+- **尺度畸变推导**：
+  RMSNorm 的数学定义是均值的方根：$\text{RMS} = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2} = \frac{\sqrt{\sum x_i^2}}{\sqrt{N}}$。
+  若错误地在除法中漏掉平方根运算，或者将开方写为 $\frac{\sum x_i^2}{\sqrt{N}}$：
+  - 缩放因子的量纲发生严重漂移：平方和原本具有二次量纲 $O(\|x\|^2)$，若除以 $\sqrt{N}$，其倒数尺度的数量级与理论值偏差达到 $\sqrt{N}$ 倍！
+  - 以大模型常见隐藏维度 $N = 4096$ 为例，$\sqrt{N} = 64$。输出激活值将被错误放大或缩小整整 64 倍！
+- **后果**：直接导致下游自注意力（Attention）的 QK 点积激活值爆炸，Softmax 输出极端饱和产生 NaN，梯度在反向传播首步即发生彻底爆炸。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：少一个 sum 统计且无 beta，但仍需读两遍输入；融合残差/量化可减少 HBM 流量。
+- **未融合状态下的读写开销**：
+  1. Residual Add Kernel：读取输入 $X$（$MN$ 个数）、读取残差 $\text{Res}$（$MN$ 个数），将结果 $X_{\text{new}}$ 写回显存（$MN$ 个数）$\implies$ 消耗 $3 MN$ 次访存；
+  2. RMSNorm Kernel：Pass 1 读取 $X_{\text{new}}$（$MN$），Pass 2 再次读取 $X_{\text{new}}$（$MN$）、读取权重 $W$（$N$），写出 $Y$（$MN$）$\implies$ 消耗 $3 MN + N$ 次访存；
+  - **总访存量**：$3 MN + 3 MN + N \approx 6 MN$ 个元素的全局显存读写。
+- **算子融合后的优化收益**：
+  在 Pass 1 中，线程同时加载 $X$ 与 $\text{Res}$ 就地相加，并在本地完成平方和统计，同时可顺手将相加后的残差写回全局内存（若后续网络仍需残差输出）；在 Pass 2 中直接从 L2 缓存或寄存器复用该数据完成归一化。
+  - **节省量**：直接省去了独立的 Add 内核调度开销，消灭了 $2 MN$ 次中间全局显存往返读写，显存带宽节约率高达 33%~50%！
 
 ## 参考资料
 

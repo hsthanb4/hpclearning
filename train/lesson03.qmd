@@ -48,46 +48,56 @@ jupyter: python3
 :::
 
 
-### 1. 三个基本模式
+### 1. 分布式通信的三大基本模式
 
-- **Broadcast**：一个 root 的数据复制给所有 rank（数据不改变）。
-- **Reduce**：各 rank 的数据经二元运算（SUM 等）合并，结果只到 root。
-- **AllReduce**：Reduce + 结果广播给所有 rank。DP 同步梯度就用它。
+在分布式集群中，各 GPU 节点（Rank）通过高速互联网络（NVLink / NVSwitch / RoCE / InfiniBand）交换张量数据。最基础的原语包括：
 
-### 2. 分发与收集模式
+- **Broadcast（一对多广播）**：指定的 Root 节点将其持有的完整张量复制发送到组内所有其他 Rank。张量内容在通信前后保持一致，主要用于初始化时同步模型参数、广播全局配置与随机数种子。
+- **Reduce（多对一归约）**：组内所有 Rank 的同构张量按元素应用二元归约算子（如求和 SUM、求最大值 MAX、乘积 PROD）进行规约合并，最终汇总结果仅输出保存在 Root 节点上，其他节点数据不改变。
+- **AllReduce（多对多全局规约）**：等价于执行一次 Reduce 将全局结果汇总后，再执行一次 Broadcast 分发至所有 Rank。在数据并行（DDP）中，每步反向传播计算完毕后，正是利用 AllReduce(SUM) 同步并平均所有卡上的梯度。
 
-- **Gather / AllGather**：各 rank 的**不同**数据块汇集到一个 root / 所有 rank。与 Broadcast 的区别：每个 rank 贡献的是自己独有的数据。
-- **Scatter**：root 的数据按块分发给各 rank（Gather 的逆）。
-- **ReduceScatter**：先按块 reduce，再把每块结果留在对应 rank 上——每个 rank 只得到**一部分**汇总结果。通信量约为 all-reduce 的一半。
-- **Barrier**：同步点，所有 rank 到齐才放行。滥用会拖慢整体。
+### 2. 分块数据分发与收集原语
 
-### 3. Ring AllReduce：把通信摊到邻居之间
+在大模型并行（如 ZeRO-3、张量并行 TP、序列并行 SP）中，张量通常被切分为多份碎片，需要更加细粒度的切分与收集原语：
 
-朴素做法是每对 rank 直接通信（all-to-all），连接数和流量随 N 增长，不可扩展。Ring AllReduce 把 rank 排成环，分两个阶段，每步只与相邻 rank 通信：
+- **Gather（多对一收集）**：Root 节点按 Rank 编号顺序收集各个 Rank 各自持有的不同张量切片，并在本地拼接为一个连续大张量。
+- **AllGather（多对多全收集）**：组内每个 Rank 将自己持有的分块张量广播给其他所有 Rank。通信完成后，**每个 Rank 都获得了全局完整拼接的完整张量**。在 ZeRO-3 / FSDP 的前向传播中，每层正是通过 AllGather 动态重建完整权重。
+- **Scatter（一对多分发）**：Gather 的逆操作。Root 节点将本地的一个大张量均等切分为 $N$ 份，分别分发给组内的各个 Rank。
+- **ReduceScatter（多对多规约分片）**：组内各 Rank 先对各自对应的数据块进行全局规约（求和），但**最终并不广播全量结果，而是每个 Rank 仅保留属于自己的那一份规约切片**。通信量严格等于 AllReduce 的一半！
+- **Barrier（全局同步屏障）**：用于阻塞所有 Rank，直到组内所有卡都到达该同步点。在工业训练中应极力避免显式 Barrier，以防止短板节点导致严重的集群空转与 GPU 降频。
 
-1. **ReduceScatter 阶段**（N−1 步）：每个 rank 把数据切成 N 块，逐步把"自己积累的块"传给下一个 rank，同时累加从上一个 rank 收到的块。结束后每个 rank 持有**一块完整的汇总结果**（不同 rank 持有不同块）。
-2. **AllGather 阶段**（N−1 步）：每个 rank 把自己那块汇总结果沿环转发，直到所有 rank 都拿到全部 N 块。
+### 3. Ring AllReduce 算法原理与通信量数学推导
 
-通信量：每个 rank 每步发送 \(K/N\) 个数值（K 为数据总量），共 \(2(N-1)\) 步，即
+在早期的朴素实现中，若采用 Parameter Server（主从架构）或两两全互联（All-to-All），网络连接数和 Root 带宽瓶颈随节点数 $N$ 线性暴增，无法横向扩展。
 
-$$\text{每卡发送通信量} = 2 \cdot \frac{N-1}{N} \cdot K \approx 2K \quad (N \gg 1)$$
+**Ring AllReduce（环形规约算法）** 将 $N$ 个 Rank 逻辑连接为一个单向环，每个 Rank 仅与左右邻居通信，如上图 3-1 与 3-2 所示。算法分为两个核心阶段，每个阶段迭代 $N-1$ 步：
 
-- AllReduce 总成本 ≈ \(2K\)；
-- ReduceScatter 与 AllGather 各 ≈ \(K\)（这就是"reduce-scatter 比 all-reduce 快两倍"的准确含义，也是 ZeRO 省通信的数学基础）。
+1. **ReduceScatter 阶段（$N-1$ 步环形累加）**：  
+   每个 Rank 将大小为 $K$ 的数据均匀切分为 $N$ 个块。在每一步中，Rank $i$ 将自己当前累积的块发送给相邻的 Rank $i+1$，同时接收来自 Rank $i-1$ 的块并累加到本地对应块中。  
+   经过 $N-1$ 步传输后，环上每个 Rank 恰好持有了某一个数据块在全局所有卡上的**完整规约总和**（例如 Rank 0 持有 $\sum B_0$，Rank 1 持有 $\sum B_1$）。
+2. **AllGather 阶段（$N-1$ 步环形全收集）**：  
+   每个 Rank 将刚刚得到的完整规约块沿环继续转发给邻居，邻居接收后存入对应位置并继续下发。  
+   经过 $N-1$ 步后，所有 Rank 的所有 $N$ 个分块都被完整填满。
 
----
+#### 理论通信量与网络延迟模型
 
-### 图解：AllReduce 与 ReduceScatter + AllGather 对比
+设通信张量总数据量为 $K$ 字节，网络单向延迟为 $\alpha$，网络带宽倒数（传输每字节耗时）为 $\beta$：
 
-<div align="center">
-  <img src="assets/allreduce_vs_reducescatter_allgather.jpeg" width="90%" alt="AllReduce vs ReduceScatter + AllGather 对比图解" />
-  <p><em>图 1：AllReduce vs ReduceScatter + AllGather 机制与显存/通信对比（本地 Gemini 绘图模型生成）</em></p>
-</div>
+- 在每个阶段的每一步中，每张卡仅发送 $K/N$ 字节的数据。
+- 两个阶段各经历 $N-1$ 步，总单卡发送通信量为：
 
-<div align="center">
-  <img src="assets/reducescatter_allgather.svg" width="90%" alt="分块状态流转图" />
-  <p><em>图 2：Ring 算法各 Rank 分块在 ReduceScatter 与 AllGather 两个阶段的流转状态</em></p>
-</div>
+$$\text{单卡发送通信量} = 2 \cdot \frac{N-1}{N} \cdot K \approx 2K \quad (N \gg 1)$$
+
+$$\text{总通信耗时} T_{\text{Ring}} = 2(N-1)\alpha + 2 \cdot \frac{N-1}{N} K \beta \approx 2(N-1)\alpha + 2K\beta$$
+
+由此可得两个极其关键的系统结论：
+1. **通信带宽成本与节点数 $N$ 无关**：无论集群有 8 卡还是 1024 卡，每卡传输的数据总量始终恒定在 $2K$ 左右！
+2. **延迟成本随 $N$ 线性增长**：总时延受跳数 $2(N-1)\alpha$ 约束，这解释了为什么千卡规模下纯 Ring 算法会因环太长而效率衰减，现代 NCCL 会在节点内采用 Tree AllReduce 或跨节点双环拓扑来抑制延迟。
+
+::: {.img-card}
+![](assets/figs/train_comm_volume.png){width="85%"}
+<p class="caption">图 3-3：Ring 集合通信理论通信量因子随 Rank 数量扩展曲线（基于 scientific-figure-making 绘制）</p>
+:::
 
 #### 各阶段分块状态对照表（以 4 个 Rank 为例）
 

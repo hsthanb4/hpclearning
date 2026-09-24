@@ -106,10 +106,10 @@ flowchart LR
 ```{mermaid}
 flowchart TD
     Msg["待规约报文尺寸 S 与集群卡数 P"] --> Threshold{"S 是否大于环/树分界阈值?"}
-    Threshold -->|S 较小 (小包)| SelectTree["选择 Tree / CollNet 算法 (极小化延迟 α)"]
-    Threshold -->|S 较大 (大张量)| SelectRing["选择 Ring 环形切分流水 (极大化总线带宽利用率 β)"]
+    Threshold -->|"S 较小 (小包)"| SelectTree["选择 Tree / CollNet 算法 (极小化延迟 α)"]
+    Threshold -->|"S 较大 (大张量)"| SelectRing["选择 Ring 环形切分流水 (极大化总线带宽利用率 β)"]
     SelectTree & SelectRing --> PipeCheck{"跨机网络是否支持 NVLink + RoCE 异构层次?"}
-    PipeCheck -->|支持| TwoLevel["启用分层规约: 节点内 NVLink 规约 ➔ 节点间跨机网络 ➔ 节点内广播"]
+    PipeCheck -->|支持| TwoLevel["启用分层规约: 节点内 NVLink 规约 -> 节点间跨机网络 -> 节点内广播"]
 ```
 <p class="caption" align="center"><em>图 4-2：通信报文尺度判定与层次化集合通信算法路由决策流</em></p>
 """

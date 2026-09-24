@@ -54,25 +54,55 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-LayerNorm 对一行计算均值和方差，再做仿射变换；不同 token 的行互相独立。
+**LayerNorm (层归一化)** 是 Transformer 架构中最核心的归一化算子之一。与 BatchNorm 跨样本（Batch 维度）归约不同，LayerNorm 在单个样本的单个 Token 内部，沿隐藏特征维度（Hidden Dimension $N$）独立计算均值与方差，并进行仿射重缩放：
+$$y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot \gamma_i + \beta_i$$
+其中 $\mu = \frac{1}{N}\sum_{i=1}^N x_i$，$\sigma^2 = \frac{1}{N}\sum_{i=1}^N (x_i - \mu)^2$，$\gamma$ 和 $\beta$ 为可学习的通道缩放与平移参数，$\epsilon$ 为防止除以零的微小正数（通常取 $10^{-5}$ 或 $10^{-6}$）。
 
-### 2. 它如何工作
+**解决的核心痛点**：
+- **消除 Batch 维度依赖**：NLP 与 LLM 推理场景中 Batch Size 经常动态变化（甚至为 1），BatchNorm 无法稳定统计全局矩，而 LayerNorm 保证不同 Token 的行处理完全正交独立；
+- **稳定深层梯度传播**：将激活分布强制拉回到零均值、单位方差，抑制深层残差网络激活值随网络层数加深而发生的数值爆炸（Exploding）或弥散（Vanishing）。
 
-本基础版并行累加 sum 与 sumsq，归约后算 var=E[x²]-E[x]²，再同步广播 mean/inv_std。
+### 2. 它如何工作（结合图 5-1 与图 5-2）
+
+在 GPU 上，典型的算子映射策略为 **One Block per Row（一个 ThreadBlock 负责一行，即一个 Token 的 $N$ 个通道）**：
+1. **第一阶段：合并读入与两矩局部累加**
+   - Block 内所有线程以 Grid-Stride / Stride 方式（`col = tid; col < N; col += BLOCK_SIZE`）遍历整行，相邻线程读取连续内存地址，确保 Global Memory 读取完全合并（Coalesced 128-byte transactions）；
+   - 每个线程在寄存器中维护局部累加标量 `local_sum += x` 与 `local_sq_sum += x * x`。
+2. **第二阶段：双层层次化归约与广播（图 5-2）**
+   - **Warp 级归约**：利用 `__shfl_down_sync` 寄存器洗牌指令，每个 32 线程 Warp 在 5 个周期内完成树状归约，无任何 Shared Memory 开销；
+   - **Block 级归约**：各 Warp 的 Lane 0 将局部结果存入 Shared Memory，再由 Warp 0 进行二次归约，得到整行全局 $\sum x_i$ 和 $\sum x_i^2$；
+   - **统计量发布**：Thread 0 计算标量 $\mu = \frac{\text{sum}}{N}$ 与 $\text{var} = \frac{\text{sq\_sum}}{N} - \mu^2$，计算倒数标准差 $\text{rstd} = \frac{1}{\sqrt{\max(\text{var}, 0) + \epsilon}}$，并写回 Shared Memory。调用 `__syncthreads()` 同步栅障，确保全 Block 线程均可读到最新统计量。
+3. **第三阶段：归一化变换与合并写回**
+   - 线程再次按 Stride 访问该行输入 $x$，从 Shared Memory 广播读取 $\mu$ 和 $\text{rstd}$，读取对应的权重 $\gamma[\text{col}]$ 和偏置 $\beta[\text{col}]$；
+   - 计算 $y = (x - \mu) \cdot \text{rstd} \cdot \gamma + \beta$，并将最终结果写回 Global Memory。
 
 ### 3. 正确性条件与常见误区
 
-浮点舍入可令 var 略小于 0，至少要 clamp；大均值小方差时应考虑 Welford。
+1. **灾难性数值抵消（Catastrophic Cancellation）**：
+   - 朴素两矩法利用公式 $\text{var} = \mathbb{E}[x^2] - (\mathbb{E}[x])^2$。当输入数据具有“大均值、小方差”特征（例如 $x_i \approx 10000$ 且波动仅为 $0.01$）时，$\mathbb{E}[x^2] \approx 10^8$，$(\mathbb{E}[x])^2 \approx 10^8$。在 IEEE 754 单精度浮点数（24 位有效尾数，约 7 位十进制精度）下，两个相近的大数相减会导致有效数字严重丢失，甚至因舍入误差出现 $\text{var} = -10^{-7}$！
+   - **强制不变量**：若采用朴素两矩法，计算方差时**必须使用 `fmaxf(var, 0.0f)` 截断负数**。否则若 $\text{var} < -\epsilon$，根号下为负数将导致 `rsqrtf` 产生 `NaN`，污染后续所有网络计算。
+2. **Shared Memory 重复使用的死锁与数据冒险**：
+   - `block_reduce_sum` 函数中在写入 `smem` 和读取 `smem` 之间，以及函数返回前必须有严格的 `__syncthreads()`。如果连续两次调用 `block_reduce_sum`（先算 sum，后算 sq_sum）而中间缺少栅障，后一个调用的写入会与前一个调用的读取发生 RAW（Read-After-Write）数据冲突。
 
 ### 4. 性能与工程取舍
 
-Welford 更稳定但 combine 更复杂；融合前后算子可省内存但增加寄存器压力。
+1. **朴素两矩法 vs. Welford 在线归约（图 5-1）**：
+   - **朴素法**：只需维护两个浮点累加器，Warp 洗牌只需 2 次 `float` 传递，指令吞吐极高，但数值稳定性脆弱；
+   - **Welford 算法**：维护三元组 $(\text{count}, \mu, M_2)$，通过 Chan 结合律算法（$\delta = \mu_B - \mu_A, \dots$）在 Warp 间传递合并。计算增量差，彻底避免了相近大数相减，极其适合 FP16/BF16 混合精度；但每次归约需要传递 3 个标量并执行多次乘除法，寄存器压力和指令数增加约 2~3 倍。
+2. **两遍访存 vs. 寄存器暂存（SRAM Staging）**：
+   - 当前基础版为 Two-Pass 访问 Global Memory（第一 pass 读数求均方差，第二 pass 再读数写输出）；
+   - 若隐藏维度 $N \le 1024$ 且寄存器充裕，可在第一 pass 读入时将数据缓存在每个线程的私有寄存器数组中，避免第二 pass 重新打满 HBM 显存带宽，但会牺牲 Occupancy。
 
-## 具体演示
+## 具体演示：灾难性数值抵消的微观实证
 
-x=[10000,10001] 时两个大平方相减得到很小方差，低精度会放大消减。
-
-请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+考虑极小向量 $x = [10000.0, 10001.0]$，维度 $N = 2$：
+- 真实数学计算：
+  $$\mu = 10000.5, \quad \sigma^2 = \frac{(10000 - 10000.5)^2 + (10001 - 10000.5)^2}{2} = 0.25$$
+- 朴素两矩法（FP32 模拟）：
+  $$x_1^2 = 1.0\times 10^8, \quad x_2^2 = 1.00020001\times 10^8$$
+  $$\mathbb{E}[x^2] = 100010000.5$$
+  $$\mu^2 = (10000.5)^2 = 100010000.25$$
+  两数相减 $\mathbb{E}[x^2] - \mu^2 = 0.25$。在 FP32（尾数精度仅能精确表示约 7 位十进制数）下，$100010000$ 已经超出单精度完全精确表示的极限（单精度最大连续整数为 $2^{24} = 16,777,216$），因此末尾数字发生截断舍入，相减结果极易沦为 0 甚至是负数。这正是 Welford 算法在工业级算子库（如 PyTorch、Apex）中成为标配的根本原因。
 
 ## 实践任务：唯一代码填空题
 
@@ -406,15 +436,33 @@ void launch_layernorm(
 
 ### Q1 参考答案
 
-本基础版并行累加 sum 与 sumsq，归约后算 var=E[x²]-E[x]²，再同步广播 mean/inv_std。
+1. **输入阶段（Input & Stride Accumulation）**：
+   - 输入张量为行优先排列的激活矩阵 $[M, N]$，一个 ThreadBlock 分配给单一特征行（Row）。Block 内的各线程以线程索引跨步（`col = tid; col < N; col += BLOCK_SIZE`）读取 Global Memory。由于连续的 `threadIdx.x` 读取连续的地址，形成完全合并的显存加载；每个线程在本地寄存器中独立累加局部元素和与局部平方和（`local_sum`, `local_sq_sum`）。
+2. **状态变化阶段（Hierarchical Reduction & Broadcast）**：
+   - **Warp 级归约**：线程通过寄存器洗牌指令 `__shfl_down_sync` 在 5 步折半归约内计算出当前 Warp 的局部和与平方和，无显存和 Shared Memory 延迟；
+   - **Block 级归约与发布**：各 Warp 的 Lane 0 将部分和写入 Shared Memory，随后由 Warp 0 再次归约出整行的总和与总平方和；
+   - **标量计算与同步**：Thread 0 计算均值 $\mu = \frac{\sum x}{N}$ 和方差 $\sigma^2 = \frac{\sum x^2}{N} - \mu^2$，并通过 `fmaxf(var, 0.0f)` 截断浮点下溢，计算倒数标准差 $\text{inv\_std} = \frac{1}{\sqrt{\max(\sigma^2, 0) + \epsilon}}$，写入 Shared Memory。随后调用 `__syncthreads()` 同步栅障，使所有线程处于可见状态。
+3. **输出阶段（Normalization & Affine Write-back）**：
+   - 线程再次以合并访存模式读取该行的原始输入元素 $x_i$，从 Shared Memory 广播获取全局 $\mu$ 和 $\text{inv\_std}$，从权重显存读取 $\gamma_i$ 与 $\beta_i$；
+   - 线程执行仿射变换计算 $y_i = (x_i - \mu) \cdot \text{inv\_std} \cdot \gamma_i + \beta_i$，并将标准化后的向量合并写回 Global Memory。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：浮点舍入可令 var 略小于 0，至少要 clamp；大均值小方差时应考虑 Welford。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+若方差计算结果为 $-10^{-7}$，直接调用 `rsqrtf(var + eps)` 会根据 $\epsilon$ 的取值导致以下致命问题：
+1. **若 $\epsilon \le 10^{-7}$（例如某些算子库中取 $\epsilon = 10^{-8}$ 或被省略）**：
+   - 根号内的输入参数 $\text{var} + \epsilon < 0$；
+   - 依据 IEEE 754 浮点运算标准，对负实数开平方或求平方根倒数直接触发“Domain Error”，硬件直接返回 `NaN`（Not a Number）；
+   - 一旦该 Token 的归一化尺度变为 `NaN`，该行所有输出元素 $y_i$ 全部变为 `NaN`。在前向传播的下一层矩阵乘法中，`NaN` 会像病毒一样蔓延扩散至整个 Batch 和整个激活张量；而在反向传播中会导致梯度张量全为 `NaN`，导致模型权重瞬间崩塌崩溃。
+2. **正确防线**：必须通过 `fmaxf(var, 0.0f)` 或 `fmaxf(var, 0.0f) + eps`，在数学底层利用硬件单周期指令截断所有因浮点精度截断造成的微小负数，确保被开方数恒大于等于 $\epsilon$。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：Welford 更稳定但 combine 更复杂；融合前后算子可省内存但增加寄存器压力。
+1. **何时应将两矩统计换为 Welford 算法**：
+   - **大均值小方差分布**：当输入张量的基准均值绝对值远大于其特征波动（例如激活值基准偏移高达几千，而各通道之间的方差仅为 $0.01$ 时），两矩法中 $\mathbb{E}[x^2]$ 与 $(\mathbb{E}[x])^2$ 相差微小，在有限浮点有效位下发生灾难性抵消，丢失几乎所有精度；
+   - **低精度量化与训练（FP16/BF16）**：FP16 只有 11 位有效精度（尾数 10 位），BF16 只有 8 位有效精度。低精度下两矩平方项极易发生溢出（Overflow，超过 FP16 最大值 65504）或大数吃小数。此时必须采用 Welford 递推或在线增量法。
+2. **改换为 Welford 的代价**：
+   - **状态传输与寄存器开销翻倍**：朴素两矩法在 Warp 洗牌时只需要传递 2 个 `float`；而 Welford 结合律（Chan's parallel merge）需要同时维护并传递三元组 $(\text{count}, \mu, M_2)$，寄存器占用和洗牌通信量增加 50%~100%；
+   - **计算指令复杂度增加**：合并两组统计量时需要计算 $\delta = \mu_B - \mu_A$、除法权重比值 $\frac{n_B}{n_A + n_B}$ 以及二阶矩修正项 $\delta^2 \frac{n_A n_B}{n_A + n_B}$，运算指令数远多于朴素累加，在某些计算受限场景下可能会轻微增加 Kernel 执行延迟。工程上需要根据隐藏层宽度与数值精度严密权衡。
 
 ## 参考资料
 

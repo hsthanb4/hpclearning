@@ -382,17 +382,17 @@ sequenceDiagram
     participant Loss as 损失计算 (FP32)
     participant Scaler as Loss Scaler (损失缩放器)
     participant Back as 反向求导 (BF16)
-    participant Opt as 优化器更新 (FP32 Master Weights)
+    participant Optimizer as 优化器更新 (FP32 Master Weights)
     
     Net->>Loss: 输出预测并计算标量 Loss
     Loss->>Scaler: 放大 Loss (乘以 scale_factor)
     Scaler->>Back: 反向链式求导，梯度放大避免下溢
     Back->>Scaler: 检查梯度是否出现 Inf / NaN
     alt 无溢出
-        Scaler->>Opt: 梯度除以 scale_factor 恢复真实量级，更新参数
+        Scaler->>Optimizer: 梯度除以 scale_factor 恢复真实量级，更新参数
         Scaler-->>Scaler: 连续 N 步无溢出则增大 scale_factor
     else 发生溢出
-        Scaler->>Opt: 丢弃当前步更新 (Skip Step)
+        Scaler->>Optimizer: 丢弃当前步更新 (Skip Step)
         Scaler-->>Scaler: 减小 scale_factor (除以 2)
     end
 ```

@@ -59,45 +59,89 @@ flowchart LR
 <p class="caption" align="center"><em>图 7-2：Megatron-SP 巧妙利用 Ring 通信原语消除冗余通信的完整闭环</em></p>
 
 
-### 1. 术语澄清（面试容易踩坑）
+### 1. 术语澄清：Megatron-SP 与 Context Parallelism (CP) 的本质区别
 
-本书中"sequence parallelism"**专指与 TP 配套**、作用于 LayerNorm/dropout 的技巧；把序列切分应用在整模型（含 attention）的技术本书叫 **context parallelism（CP，第 8 课）**。回答面试题时先问清楚对方指哪一个。
+在大模型分布式系统领域，“序列并行（Sequence Parallelism）”这个词在历史上有两种完全不同的含义，面试与系统设计中极易混淆：
+1. **Megatron-SP（Korthikanti et al., 2022，本课核心）**：专指与**机内张量并行（TP）深度绑定**的优化技术。它并不改变注意力机制的计算拓扑，而是专门针对 Transformer 中未被 TP 覆盖的区域（如 LayerNorm、RMSNorm、Dropout、残差连接等），通过沿序列维度（Sequence Dimension）切分来彻底消除其显存冗余。
+2. **Context Parallelism（CP / 环形注意力 Ring-Attention，第 8 课）**：专指跨物理节点将全模型的长文本序列（如 32k、128k、1M 上下文）整体切分并分布式流转计算的独立并行维度。
 
-### 2. 为什么需要 SP
+在讨论序列并行时，必须首先明确其上下文语境。
 
-LayerNorm 需要**完整的隐藏维度 h** 计算均值和方差：
+### 2. 传统 TP 的显存软肋：非 TP 区域的激活冗余
 
-```{python}
-LayerNorm(x) = γ·(x − μ)/√(σ² + ε) + β，μ、σ² 沿 h 维计算
-```
+回顾第 6 课，张量并行（TP）成功将 MLP 和 Attention 核心的 GEMM 权重切分到各个 GPU 上，其内部中间激活张量的隐藏维度也被切分为 $\frac{h}{\text{TP}}$。
 
-所以 LayerNorm 区域内的激活必须是 `(b, s, h)` 全量——TP 把注意力/MLP 的激活切成 `(b, s, h/tp)` 后，每次经过 LayerNorm/dropout 都要拼回全量，激活峰值为 `b·s·h`，抵消了 TP 的部分收益。SP 的做法：这些区域沿**序列维**切分，激活为 `(b, s/tp, h)`。
+然而，如**图 7-1** 的对比所示，在 GEMM 算子之外的**非 TP 区域**，系统面临严峻的显存回弹：
+- **LayerNorm / RMSNorm 的归一化计算**：
+  $$\mu = \frac{1}{h} \sum_{i=1}^h x_i, \quad \sigma^2 = \frac{1}{h} \sum_{i=1}^h (x_i - \mu)^2, \quad \text{LayerNorm}(x) = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta$$
+  均值 $\mu$ 与方差 $\sigma^2$ 是沿着**整个隐藏特征维度 $h$** 进行统计约简的。若沿 $h$ 维度切分输入，各卡仅持有一部分通道特征，根本无法独立计算出正确的均值和方差，除非在 LayerNorm 内部强行插入跨卡通信。
+- **全量激活冗余驻留**：为了避免在每个 Norm 算子内发生低效的跨卡通信，原生 Megatron-LM 规定：在进入 LayerNorm、Dropout 以及残差连接之前，必须持有全量的特征张量 $(b, s, h)$。
+- **后果**：这意味着每个 TP 副本的 GPU 显存内都完整保存了一份完全相同的 $(b, s, h)$ 激活张量。随着模型层数 $L$ 与上下文长度 $s$ 的增长，这些未被切分的“公共激活值”占据了反向保留激活（Stored Activations）总量的 30%~50%，严重抵消了 TP 带来的显存收益。
 
-### 3. 区域转换与共轭操作
+### 3. 序列切分与通信共轭对（$f/f^*$ 与 $g/g^*$ 原语闭环）
 
-前向经过的区域（每个 block）：
+Megatron-SP 捕捉到了一个核心数学事实：**LayerNorm、RMSNorm、GELU 和 Dropout 均是逐 Token（Token-wise）独立执行的算子！**
+它们在序列维度 $s$ 上没有任何交叉依赖——第 1 个 Token 的归一化结果与第 100 个 Token 的归一化完全互不影响。
 
-```{python}
-LN(SP区) --g--> col-linear(TP区) --GELU--> row-linear(TP区) --g*--> dropout(SP区)
-```
+因此，完全可以**沿序列维度 $s$ 将非 TP 区域的张量均分为 $\frac{s}{\text{TP}}$ 块**，让每张卡仅驻留 $(b, \frac{s}{\text{TP}}, h)$ 的局部序列激活！
 
-- TP 区域内：h 被切分；SP 区域内：s 被切分。
-- **g**（SP→TP）：all-gather 沿序列维，恢复完整 s；**g\***（TP→SP）：reduce-scatter 沿序列维，把 h 维的合并结果（row-linear 需要求和）与 s 维切分一步完成。
-- 在 TP 区域内部，col-linear **入口**需要完整输入 s（所以 g 在它之前），row-linear **出口**需要 all-reduce 求和——由 g\* 承担。
-- LayerNorm 的算子本身与 TP 搭配时的 f/f\*：TP 区域与 DP 交界处的同步语义（前向 f 是 no-op、f\* 是 all-reduce；反向互换）。SP 的 g/g\* 同理成对。
+为了在 SP 区域（序列切分）与 TP 区域（隐藏维切分）之间无缝转换，Megatron 引入了优雅的**共轭算子对（Conjugate Operator Pairs）**，其执行拓扑如**图 7-2** 所示：
 
-> 关键理解：f 与 f\*、g 与 g\* 是"共轭对"——前向中一个是 no-op 另一个是 all-reduce/all-gather/reduce-scatter，反向中角色互换；因为反向要传播的梯度形状恰好是前向的转置。
+#### A. $g$ 与 $g^*$ 算子对（SP 与 TP 区域的转换核心）
+- **前向转入 TP 区域（$g$ 算子）**：
+  - 在进入 Attention / MLP 的列并行矩阵乘之前，算子需要完整的 Token 语义（例如 Attention QKV 投影需与整体位置编码配合）。
+  - 系统发起一次 **All-Gather(沿序列维度 $s$)**：
+    $$(b, \frac{s}{\text{TP}}, h) \xrightarrow{g = \text{All-Gather}(s)} (b, s, h)$$
+  - 随后直接送入列并行线性层，输出沿隐藏维切分的张量 $(b, s, \frac{h}{\text{TP}})$。
+- **前向转出 TP 区域（$g^*$ 算子）**：
+  - 行并行线性层计算后，各卡产生了部分和张量 $(b, s, h)$。
+  - 在原生 TP 中，此处必须执行一次 AllReduce 沿 $h$ 恢复完整和。
+  - **而在 SP 中，此处直接替换为 Reduce-Scatter(沿序列维度 $s$)**：
+    $$(b, s, \frac{h}{\text{TP}}) \xrightarrow{\text{Row Linear}} (b, s, h) \xrightarrow{g^* = \text{Reduce-Scatter}(s)} (b, \frac{s}{\text{TP}}, h)$$
+  - **一石二鸟**：`Reduce-Scatter` 既完成了行并行部分和的累加求和，又顺手将输出张量切分回了 $(b, \frac{s}{\text{TP}}, h)$，直接喂给后续的 LayerNorm 与 Dropout！
 
-### 4. 收益与代价
+#### B. 共轭算子的反向行为与对偶性
+在自动微分（Autograd）中，反向求导是前向有向无环图的伴随转置：
+- 前向执行 $g$（All-Gather 沿 $s$），反向求导对应的梯度汇聚算子正是其转置对偶：**Reduce-Scatter 沿 $s$**。
+- 前向执行 $g^*$（Reduce-Scatter 沿 $s$），反向求导对应的梯度恢复算子正是其转置对偶：**All-Gather 沿 $s$**。
+- 这种代数上的高度自洽保证了前向与反向在数学上严格等价，完全无须破坏自动求导链条。
 
-- 最大激活从 `b·s·h` 降到 `b·s·h/tp`。
-- 通信量不变：纯 TP 每 block 前向 2 次 all-reduce；TP+SP 是 2 次 all-gather + 2 次 reduce-scatter。而 all-reduce = all-gather + reduce-scatter，所以**总通信量等价**（通信操作数翻倍但每次减半）。
-- SP 区域 LayerNorm 各 rank 算的是不同序列片段 → 梯度不同，反向需要 all-reduce 其权重梯度（LayerNorm 参数少，开销小）。
-- 与 TP 一样：通常限制在节点内（TP ≤ 8），跨节点性能骤降。
+### 4. 通信量守恒定理：为什么 SP 几乎是“免费的午餐”？
 
-## 具体演示
+直觉上，引入更多的通信算子会导致通信耗时增加。但严格的集合通信带宽分析证明：**Megatron-SP 没有增加任何网络传输字节量！**
 
-70B 模型（L=80、h=8192）、TP=8、seq=16k、mbs=1：TP-only 每层驻留激活 ≈ b·s·h·2 ≈ 268 MB → 80 层 ≈ 21.5 GB；TP+SP 每层 ≈ b·s·h·2/TP ≈ 33.5 MB → 约 2.7 GB（节省 8×），配合全量重计算可处理 16k 序列。教材基准：3B 模型、seq=4096，TP=8→16 性能大幅下降（跨节点带宽），但激活节省显著，能上更大的 batch。
+回顾第 3 课的核心结论：在 Ring 环形通信算法下，一次 AllReduce 在底层完全等价于一次 Reduce-Scatter 紧接一次 All-Gather：
+$$\text{AllReduce}(X) \equiv \text{All-Gather}(\text{Reduce-Scatter}(X))$$
+其单步通信字节数关系为：
+$$V_{\text{AllReduce}} = 2 \times \frac{\text{TP} - 1}{\text{TP}} \times \text{Size}, \quad V_{\text{Reduce-Scatter}} = V_{\text{All-Gather}} = \frac{\text{TP} - 1}{\text{TP}} \times \text{Size}$$
+
+- **纯 TP 模式每 Block 通信量**：
+  前向包含 2 次 AllReduce（Attention 输出 + MLP 输出）：
+  $$V_{\text{TP}} = 2 \times V_{\text{AllReduce}} = 4 \times \frac{\text{TP}-1}{\text{TP}} \times (b \cdot s \cdot h \cdot 2)$$
+- **TP + SP 模式每 Block 通信量**：
+  前向包含 2 次 All-Gather（进入 Col Linear）+ 2 次 Reduce-Scatter（退出 Row Linear）：
+  $$V_{\text{TP+SP}} = 2 \times (V_{\text{All-Gather}} + V_{\text{Reduce-Scatter}}) = 4 \times \frac{\text{TP}-1}{\text{TP}} \times (b \cdot s \cdot h \cdot 2)$$
+
+- **重要结论**：$V_{\text{TP+SP}} \equiv V_{\text{TP}}$！两者的**通信总量完全相等**。
+  - 虽然网络操作次数翻倍（从 2 次大包变成 4 次半包），但通信数据量被严格均摊。
+  - 在机内高速 NVLink 环境下，多出发射两次小集合通信的延迟开销（约 $2\mu s$）微乎其微。
+  - 作为回报，模型所有非 TP 区域的驻留激活显存被**直接消减了 $\text{TP}$ 倍**（例如 8 卡下直接砍掉 87.5% 激活显存）。
+
+## 具体演示与数值推演
+
+以一个 70B 模型（隐藏层维度 $h=8192$，层数 $L=80$），在 $\text{TP}=8$、序列长度 $s=16384$（16k 上下文）、单卡批次 $\text{MBS}=1$（BF16 精度，每元素 2 字节）下的单层驻留激活为例：
+
+- **未开启 SP（原生 TP-only）**：
+  每个 Block 内的 LayerNorm 与 Dropout 输入张量必须完整物化，单层静态驻留激活为：
+  $$M_{\text{act/layer}} \approx 1 \times 16384 \times 8192 \times 2\text{ 字节} \approx 268.4\text{ MB}$$
+  全网 80 层累加的静态常驻激活高达：
+  $$M_{\text{total\_act}} \approx 80 \times 268.4\text{ MB} \approx 21.5\text{ GB}$$
+  在 80GB 显卡上，仅这部分未切分的冗余激活就吃掉了超过四分之一的宝贵显存空间。
+
+- **开启 SP（TP + SP 协同）**：
+  LayerNorm 与 Dropout 的输入切为 $(1, \frac{16384}{8}, 8192) = (1, 2048, 8192)$，单层驻留激活降为：
+  $$M_{\text{act/layer\_SP}} \approx 1 \times 2048 \times 8192 \times 2\text{ 字节} \approx 33.55\text{ MB} \quad (\text{仅为原来的 } 1/8)$$
+  80 层累计驻留激活仅需约 $2.68\text{ GB}$！直接省出近 $19\text{ GB}$ 显存，足以容纳更长的上下文或成倍增加训练 Batch Size。
 
 ## 代码填空题
 

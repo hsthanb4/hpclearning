@@ -59,45 +59,90 @@ flowchart LR
 <p class="caption" align="center"><em>图 13-2：FlashAttention 前向分块双层循环流水与增量更新流</em></p>
 
 
-### 1. GPU 组织（教材 primer）
+### 1. GPU 硬件微架构层次与存储金字塔（Memory Hierarchy）
 
-- 计算：GPU = 若干 SM（H100：132 个），每个 SM 有 128 个 core。线程以 **warp（32 线程）** 为单位锁步执行；warp 组成 block（如 512/1024 线程）分配给 SM。
-- 内存层级：寄存器（线程私有）→ 共享内存 + L1（SM 内共享）→ L2（全芯片共享）→ 全局内存 HBM（最大但最慢）。
-- 关键事实：HBM 带宽远低于 SRAM 级别的共享内存/寄存器。**很多 kernel 是 memory-bound 而非 compute-bound**。
+要写出达到硬件峰值利用率的深度学习内核，必须深入理解现代 GPU 的物理组织。以 NVIDIA Hopper（H100）架构为例：
+- **计算拓扑（SM / Warp / Thread）**：
+  - 一张 GPU 芯片由若干个**流式多处理器（Streaming Multiprocessor, SM）**构成（H100 SXM 配备 132 个 SM）。
+  - 每个 SM 包含若干个调度器与执行单元（如 Tensor Core、FP32/FP64 CUDA Core、SFU 特殊函数单元）。
+  - 硬件执行的最基本不可分割调度单位是 **Warp（线程束，固定为 32 个线程）**，Warp 内部 32 个线程严格以单指令多线程（SIMT）步调锁步执行。若干个 Warp 组织为逻辑上的 **Thread Block（线程块，如 128~1024 线程）**，调度驻留在一个 SM 上。
+- **物理存储金字塔（带宽与延迟的极端鸿沟）**：
+  1. **寄存器堆（Registers）**：单 SM 容量约 256 KB，全芯片总带宽高达 $\approx 30 \sim 40\text{ TB/s}$，0~1 个时钟周期延迟，由线程独占；
+  2. **共享内存 / L1 缓存（Shared Memory / L1 Cache, SRAM）**：单 SM 容量约 228 KB，物理带宽高达 $\approx 15 \sim 20\text{ TB/s}$，约 20 周期延迟，供同一个 Block 内的所有线程高速协同共享；
+  3. **L2 缓存（L2 Cache）**：全芯片共享（H100 为 50 MB），带宽 $\approx 5 \sim 8\text{ TB/s}$，约 100~200 周期延迟；
+  4. **高带宽全局显存（High Bandwidth Memory, HBM3）**：容量 80GB，虽然标称带宽高达 $3.35\text{ TB/s}$，但其访问延迟高达 $400 \sim 800$ 个时钟周期！
 
-### 2. 三个经典优化
+**内存墙第一性原理**：
+H100 的 Tensor Core 标称计算峰值高达近 $1000\text{ TFLOPS}$，但外部 HBM 带宽仅为 $3.35\text{ TB/s}$。若一个算子每加载 1 字节数据只做 1 次运算（算术强度极低），硬件必然陷入**访存受限（Memory-Bound）**，绝大部分 SM 将长期处于等待内存数据回包的饥饿停顿状态。
 
-- **Memory coalescing（访存合并）**：DRAM 按突发（burst）返回连续地址。若 warp 内 32 个线程访问连续地址，硬件合并成一次大请求。教材的 naive matmul 例子：线程 (x,y) 映射错位导致 A 的访存不连续，吞吐差 ~10 倍；改 1D block 映射（threadIdx 相邻 → y 相邻）后恢复连续访问。
-- **Tiling（分块）**：把 A、B 的 tile 先搬进共享内存，块内线程复用，减少对 HBM 的重复访问。教材例子：吞吐 410 GB/s、时间 -43%、~6.6 TFLOPS。
-- **Thread coarsening（线程粗化）**：每个线程算多个输出元素，减少共享内存指令压力（ncu 里表现为 MIO throttle 停顿）。
-- **控制分歧**：warp 内 if 分支导致串行化；用 predication 或重排数据避免。
+### 2. 经典 GPU 内核优化四大铁律
 
-### 3. 工具谱系
+高效算子开发的核心目标，是竭尽一切可能**将数据截留在高速片上缓存（Registers 与 SRAM）中反复复用，消灭对低速 HBM 的往返读写**：
 
-- **PyTorch**：易用、慢。
-- **@torch.compile**：易用、快、不灵活；`TORCH_LOGS=output_code` 可以导出生成的 Triton kernel 作为起点。
-- **Triton**：较快、更灵活（block 级编程，`tl.program_id`、`tl.arange`、mask 处理）。
-- **CUDA**：最快最灵活（共享内存、SM 内调度全部可控），但开发成本最高。
+1. **访存合并（Memory Coalescing）**：
+   - GPU 全局内存控制器以固定突发（Burst，通常为 32 或 128 字节对齐的缓存行 Cache Line）为单位进行事务传输。
+   - 当一个 Warp 内的 32 个线程并发访问连续且对齐的内存地址时，硬件能够将这 32 个内存请求**合并为单次 128 字节的物理传输事务**，总线利用率达到 100%。
+   - 若线程访问地址产生跨度（Strided）或随机离散访问，硬件将被迫发射多达 32 次独立的孤立内存请求，导致总线利用率跌破 10%，引发近十倍的吞吐断崖。
+2. **分块与共享内存复用（Tiling & Shared Memory Staging）**：
+   - 在矩阵乘法（GEMM）中，利用分块算法将大矩阵拆解为适应 SRAM 容量的子块（Tile）。
+   - 将输入 Tile 从 HBM 协同搬运到 Shared Memory 后，块内各个线程反复读取该 Tile 进行乘累加，使 HBM 访存次数降低 $\text{BlockSize}$ 倍。
+3. **线程粗化与寄存器分块（Thread Coarsening & Register Tiling）**：
+   - 让每个 CUDA 线程不再仅负责计算 1 个输出元素，而是负责计算一个微型子块（例如 $4 \times 4$ 或 $8 \times 8$ 个输出）。
+   - 累加过程中的中间变量全程保存在线程私有寄存器中，彻底消除对 Shared Memory 的读写冲突（Bank Conflicts）与指令发射瓶颈。
+4. **消除分支分歧（Warp Divergence Elimination）**：
+   - 避免在 Warp 内部编写基于线程号的条件分支（`if (threadIdx.x % 2 == 0)`）。
+   - 一旦同一 Warp 内线程执行路径分叉，硬件只能串行执行所有分支路径并用掩码屏蔽无效线程，导致算力有效利用率腰斩。
 
-### 4. Fused kernel
+### 3. 算子开发工具谱系的权衡与演进
 
-相邻的逐点运算（如 LayerNorm 的多个步骤）若分多个 kernel，中间结果要写回 HBM 再读回。融合成一个 kernel，数据留在 SM 内 → 大幅减少 HBM 往返。FlashAttention 是"融合 + 分块 + online softmax"的集大成者。
+| 开发体系 | 易用性与开发效率 | 性能天花板 | 底层掌控力与灵活性 | 典型适用场景 |
+|---|---|---|---|---|
+| **Eager PyTorch** | 极高（Python 语法） | 较低（缺乏算子融合，中间激活频繁写回 HBM） | 极低（黒盒封装） | 算法快速验证、原型设计 |
+| **`torch.compile` (Inductor)** | 高（单行装饰器） | 较高（自动生成融合 Triton Kernel） | 中等（支持导出代码二次修改） | 标准模型的一键端到端加速 |
+| **OpenAI Triton** | 中（Block 级 Python 编程） | **极高（逼近手写 CUDA 90%~95% 性能）** | 高（显式控制 Block、分块加载、Masking） | 自定义算子开发、前沿注意力实现 |
+| **CUDA C++ / CUTLASS** | 低（极其繁琐复杂） | **最高（100% 榨干硬件极致潜力）** | 绝对掌控（寄存器分配、异步管道 TMA、Warp 级 MMA） | 基础算子库底层核心、极致性能压榨 |
 
-### 5. FlashAttention
+### 4. 算子融合（Operator Fusion）与 FlashAttention 的划时代变革
 
-朴素注意力的问题：物化 S = QKᵀ（n×n）和 P = softmax(S) 到 HBM，长序列时是最大的激活之一（呼应第 2 课公式中的二次项），且 HBM 带宽成为瓶颈。
+传统的 Attention 机制在数学上定义为：
+$$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) V$$
 
-FlashAttention 的做法：
+#### A. 传统自注意力的访存灾难（如**图 13-1** 所示）
+在原生 PyTorch 实现中，该公式被拆解为三个分离的物理内核：
+1. **GEMM 1**：从 HBM 加载 $Q$ 与 $K$，计算注意力点积分数 $S = Q K^T$，将庞大的 $N \times N$ 矩阵完整**写入 HBM**（$O(N^2)$ 显存）；
+2. **Softmax**：从 HBM 重新完整读出 $S$，计算归一化权重矩阵 $P = \text{Softmax}(S)$，再次将 $N \times N$ 矩阵完整**写回 HBM**；
+3. **GEMM 2**：从 HBM 重新读出 $P$ 与 $V$，计算上下文输出 $O = P V$，最终写回 HBM。
+- **痛点曝光**：长序列下 $N \times N$ 矩阵极其庞大（例如 $N=16\text{k}$ 时，单头浮点数高达 2.56 亿个）。整个过程对极其缓慢的 HBM 进行了多达 **3 次往返读写**！计算时间完全被 HBM 访存延迟统治。
 
-- 把 Q、K、V 分块，每次只算一块 S_ij（SRAM 内）；
-- 用 **online softmax**：维护 running max m 与 running sum l，每块到来时重新归一化已算的输出 O；
-- 不物化 S、P；显存从 O(n²) 降到 O(n)；计算量不变但访存量大幅下降。
+#### B. FlashAttention 的破局机制（SRAM 瓦片融合 + Online Softmax）
+Dao et al. 提出的 FlashAttention 彻底颠覆了上述流程（如**图 13-2** 所示）：
+- **零物化（Zero Materialization）**：**绝对不在外部 HBM 中生成完整的 $N \times N$ 矩阵！**
+- **分块载入 SRAM**：将 $Q$ 划分为行块 $Q_i \in \mathbb{R}^{B_r \times d}$，将 $K, V$ 划分为列块 $K_j, V_j \in \mathbb{R}^{B_c \times d}$。将这些紧凑的小块载入片上共享内存（SRAM）。
+- **增量式 Online Softmax**：
+  在 SRAM 内部计算局部点积分数 $S_{ij} = Q_i K_j^T$，并实时维护行最大值 $m$ 与归一化分母 $\ell$。
+  当遍历下一个 $K, V$ 块时，利用代数恒等式，直接将旧输出按指数比值 $\exp(m_{\text{old}} - m_{\text{new}})$ 重新缩放，就地累加新块贡献。
+- **计算效益**：
+  - HBM 访存量从 $O(N^2)$ 骤降至 $O(N)$；
+  - 显存占用从序列长度的二次方依赖变为严格的线性依赖；
+  - 虽然浮点计算量（FLOPs）基本一致，但由于消除了 90% 的慢速 HBM 往返，墙钟速度实现了 **$2\times \sim 4\times$ 的飞跃**！
 
-FA-2：减少非 matmul 操作数、按 warp 精细划分工作量；FA-3：面向 Hopper 的 FP8/Tensor Core 优化。限制：只支持特定注意力模式 → FlexAttention。
+## 具体演示与数值推演
 
-## 具体演示
+以单头注意力计算为例，设输入序列长度 $N = 4096$，特征维度 $d = 128$，采用 BF16 精度（每元素 2 字节）：
 
-n=4096 的注意力：S 矩阵 4096×4096×2B ≈ 32 MB/层/头——逐层累积后是激活的最大贡献者。FlashAttention 把这块内存需求变成 O(n)，且因为少访存，实际更快。第 8 课的 Ring Attention 用同一套 online softmax 统计量做跨卡分块。
+- **传统原生注意力的显存与访存量推演**：
+  - 中间分数矩阵 $S$ 尺寸为 $4096 \times 4096$，需物化存储：
+    $$\text{Memory}_{S} = 4096 \times 4096 \times 2\text{ 字节} = 33,554,432\text{ 字节} \approx 32\text{ MB}$$
+  - 加上 Softmax 权重矩阵 $P$（同为 $32\text{ MB}$），单头单层即产生 $64\text{ MB}$ 的庞大临时中间显存。若网络拥有 32 个注意力头与 32 层深度，全网单样本的注意力中间激活高达：
+    $$\text{Total Memory} = 32 \times 32 \times 64\text{ MB} = 65,536\text{ MB} = 64\text{ GB}$$
+  - 显存直接被中间激活耗尽。同时，读写这批矩阵需要往返吞吐数百 GB 的 HBM 流量。
+
+- **FlashAttention 分块融合推演**：
+  - 设置 SRAM 分块尺寸 $B_r = B_c = 64$。
+  - 单个分块在片上 SRAM 中仅占用：
+    $$\text{Tile Memory} = 64 \times 64 \times 2\text{ 字节} = 8192\text{ 字节} = 8\text{ KB}$$
+  - 8 KB 的小张量可以完全装进每个 SM 的 Shared Memory（容量高达 228 KB）中！
+  - 全过程零 HBM 中间写回，全网原本膨胀至 $64\text{ GB}$ 的二次方激活在 FlashAttention 内部**彻底降为 0**（仅保留线性规模的最终输出 $O$）。这不仅为训练节省出几十吉字节的显存空间，更使得注意力层从原本的访存受限（Memory Bound）彻底蜕变为纯算力受限（Compute Bound），满载释放 Tensor Core 算力。
 
 ## 代码填空题
 

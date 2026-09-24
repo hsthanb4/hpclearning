@@ -69,34 +69,92 @@ sequenceDiagram
 <p class="caption" align="center"><em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em></p>
 
 
-### 1. 两个恒等式
+### 1. 矩阵乘法分块恒等式与张量并行的代数基础
 
-```{python}
-1. A·B = A·[B1 B2 …] = [A·B1  A·B2  …]     列切分：结果拼起来
-2. A·B = [A1 A2 …]·[B1; B2; …] = Σ Ai·Bi    行切分：结果相加
-```
+张量并行（Tensor Parallelism, TP）是由 Megatron-LM 提出的经典模型并行范式。不同于数据并行（DP/ZeRO）在样本 batch 维度切分，TP 的核心思路是将神经网络层内部的单个矩阵乘法（GEMM）物理拆分到多个不同的 GPU 上协同计算。
 
-在神经网络里是 `X·W`：
+在 PyTorch 线性层 $Y = X W^T$（或标准数学记号 $Y = X W$）中，设输入特征矩阵 $X \in \mathbb{R}^{B \times S \times H_{\text{in}}}$，权重矩阵 $W \in \mathbb{R}^{H_{\text{in}} \times H_{\text{out}}}$，利用矩阵分块乘法的基本恒等式，可以得到两种对称的并行切分方式：
 
-- **列并行（column-parallel）**：W 按列切。输入 X 每卡都有一份（forward 中已是同步状态，无需 broadcast；教材说 broadcast 在训练中通常不需要，因为输入已经同步），每卡算 `X·W_i`，最后 **AllGather** 拼出完整输出。
-- **行并行（row-parallel）**：W 按行切。输入也要按列切（**Scatter**），每卡算 `X_i·W_i`，最后 **AllReduce** 求和。
+#### 方案 A：列并行线性层（Column Parallel Linear）
+将权重矩阵 $W$ 沿着输出特征维度（列维度）切分为 $k$ 块：$W = [W_1, W_2, \dots, W_k]$，其中每张卡分得切片 $W_i \in \mathbb{R}^{H_{\text{in}} \times \frac{H_{\text{out}}}{k}}$。
+输入张量 $X$ 在各卡间完整保留一份副本（无须切分）。各 GPU 本地独立执行矩阵乘：
+$$Y_i = X \cdot W_i \quad (i = 1, \dots, k)$$
+全局输出为各卡局部结果在列维度的拼接：
+$$Y = [Y_1, Y_2, \dots, Y_k] = [X W_1, X W_2, \dots, X W_k] = X [W_1, W_2, \dots, W_k] = X W$$
+- **通信语义**：若后续算子需要完整输出，需要发起一次 **All-Gather** 算子将 $[Y_1, \dots, Y_k]$ 跨卡拼接。
 
-### 2. Transformer 里的布局
+#### 方案 B：行并行线性层（Row Parallel Linear）
+将权重矩阵 $W$ 沿着输入特征维度（行维度）切分为 $k$ 块：$W = \begin{bmatrix} W_1 \\ W_2 \\ \vdots \\ W_k \end{bmatrix}$，其中每张卡分得切片 $W_i \in \mathbb{R}^{\frac{H_{\text{in}}}{k} \times H_{\text{out}}}$。
+此时输入张量 $X$ 必须同步沿着最后一维切片为 $X = [X_1, X_2, \dots, X_k]$（通过 **Scatter** 分发到各卡）。各 GPU 本地计算部分和：
+$$Z_i = X_i \cdot W_i \quad (i = 1, \dots, k)$$
+全局输出为各卡局部矩阵乘结果的直接数值相加：
+$$Y = \sum_{i=1}^k Z_i = \sum_{i=1}^k X_i W_i = [X_1, X_2, \dots, X_k] \begin{bmatrix} W_1 \\ W_2 \\ \vdots \\ W_k \end{bmatrix} = X W$$
+- **通信语义**：各卡计算出的 $Z_i$ 形状与全局输出完全一致，必须发起一次 **AllReduce (Sum)** 算子，各卡才能得到完整准确的特征向量 $Y$。
 
-- **MLP**：col（升维投影 + GELU）→ row（降维投影）。先 col 后 row 的好处：两次切分之间**不需要中间 all-reduce**——row 层的输出 all-reduce 一并完成了合并。若先 row 后 col 则需要一次多余 all-reduce（共两次）。
-- **Attention**：QKV 投影 col 并行，输出投影 row 并行。col 并行下每个 GPU 恰好负责一部分注意力头，天然语义清晰；GQA/MQA 同理（K/V 头共享）。
-- 每个 transformer block 前向因此有 2 次 all-reduce（MLP 一次 + Attention 输出一次；教材按 block 计）。
+### 2. Transformer 里的配对级联：消除中间通信的精妙设计
 
-### 3. 收益与代价
+如果简单地对每个线性层孤立使用列并行或行并行，每次计算都会分别引入一次 All-Gather 或 AllReduce，带来昂贵的通信开销。Megatron-LM 最天才的架构设计在于：**将网络模块设计为“列并行 $\to$ 行并行”的成对级联，使得中间层计算实现零通信跨越！**
 
-- 收益：参数、梯度、优化器状态**和激活**一起分片（这是与 ZeRO 的本质区别）；还能分片中间激活。
-- 代价：通信在**计算的关键路径**上（all-reduce 之后才能做 LayerNorm），难以像 DP/ZeRO 那样藏在计算后面；跨节点（8→16）带宽骤降，性能明显下跌。
-- 约束：TP 度 ≤ 注意力头数；GQA 时 K/V 头需要跨卡同步（Llama-3 8B：32 Q 头 / 8 KV 头）；LayerNorm 权重梯度天然同步（各 rank 看到相同输入），dropout 需要同步随机种子保证确定性。
-- 实践规则：TP 只用在节点内（TP ≤ 8，走 NVLink）。
+#### A. MLP 模块的列行级联（如**图 6-1** 所示）
+在经典 Transformer MLP 中，计算流程为：$Y = \text{Activation}(X W_1) \cdot W_2$。
+1. **第一层采用列并行（Column Parallel）**：
+   - 输入 $X$ 全量广播至各卡。
+   - 权重 $W_1$ 列切分（每卡持有隐藏层宽度的 $1/\text{TP}$）。
+   - 各卡计算本地特征 $H_i = X W_{1, i}$。
+   - **关键洞见**：由于激活函数（如 GELU、SiLU）是**逐元素操作（Element-wise）**，它不涉及不同通道间的信息混叠！因此：
+     $$\text{Activation}([H_1, H_2]) = [\text{Activation}(H_1), \text{Activation}(H_2)]$$
+     各卡可以直接在本地执行激活函数，完全不需要跨卡通信！
+2. **第二层紧接行并行（Row Parallel）**：
+   - 降维权重 $W_2$ 采用行切分。
+   - 注意：$W_2$ 刚好需要输入在特征维度切片，而上一层产出的激活值 $\text{Activation}(H_i)$ **恰好已经在各卡上完成了列切分**！输入切片与权重行切片天然对齐！
+   - 各卡直接执行本地矩阵乘：$Z_i = \text{Activation}(H_i) \cdot W_{2, i}$。
+3. **末尾仅需一次通信**：
+   - 整个 MLP 模块仅在第二层矩阵乘结束后，统一发起一次 **AllReduce (Sum)** 同步，即输出完整特征 $Y$。
+   - 整个 MLP 内部由两次 GEMM 构成，却**仅仅消耗了一次 AllReduce 通信**！若倒置为“行并行 $\to$ 列并行”，则行并行输出必须先做 AllReduce 才能送入列并行，总通信量将翻倍。
 
-## 具体演示
+#### B. 多头自注意力模块（MHA）的列行级联（如**图 6-2** 所示）
+自注意力模块遵循完全相同的对称哲学：
+1. **QKV 投影采用列并行**：将 $W_Q, W_K, W_V$ 沿输出头维度（Heads）均分。设总头数为 $H$，每个 TP Rank 独立负责 $\frac{H}{\text{TP}}$ 个注意力头。
+2. **注意力核心计算（Score & Softmax & Context）**：由于不同注意力头之间的计算彼此完全独立，每个 GPU 可以在本地并行完成其管辖头的所有 Scaled Dot-Product Attention 计算，全程**零通信**。
+3. **输出投影层（Out Projection $W_O$）采用行并行**：$W_O$ 权重沿输入头维度行切分，本地 Context 与本地 $W_{O, i}$ 相乘，最后仅在注意力块末尾发起一次 **AllReduce (Sum)**。
 
-70B 模型、TP=8：每卡参数/梯度/优化器静态显存从 1120 GB（70B×16B）降到 140 GB/卡，模型可以放进一个 8 卡节点（配合第 7 课 SP 更好）。但 TP=8→16 时 all-reduce 从 NVLink 变成跨节点网络，吞吐明显下降。
+**总结**：在整个 Transformer Block 的前向计算中，仅包含 **2 次 AllReduce**（Attention 一次 + MLP 一次）。反向传播时亦包含对应的 2 次 AllReduce（梯度传播伴随算子的对偶反转）。
+
+### 3. 张量并行（TP）与 ZeRO 的根本差异与关键路径瓶颈
+
+理解 TP 的优势与物理代价是构建超大规模训练系统的分水岭：
+
+1. **TP 与 ZeRO 的显存切分维度本质不同**：
+   - **ZeRO/FSDP** 仅在样本（DP）维度消除静态权重冗余，对单步计算图内的中间激活张量（Activations）无能为力。
+   - **TP 沿模型隐藏层内部切分**：不仅参数、梯度、优化器状态被均分到各卡，连**前向与反向中的每一层中间激活也被均分**！这使得单层的显存峰值直接缩减至 $1/\text{TP}$。
+
+2. **通信在计算的关键路径上（Critical Path Latency）**：
+   - 在 DDP/ZeRO 中，AllReduce 发生在整个 Step 结束阶段，可以通过后向钩子与前层的反向计算完美重叠。
+   - **而在 TP 中，通信嵌在每一层网络的计算流核心**！在图 6-2 中，注意力模块输出的 AllReduce 之后紧接着就是残差连接（Residual Add）和 LayerNorm 归一化。后续算子必须依赖 AllReduce 的全量结果才能启动，GPU 计算流必须在此严格**同步阻塞等待**。
+   - 每一层 Transformer 都有 2 次前向阻塞通信 + 2 次反向阻塞通信。32 层的模型单步就要发生 128 次硬性同步等待！
+
+3. **硬件网络约束：TP 必须受限于机内 NVLink 域（$\text{TP} \le 8$）**：
+   - 由于高频阻塞式同步，TP 的吞吐对通信带宽和延迟极度敏感。在机内（NVLink 4/5 带宽可达 900~1800 GB/s，延迟 $< 1\mu s$），AllReduce 耗时极短，开销可忽略。
+   - 若跨机组建 TP=16，通信走 InfiniBand/RoCE 网卡（跨节点单向带宽仅 400~800 Gbps $\approx$ 50~100 GB/s，延迟数百纳秒），带宽暴跌十余倍且经过网络交换机排队，关键路径上的等待气泡将彻底吞噬 Tensor Core 算力。因此，**工程铁律是：TP 绝不跨物理节点，通常严格限制在 $\text{TP} \le 8$**。
+
+4. **架构硬性约束**：
+   - **注意力头数可整除性**：多头总数 $H$ 必须能被 $\text{TP}$ 整除（$H \pmod{\text{TP}} = 0$）。
+   - **GQA（分组查询注意力）的制约**：对于 Llama-3 8B（32 个 Q 头，8 个 KV 头），如果设置 $\text{TP} = 8$，则每张卡分得 4 个 Q 头和 1 个 KV 头，恰好对齐；若强行设 $\text{TP} = 16$，则 KV 头（共 8 个）已无法整除分配，必须采用跨 Rank 共享或复制 KV 头的复杂机制。
+
+## 具体演示与数值推演
+
+以一个 70B 参数的大模型（如 Llama-2-70B / Llama-3-70B）为例，其 BF16 混合精度下的静态模型状态账本为：
+$$\text{Static Memory} = 70 \times 10^9 \times 16\text{ 字节} \approx 1120\text{ GB}$$
+
+- **纯 DDP 方案**：单张 80GB GPU 显存极限容量为 80GB，面对 $1120\text{ GB}$ 静态状态直接 OOM，甚至无法完成参数加载。
+- **单机 8 卡开启 $\text{TP} = 8$**：
+  $$\text{Static Memory per GPU} = \frac{1120\text{ GB}}{8} = 140\text{ GB}$$
+  虽然静态参数降至 $140\text{ GB}$，但在 80GB GPU 上依然超出物理显存。这说明单靠机内 $\text{TP}=8$ 仍无法独立训练 70B 模型，必须进一步叠加：
+  1. 结合 **ZeRO-1/2**（分片跨机 DP 优化器状态）；
+  2. 或结合第 7 课的**序列并行（Sequence Parallelism, SP）**消除 LayerNorm 上的激活冗余；
+  3. 或结合第 9 课的**流水线并行（Pipeline Parallelism, PP）**按层深度切分。
+- **性能实测对照**：
+  在单机 8 卡 H100（NVLink 带宽 900 GB/s）上，$\text{TP}=8$ 的端到端 MFU 通常可维持在 45%~55%；而一旦将 $\text{TP}$ 跨机扩展至 16 卡（跨节点走 IB 400G），通信延迟将导致 MFU 暴跌至 20% 以下。
 
 ## 代码填空题
 

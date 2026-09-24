@@ -57,59 +57,109 @@ flowchart TD
 <p class="caption" align="center"><em>图 12-2：大模型训练常见 OOM 故障根因排查与定位诊断流</em></p>
 
 
-### 1. 三步配置流程（教材）
+### 1. 工业级训练配置三步搜索法（3-Step Systematic Search）
 
-1. **Step 1：让一个训练步装进内存**。GPU 富裕：<10B 单技术（TP 或 ZeRO-3/DP+全量重计算）；10–100B：TP=8+PP、TP=8+ZeRO-3 或纯 ZeRO-3；512+ 卡纯 DP/ZeRO-3 低效 → 加 TP/PP；1024+ 卡建议 TP=8+ZeRO-2+PP。GPU 紧张：全量重计算、梯度累积。超长序列加 CP；MoE 加 EP。
-2. **Step 2：达到目标 gbs**。`gbs_tokens = mbs × grad_acc × dp × seq`。不够 → 加 dp / grad_acc（长序列可加 CP）；太多 → 减 dp。
-3. **Step 3：优化吞吐**。TP 升到节点大小；ZeRO-3 加 dp；DP 通信瓶颈 → 转 PP；逐维度尝试；调 mbs。
+在大规模集群上配置分布式并行超参数绝不能靠盲目尝试，业内标准工程方法论遵循严格的**三步收敛法则**：
 
-### 2. MFU 与 HFU
+1. **Step 1：显存破局（让单个训练步能装进显存）**：
+   - **算力充足场景（按参数规模降阶选择）**：
+     - 若模型 $< 10\text{B}$：单技术即可满足，优先选择纯 DP（结合全激活重计算）或单机 ZeRO-3 / FSDP；
+     - 若模型处于 $10\text{B} \sim 100\text{B}$：首选机内 $\text{TP}=8$ + 跨机 $\text{PP}$，或者机内 $\text{TP}=8$ + $\text{ZeRO-3}$；
+     - 若集群规模超过 512 卡：纯 DP/ZeRO-3 因环延迟累积效率滑坡，必须引入机内 $\text{TP}=8$；若规模超过 1024 卡，推荐采用工业界黄金三角架构：$\text{TP}=8 + \text{ZeRO-2} + \text{PP}$。
+   - **算力受限/显存吃紧场景**：立即开启选择性激活重计算（Selective Recomputation），并将 Micro-Batch 降至 1，利用梯度累积凑齐批次。
+   - **特殊模态扩展**：遇到超长上下文（$s \ge 32\text{k}$）追加上下文并行（CP）；遇到 MoE 稀疏结构追加专家并行（EP）。
 
-```{python}
-前向+反向必需 FLOPs ≈ 6 × num_tokens × num_params
-MFU = 6·tokens·params / (step_time × peak_flops)
-HFU = 6·tokens·params × (1 + recompute_ratio) / (step_time × peak_flops)
-```
+2. **Step 2：吞吐配平（锚定算法黄金批次 GBS）**：
+   - 算法团队根据缩放定律（Scaling Laws）预先测定了最佳全局批次 $\text{GBS}_{\text{tokens}}$。
+   - 必须严格满足量化平衡公式：
+     $$\text{GBS}_{\text{tokens}} = \text{MBS} \times \text{grad\_accum} \times N_{\text{dp}} \times s$$
+   - 若批次不足，逐步提升 $N_{\text{dp}}$ 或增加串行累积步数 $\text{grad\_accum}$；若批次过大超出优化器收敛边界，则削减 $N_{\text{dp}}$ 并将多余的算力转向模型并行（增加 PP 级数或加大模型容量）。
 
-- **MFU（model FLOPs utilization）**：只算模型必需运算，衡量"实现/硬件对模型的效率"——重计算不计入。比较 GPU 时用它（重计算少但更快的机器应被奖励）。
-- **HFU（hardware FLOPs utilization）**：算上重计算等真实发生的运算，衡量"硬件真实利用率"。
-- 陷阱：HFU 高不一定训练快（可能在做大量重计算）；MFU 更能反映训练时间。
+3. **Step 3：硬件利用率微调（逼近 Roofline 性能边界）**：
+   - 如**图 12-1** 所示，利用 Roofline 模型判断当前内核处于**访存受限区（Memory Bound）**还是**算力受限区（Compute Bound）**。
+   - 调节 $\text{MBS}$ 尺寸，使矩阵乘 GEMM 的形状（$M, N, K$ 维度）对齐 Tensor Core 的硬件倍数（16、32 或 64 的整数倍），确保算子脱离访存瓶颈，进入高算术强度计算区。
+   - 验证网络通信与计算的重叠率，最终确定全系统最优超参数。
 
-### 3. 重叠数学（附录 A3，面试可手推）
+### 2. MFU 与 HFU：模型利用率与硬件利用率的本质差异
 
-通信能完全隐藏的条件：`t_comm / t_compute ≤ 1`。
+衡量大模型训练系统性能有两个核心工业指标：**MFU（Model FLOPs Utilization）** 与 **HFU（Hardware FLOPs Utilization）**。
 
-| 并行 | 每步通信 | t_comm/t_compute |
-|---|---|---|
-| DP（ZeRO-0） | 梯度 ≈ 参数量 | `num_params/(2·num_tokens) · (DP−1)/DP · F/B` |
-| ZeRO-3 | 3×参数量/DP（逐层） | `1/(2·seq·mbs) · (DP−1)/DP · F/B` |
-| TP | 每层 8·seq·mbs·h/TP | `(TP−1)/(2h) · F/B` |
-| PP | 每微批次 4·seq·mbs·h | `F/(32·h·n_layers_next · B)` |
+#### A. 基础理论：大模型 $6 \times P \times T$ 算力法则
+Transformer 模型中每个 Token、每个参数在一次完整的前向与反向传播中所需的理论浮点运算次数（FLOPs）严格为 **$6 \text{ FLOPs}$**：
+- **前向传播 GEMM**：每个权重参数对应 1 次乘法与 1 次加法（FMA 融合乘加），共计 $2\text{ FLOPs/param}$。
+- **反向传播求导 GEMM**：反向包含两个对称的矩阵乘法：
+  1. 对输入激活求导：$\frac{\partial \mathcal{L}}{\partial X} = \frac{\partial \mathcal{L}}{\partial Y} \cdot W^T \implies 2\text{ FLOPs/param}$；
+  2. 对模型权重求导：$\frac{\partial \mathcal{L}}{\partial W} = X^T \cdot \frac{\partial \mathcal{L}}{\partial Y} \implies 2\text{ FLOPs/param}$。
+  反向合计消耗 $4\text{ FLOPs/param}$。
+- **单步理论必需计算量**：
+  $$\text{FLOPs}_{\text{required}} = 6 \times P \times T_{\text{tokens}}$$
+  *(其中 $P$ 为模型参数量，$T_{\text{tokens}} = \text{GBS} \times s$ 为整步训练的 Token 总数；非 GEMM 算子如 Norm、Softmax 占比 $<1\%$，通常忽略)*。
 
-其中 F = peak_flops，B = peak_bw。观察：
+#### B. MFU 与 HFU 的量化公式
+- **MFU（模型算力利用率）**：
+  仅以“算法数学上必需完成的浮点量”为分子，衡量实际软硬件实现相比理论上限的有效产出：
+  $$\text{MFU} = \frac{6 \times P \times T_{\text{tokens}}}{T_{\text{step}} \times N_{\text{gpus}} \times \text{Peak\_TFLOPs}}$$
+- **HFU（硬件算力利用率）**：
+  将显存优化所带来的额外前向重计算（Activation Recomputation）等实际发生的物理计算量全部计入分子：
+  $$\text{HFU} = \frac{6 \times P \times T_{\text{tokens}} \times (1 + \alpha_{\text{recompute}})}{T_{\text{step}} \times N_{\text{gpus}} \times \text{Peak\_TFLOPs}}$$
 
-- DP/ZeRO-3 的比值随 tokens 增多而减小（大批次藏得住）；
-- TP/PP 的比值与 batch/seq **无关**，只取决于 h 与硬件算力/带宽比——这解释了为什么 TP 跨节点必炸。
+> **工程陷阱与警示**：
+> 某些团队宣称训练取得了 65% 的超高硬件利用率（HFU），但在仔细审查后发现系统开启了 100% 全量重计算（$\alpha_{\text{recompute}} \approx 0.33$），其有效 MFU 实际不足 48%！
+> **决定训练集群总耗时与算力账单的唯一金标准永远是 MFU**。高 HFU 伴随低 MFU 意味着硬件在做大量的无用功。
 
-### 4. 诊断工具与常见瓶颈
+### 3. 计算-通信重叠的解析数学模型（附录 A3 严格推导）
 
-- **torch.profiler**：CPU/CUDA 活动时间线；看通信是否与计算重叠、GPU 是否空闲、kernel launch 开销。
-- **torch.cuda.Event + synchronize**：CUDA 异步，python time 测不出真时长。
-- **ncu（Nsight Compute）**：单 kernel 级的吞吐/占用率/访存分析。
-- **torch.cuda.max_memory_allocated / reserved**：峰值显存与缓存分配器预留之差（碎片）。
-- 教材经验：benchmark 上万配置时，Slurm 强杀、进程清理失败、NCCL debug 日志、CUDA allocator 行为是最耗时的工程问题。
+在现代异步通信流水线中，通信能否被完全隐藏（Overlap），取决于**通信耗时与计算耗时的比值**：
+$$\text{Overlap Condition}: \quad \frac{T_{\text{comm}}}{T_{\text{compute}}} \le 1.0$$
 
-## 具体演示
+设硬件单卡标称峰值算力为 $F$（FLOPS），通信链路有效总线带宽为 $B$（Bytes/s），不同并行维度的比值解析式推导如下：
 
-H100（peak ≈ 989 TFLOPS BF16，NVLink ≈ 900 GB/s），7B 模型，全局 gbs=4M tokens，DP=128（每卡每步 31250 token）：
+| 并行模式 | 单步通信量 ($V_{\text{comm}}$) | 比值模型 $\frac{T_{\text{comm}}}{T_{\text{compute}}}$ | 关键特征与扩展性规律 |
+|---|---|---|---|
+| **DP (ZeRO-0)** | 梯度同步 $\approx 2 P$ 字节 | $\frac{P}{2 \times T_{\text{local}}} \cdot \frac{N_{\text{dp}}-1}{N_{\text{dp}}} \cdot \frac{F}{B}$ | 随单卡 Token 数 $T_{\text{local}}$ 增大而递减；大 Batch 下易于完全掩盖 |
+| **ZeRO-3 (FSDP)** | 逐层参数重构 $\approx 3 P / N_{\text{dp}}$ | $\frac{1}{2 \times s \times \text{MBS}} \cdot \frac{N_{\text{dp}}-1}{N_{\text{dp}}} \cdot \frac{F}{B}$ | 随 $s \times \text{MBS}$ 增大而递减；长序列下 Prefetch 极易隐藏 |
+| **TP (张量并行)** | 每层输出 $8 \cdot s \cdot \text{MBS} \cdot h / \text{TP}$ | $\frac{\text{TP}-1}{2h} \cdot \frac{F}{B}$ | **与 Batch Size / 序列长度完全无关！** 纯由隐藏维 $h$ 与硬件比率 $F/B$ 决定 |
+| **PP (流水线)** | 每微批次边界 $4 \cdot s \cdot \text{MBS} \cdot h$ | $\frac{F}{32 \cdot h \cdot L_{\text{next}} \cdot B}$ | 与单 Stage 包含的层数 $L_{\text{next}}$ 成反比；层数越多越容易掩盖 |
 
-```{python}
-t_comm(环 all-reduce) = 2×14GB×127/128 / 900GB/s ≈ 31 ms
-t_compute(本卡 backward) = 4×31250×7e9 / 989e12 ≈ 0.88 s
-比值 ≈ 0.035 → 通信完全藏得住
-```
+**深刻启示**：
+TP 的比值 $\frac{\text{TP}-1}{2h} \cdot \frac{F}{B}$ 与数据规模毫无关联。在机内 NVLink 互联下（$B = 900\text{ GB/s}$），$F/B \approx 1000$ 左右，比值远小于 1；但一旦跨机走网卡（$B = 50\text{ GB/s}$），$F/B$ 暴增近 20 倍，比值瞬间击穿 1.0，导致计算流频繁处于等待停滞状态。
 
-若每卡 token 太少（如 mbs·seq=512），t_compute 掉到 ~15 ms，比值 >2 → 通信暴露。教材 benchmark 固定 gbs=1M tokens 去扩 dp，每卡 mbs·seq 被迫变小，正是这个机制导致"节点越多效率下降"。而 ZeRO-3 的层级 prefetch 在 seq 长、mbs 大时比值很小，可以藏住。
+### 4. 性能剖析工具与 OOM 故障排查诊断树（如**图 12-2** 所示）
+
+当大模型训练遭遇性能瓶颈或显存崩溃时，排查流程应如精密仪器般展开：
+
+1. **核心诊断兵器库**：
+   - **PyTorch Profiler / Chrome Trace**：捕获 CPU 调度事件、CUDA Kernel 执行与通信流活动，直观可视化计算与通信的重叠气泡；
+   - **`torch.cuda.Event`**：高精度测量特定算子（如 Attention GEMM、AllReduce）在 GPU 上的真实物理耗时；
+   - **Nsight Systems (nsys) & Nsight Compute (ncu)**：深入 GPU 架构层面，剖析 SM 利用率、Tensor Core 占用率、SRAM 缓存命中率与 HBM 访存瓶颈；
+   - **显存探针（`torch.cuda.memory_allocated` vs `max_memory_reserved`）**：精准区分“真实激活/权重显存”与“PyTorch 缓存分配器碎片（Fragmentation）”。
+
+2. **OOM 故障排查逻辑链（图 12-2）**：
+   - **第 1 步前向传播即 OOM**：说明单步显存已被击穿。根因必为单卡 $\text{MBS}$ 或序列长度 $s$ 过大，瞬间激活峰值超出硬件容量。立即降低 $\text{MBS}$ 或开启激活检查点（Activation Checkpointing）。
+   - **第 1 步反向传播中途 OOM**：说明前向保留的激活值未被及时释放，或者模型未正确清空上一轮累积梯度。
+   - **第 2 步初始阶段 OOM（最经典的工业踩坑点！）**：第 1 步的前向与反向均顺利通过，但在进入第 2 步时突然触发 OOM。
+     - **根因剖析**：PyTorch 的 Adam/AdamW 优化器采用了**延迟分配机制（Lazy Initialization）**！在第 1 步结束前，动量（Momentum）和方差（Variance）张量尚未在显存中物化；直到执行首次 `optimizer.step()` 时，底层才瞬时申请高达 $8P \sim 12P$ 字节的庞大显存，叠加前一步尚未完全释放的临时缓存碎片，瞬间引爆 OOM。
+
+## 具体演示与数值推演
+
+以单台配备 8 张 NVIDIA H100（每卡标称峰值算力 $F \approx 989\text{ TFLOPS}$ BF16，NVLink 双向带宽 $B \approx 900\text{ GB/s}$）的服务器，训练 7B 模型（参数量 $P = 7 \times 10^9$），全局批次 $\text{GBS} = 4\text{M tokens}$（即 $4,194,304$ tokens），采用 $\text{DP}=128$（每卡每步分摊 $T_{\text{local}} = 32,768$ tokens）为例：
+
+- **反向计算耗时推演**：
+  单卡反向所需计算量为：
+  $$\text{FLOPs}_{\text{bwd}} = 4 \times P \times T_{\text{local}} = 4 \times (7 \times 10^9) \times 32,768 \approx 9.175 \times 10^{14} \text{ FLOPs}$$
+  在假设硬件发挥 50% 峰值算力（约 $495\text{ TFLOPS}$）的前提下，反向计算时间为：
+  $$T_{\text{compute}} \approx \frac{9.175 \times 10^{14}}{495 \times 10^{12}} \approx 1.853 \text{ 秒}$$
+
+- **Ring AllReduce 梯度通信耗时推演**：
+  全模型 BF16 梯度总量为 $7 \times 10^9 \times 2\text{ 字节} = 14\text{ GB}$。通信耗时为：
+  $$T_{\text{comm}} = 2 \times \frac{N_{\text{dp}} - 1}{N_{\text{dp}}} \times \frac{\text{Grad Size}}{B_{\text{bus}}} = 2 \times \frac{127}{128} \times \frac{14\text{ GB}}{900\text{ GB/s}} \approx 0.0308 \text{ 秒} \ (30.8\text{ ms})$$
+
+- **重叠比值计算**：
+  $$\frac{T_{\text{comm}}}{T_{\text{compute}}} = \frac{0.0308\text{ s}}{1.853\text{ s}} \approx 0.0166 \ll 1.0$$
+  通信耗时仅为计算耗时的 1.6%，$30.8\text{ ms}$ 的网络通信可以被近 $1.85\text{ 秒}$ 的反向计算完全吞没，通信重叠率达到 100%！
+
+- **退化场景反思**：
+  若每卡分配的本地样本缩减至极小（例如 $T_{\text{local}} = 512$ tokens），则计算时间暴跌至仅约 $28.9\text{ ms}$。此时 $\frac{T_{\text{comm}}}{T_{\text{compute}}} > 1.0$，通信时间反超计算时间，Tensor Core 将产生强制通信空闲气泡，整体 MFU 开始大幅度下滑。
 
 ## 代码填空题
 

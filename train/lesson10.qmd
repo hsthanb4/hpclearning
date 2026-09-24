@@ -63,40 +63,92 @@ sequenceDiagram
 <p class="caption" align="center"><em>图 10-2：MoE 专家并行双向 All-to-All 通信与计算全流程</em></p>
 
 
-### 1. MoE 与 EP
+### 1. 混合专家架构（MoE）与专家并行（EP）的本质语义
 
-MoE：每一层不再只有一个 FFN，而是多个并行的专家 FFN + 一个 router，每个 token 被路由到少量专家（如 top-2，DeepSeek-V3 每 token 激活 8 个专家）。
+混合专家模型（Mixture-of-Experts, MoE）是当前前沿大模型（如 DeepSeek-V3/R1、Mixtral、Grok）实现“超级参数容量（Trillion-scale Parameters）”与“可控计算预算（Constant FLOPs）”解耦的核心技术。
 
-**EP：把不同的专家放在不同的 worker 上**（沿专家维切分）。与 TP 的本质区别：
+在标准 Transformer 架构中，全连接层（FFN/MLP）消耗了全网约 $\frac{2}{3}$ 的参数量。MoE 将单一密集的 FFN 替换为一个**门控路由网络（Gating Router）**与 $E$ 个结构同构的**独立专家网络（Expert FFNs）**：
+- 给定输入 Token 特征向量 $x \in \mathbb{R}^h$，Router 计算该 Token 对各专家的匹配亲和度分数：
+  $$s(x) = \text{Softmax}(\text{TopK}(x \cdot W_g, \ K)) \quad \text{或采用 Sigmoid 归一化}$$
+- 系统仅激活得分最高的 $K$ 个专家（如 Top-2，或 DeepSeek-V3 的 Top-8 细粒度专家），最终输出为激活专家输出的加权求和：
+  $$y = \sum_{i \in \text{TopK}} s_i(x) \cdot \text{FFN}_i(x)$$
 
-- TP 要切分矩阵乘法本身（需要 all-reduce/all-gather 合并部分和）；
-- EP 不用切分 matmul，只需要把 token 的隐藏状态**路由**到正确的专家——通信是 all-to-all（token 的搬迁），而不是部分和。
+**专家并行（Expert Parallelism, EP）的切分维度**：
+如**图 10-1** 所示，EP 既不切分矩阵乘法（不同于 TP），也不切分序列层深（不同于 PP），而是**沿着“专家索引维度（Expert Dimension）”进行切分**。
+- 设集群中有 $N_{\text{ep}}$ 张 GPU，模型拥有 $E$ 个专家，则每张 GPU 常驻持有 $\frac{E}{N_{\text{ep}}}$ 个完整的专家模型权重。
+- **与张量并行（TP）的关键区别**：
+  - 在 TP 中，算子权重矩阵被强行拆散，各卡执行局部矩阵乘并产出“不完整的碎片（部分和 Partial Sum）”，必须通过阻塞式 AllReduce 沿特征维累加求和。
+  - 在 EP 中，**每张 GPU 上的专家权重是 100% 完整且独立的**！矩阵乘法在本地全量执行。EP 的本质是**“计算不动，数据动”**——根据 Router 的决策，将不同卡上的 Token 动态投递搬迁到对应专家所在的 GPU 上。
 
-### 2. 为什么 EP 必须与 DP 组合
+### 2. 为什么 EP 必须与数据并行（DP）深度绑定（2D $\text{DP} \times \text{EP}$ 网格）
 
-EP 只影响 MoE 层。attention、embedding、非 MoE 部分仍然每卡全量计算。如果只做 EP 不并行输入 batch，非 MoE 部分就在所有卡上重复计算。所以：**DP 并行输入（batch），EP 并行专家**，两者组合（教材图：DP×EP 网格）。
+大模型中除了 MoE FFN 层之外，还包含大量的密集模块（Dense Layers）：Embedding 词表、多头自注意力（Attention）、RMSNorm 归一化等。
 
-另注：有的实现把 EP 看作 DP 的子集——区别在于 EP 用路由而非相同的模型副本处理输入。
+如果仅仅孤立地做专家并行而不引入数据并行：
+- 整个集群只能处理单份样本，这会导致所有 GPU 必须在非 MoE 区域完全冗余地重复计算相同的 Token 特征，造成严重的算力雪崩。
+- 因此，工业界标准架构必然采用 **$\text{DP} \times \text{EP}$ 二维网格拓扑**：
+  - 在全局层面上，各个 GPU 接收互不重叠的批次样本（承担数据并行 DP 角色）；
+  - 进入非 MoE 区域（如 Attention）时，各卡在本地独立前向计算；
+  - 一旦执行到 MoE 层，系统切换为 EP 语义：各卡本地样本产出的 Token 根据 Router 派发目标，跨卡重组并打散投递到各个专家卡上。
 
-### 3. all-to-all：路由通信
+### 3. 双向 All-to-All 通信原语与流转闭环
 
-- 前向：每个 rank 把自己批次里的 token 按 router 决定的目标专家打包，发给对应 rank（all-to-all）；专家算完，结果再 all-to-all 送回原 rank。
-- 通信量 ≈ 被路由的 token 数 × 隐藏状态大小。路由越分散（每个 token 去更多 rank），通信越多。
-- 负载不均：若 router 让某个专家拿到远超平均的 token，该 rank 的专家计算时间拖慢整个步（在线程束同步点上被拉齐）。缓解手段：
-  - router 辅助损失（aux loss）鼓励均匀路由（Switch 等早期工作）；
-  - **节点限制路由**（DeepSeek-V3）：约束每个 token 最多送往 M 个节点（M=4），尽量让 token 留在节点内，把跨节点通信量压到可控水平；
-  - 动态专家并行（细粒度专家）等衍生技术。
+如**图 10-2** 所示，一次 MoE 专家计算在底层严格由两次**全交换（All-to-All）**通信构成闭环：
 
-### 4. 量级例子
+1. **路由分发阶段（Dispatch All-to-All）**：
+   - 处于 Rank $r$ 的 GPU 拥有本地批次的 $T$ 个 Token。通过本地 Router 算理，每个 Token 选出 $K$ 个目标专家。
+   - 系统将发往远端各个 Rank 的 Token 特征向量分别打包（Pack）。
+   - 发起一次非均匀的全交换通信算子（`dist.all_to_all_single` 或带偏移量的 Ragged All-to-All）：
+     每个 Rank 将本地收集的 Token 交换给持有对应专家的目标 GPU。
+2. **专家局部批量计算（Local Batched GEMM）**：
+   - 经过 All-to-All 后，每张 GPU 收到了来自全网各卡、且指名由自身管辖专家计算的所有 Token。
+   - GPU 将这些 Token 按本地专家索引分流聚类，调用 Grouped GEMM 连续执行前向推理。
+3. **结果汇聚送回阶段（Combine All-to-All）**：
+   - 本地专家计算完毕后，产出的特征张量必须原路返回其“发源地”Rank！
+   - 系统再次发射反向的 **All-to-All**，将特征向量送回原始 Token 所在的 GPU。
+4. **门控加权求和（Weighted Summation）**：
+   - 原始 GPU 收到返回的 $K$ 个专家计算结果后，乘上第一步中留存的门控权重 $s_i(x)$，累加合并后输出，无缝接入下一层网络。
 
-DeepSeek-V3：256 个专家、FFN 用细粒度专家切分；每 token 激活 8 个专家。EP 把专家摊到多卡，容量大（总参数量大）但每 token 计算量小——这是 MoE 的容量-计算解耦。
+单步单层 MoE 的通信量严格为：
+$$V_{\text{MoE\_Comm}} = 2 \times \underbrace{\text{Tokens}}_{\text{总数}} \times \underbrace{K}_{\text{激活数}} \times \underbrace{h}_{\text{隐藏维}} \times \text{sizeof(dtype)}$$
 
-## 具体演示
+### 4. 木桶效应：专家负载失衡（Load Imbalance）与应对演进
 
-设 2 个 rank、4 个专家（每 rank 2 个）、批次 16 个 token：
+在理想状态下，每个专家接收到的 Token 数量均等，各卡计算耗时一致。但在真实语言分布中，某些专家（如处理标点符号、高频词）会被频繁路由，而专业领域的专家被选中极少。
 
-- 均匀路由下每专家 4 token，每 rank 负载 = 8 token 的专家计算，通信 16 token 来回。
-- 若 router 失衡（专家 0 拿到 10 token、专家 3 拿到 2 token），rank 0 负载 = 12 token、rank 1 = 4 token → 失衡比 3:1，步时间由 rank 0 决定。
+- **木桶短板灾难（The Straggler Problem）**：
+  若专家 0 接收到 10 倍于均值的 Token，则持有专家 0 的 GPU 计算耗时将飙升 10 倍。而在分布式执行中，第二阶段的 Combine All-to-All 必须等待最慢的卡算完才能汇聚！**单卡过载将拖垮整个万卡集群的时钟步长**。
+- **经典对抗方案**：
+  - **负载均衡辅助损失（Auxiliary Loss）**：在总损失中加入正则项 $\mathcal{L}_{\text{aux}} = \alpha E \sum_{i=1}^E f_i P_i$（$f_i$ 为路由频率，$P_i$ 为概率均值），惩罚扎堆现象。但强加 Aux Loss 往往会损伤模型的语言建模精度。
+  - **容量因子截断（Capacity Factor, CF）**：为每个专家设置缓冲上限 $C = \text{CF} \times \frac{K \cdot T}{E}$。超出上限的 Token 直接被强行丢弃（Drop Tokens）或旁路跳过。虽然保证了计算时间确定，但在推理和长推理时丢 Token 会引发严峻的幻觉。
+
+### 5. 架构革新：节点限制路由（Node-Limited Routing，DeepSeek-V3 核心发明）
+
+在大规模跨机训练中（如 2048 卡），全量 All-to-All 会对数据中心机间交换机网络造成近乎崩溃的横断面流量压力（East-West Bisection Bandwidth）。如果一个 Token 激活了 8 个专家，且这 8 个专家散落在 8 个不同的物理机柜中，该 Token 将产生 8 次跨机网络传输！
+
+DeepSeek-V3 提出了颠覆性的 **节点限制路由（Node-Limited Routing）**：
+- **核心约束**：在选择 Top-$K$（如 $K=8$）个专家时，强制施加硬件拓扑亲和性约束——**每个 Token 选出的所有专家，最多只能分布在 $M$ 个物理节点之内（例如 $M \le 4$）**。
+- **系统红利**：
+  - 路由选择被高概率锚定在机内（NVLink 域）或极少数跨机节点内。
+  - 极大地将跨节点 RDMA 网络通信流量截留或压缩了近 50%！
+  - 彻底规避了网络链路争抢和交换机拥塞，使万卡规模下的 EP 吞吐提升至前所未有的高度。
+
+## 具体演示与数值推演
+
+设集群规模为 2 张 GPU（Rank 0 与 Rank 1），模型共配置 4 个专家（每张卡部署 2 个专家：Rank 0 持有 Expert 0, 1；Rank 1 持有 Expert 2, 3）。总批次输入 16 个 Token：
+
+- **理想均匀路由分布（Balanced Routing）**：
+  - 4 个专家各分得 4 个 Token（即 `[4, 4, 4, 4]`）。
+  - Rank 0 的专家计算负载：$4 + 4 = 8$ 个 Token；
+  - Rank 1 的专家计算负载：$4 + 4 = 8$ 个 Token；
+  - **失衡比（Imbalance Ratio）**：$\frac{\max(8, 8)}{\text{mean}(8, 8)} = \frac{8}{8} = 1.00$（完美线性加速）。
+
+- **极端失衡路由分布（Skewed Routing）**：
+  - 专家 0 成为热门专家，分得 10 个 Token；其余专家分别分得 4, 4, 2 个 Token（即 `[10, 4, 4, 2]`）。
+  - Rank 0 的专家计算负载：$10 + 4 = 14$ 个 Token；
+  - Rank 1 的专家计算负载：$4 + 2 = 6$ 个 Token；
+  - **失衡比**：$\frac{\max(14, 6)}{\text{mean}(14, 6)} = \frac{14}{10} = 1.40$。
+  - **耗时推演**：由于跨卡 Combine All-to-All 必须等待 Rank 0 算完全部 14 个 Token，Rank 1 即使早已算完 6 个 Token 也必须在网络同步点挂起等待。整步耗时由 14 决定，硬件整体有效算力利用率暴跌至 $\frac{14 + 6}{2 \times 14} = \frac{20}{28} \approx 71.4\%$。
 
 ## 代码填空题
 

@@ -56,27 +56,77 @@ flowchart LR
 <p class="caption" align="center"><em>图 1-2：Grid-Stride Loop 网格跨步循环执行控制流</em></p>
 
 
-### 1. 它是什么，解决什么问题
+### 1. 向量加法在 GPU 体系中的定位与第一性原理
 
-Vector Add 是最小 CUDA 工作流：host launch 决定 grid，device thread 用全局索引定位元素。
+向量加法（Vector Add: $c[i] = a[i] + b[i]$）是所有高性能 GPU 编程学习者的“Hello World”，更是深入理解 CUDA 线程层次结构与硬件访存机制的最小工作原型：
+- **数据并行性（Embarrassingly Parallel）**：每个元素 $i$ 的加法运算完全独立，元素之间不存在任何数据依赖或跨线程通信需求。
+- **访存受限特征（Memory-Bound Kernel）**：
+  向量加法的算术强度极低：每个线程从显存中加载两个 `float`（$4 + 4 = 8$ 字节），执行 1 次加法（$1\text{ FLOP}$），然后写回一个 `float`（$4$ 字节）。
+  其算术强度仅为：
+  $$I = \frac{1\text{ FLOP}}{12\text{ Bytes}} \approx 0.083\text{ FLOPs/Byte}$$
+  这决定了其性能完全受限于 GPU 全局显存（HBM / GDDR）的物理带宽。编写高吞吐向量加法内核的核心，在于**如何完美对齐硬件的内存访问合并（Memory Coalescing）**。
 
-### 2. 它如何工作
+### 2. 线程层次映射与 Grid-Stride Loop 执行拓扑（如**图 1-1** 与**图 1-2** 所示）
 
-全局索引为 blockIdx.x·blockDim.x+threadIdx.x；grid-stride loop 每轮跨整个 grid，使固定 grid 也能覆盖任意长度。
+#### A. 层次化坐标映射体系（图 1-1）
+CUDA 运行时通过网格（Grid）和线程块（Block）管理数十万级并发线程：
+- **`threadIdx.x`**：当前线程在所属 Thread Block 内的一维局部编号（$0 \le \text{threadIdx.x} < \text{blockDim.x}$）。
+- **`blockIdx.x`**：当前 Thread Block 在全局 Grid 内的一维块编号（$0 \le \text{blockIdx.x} < \text{gridDim.x}$）。
+- **全局一维绝对线性索引（Global Linear Index）**：
+  $$\text{idx} = \text{blockIdx.x} \times \text{blockDim.x} + \text{threadIdx.x}$$
 
-### 3. 正确性条件与常见误区
+#### B. 网格跨步循环（Grid-Stride Loop，图 1-2）
+在朴素的初学者代码中，通常假设线程总数严格大于等于向量长度 $N$，直接使用 `if (idx < N) c[idx] = a[idx] + b[idx];`。这种写法在工业级生产环境中存在严重缺陷（无法应对超大规模 $N$，且启动过多 Block 会浪费驱动调度开销）。
 
-循环条件必须保护 N=0 与尾块；相邻线程访问相邻元素才有利于合并访存。
+工业级标准范式是采用 **Grid-Stride Loop（网格跨步循环）**：
+```cuda
+int idx = blockIdx.x * blockDim.x + threadIdx.x;
+int stride = blockDim.x * gridDim.x;
+for (int i = idx; i < n; i += stride) {
+    c[i] = a[i] + b[i];
+}
+```
+其执行机制与工程红利包含三重保证：
+1. **解耦硬件规模与问题规模**：
+   - 步长 $\text{stride} = \text{blockDim.x} \times \text{gridDim.x}$ 严格等于整个 Grid 在单次迭代中能够同时处理的线程总数。
+   - 无论向量长度 $N$ 是一千还是十亿，Grid 尺寸可以任意配置并加上限保护（例如限制 `gridDim.x <= 4096`），线程在循环中自动以固定步长前移，天然处理剩余尾块。
+2. **保证全局内存合并访存（Coalesced Access）**：
+   - 同一个 Warp 内的 32 个连续线程（$\text{threadIdx.x} = 0 \dots 31$）在第 1 轮循环中访问的地址是连续的：$a[\text{idx}], a[\text{idx}+1], \dots, a[\text{idx}+31]$。
+   - 在进入下一次迭代时，所有线程同步跨进 $\text{stride}$ 步，访问的地址依然是 $a[\text{idx}+\text{stride}], \dots, a[\text{idx}+\text{stride}+31]$，**依然完全连续**！
+   - 硬件内存控制器可以将这 32 个连续的 4 字节读取合并为单个或两个 128 字节的 Cache Line 突发事务，榨干显存总线带宽。
+3. **极佳的可移植性与调试性**：同一个 Kernel 在只有 1 个 SM 的嵌入式 GPU 或拥有 132 个 SM 的 H100 上均可零修改无缝编译运行。
 
-### 4. 性能与工程取舍
+### 3. 正确性边界与常见陷阱
 
-更大 block 不必然更快；寄存器、occupancy、launch 数和内存带宽共同决定。
+1. **边界防护 `i < n` 严禁遗漏**：
+   - 无论 $N$ 是否能被 Block 尺寸整除，尾块未对齐部分必须依靠 `i < n` 进行严格的越界拦截。
+   - 遗漏边界检查会导致非对齐的最后几个线程访问未分配内存，触发非法内存访问（`cudaErrorIllegalAddress`）导致 GPU 驱动崩溃。
+2. **指针别名与 `__restrict__` 关键字**：
+   - 在函数参数中使用 `const float* __restrict__ a` 告知编译器指针 `a, b, c` 之间不存在内存重叠（Aliasing）。
+   - 这允许 NVCC 编译器放心将全局内存加载优化为使用只读数据缓存（Read-Only Cache / LDG 算子），规避重复加载。
 
-## 具体演示
+### 4. 性能与工程取舍（Block Size 与 Occupancy）
 
-N=1000、block=256、grid=4 时共 1024 个线程，最后 24 个线程被边界条件屏蔽；若 grid 限制为 2，每线程第二轮继续处理。
+- **Block 大小的选择**：
+  - Block Size 必须是 32（Warp 大小）的整数倍，常见取值为 128、256 或 512。
+  - 太小（如 32）：无法充分掩盖指令流水线停顿，SM 内部调度器无法保持高饱和度；
+  - 太大（如 1024）：单 Block 消耗过多的寄存器堆和共享内存配额，反倒导致每个 SM 上能同时驻留的 Active Blocks 数量锐减，降低硬件占用率（Occupancy）。
+- **工业经验法则**：对于纯访存密集型向量算子，通常推荐 `BLOCK_SIZE = 256` 或 `512`，在寄存器开销极小的情况下轻松达成 100% 理论 Occupancy。
 
-请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+## 具体演示与数值推演
+
+设向量长度 $N = 1000$，配置 `BLOCK_SIZE = 256`，启动网格限制为 `grid = 2`：
+
+- **单网格总并发线程数**：
+  $$\text{stride} = \text{gridDim.x} \times \text{blockDim.x} = 2 \times 256 = 512 \text{ 线程}$$
+- **跨步循环执行演化**：
+  - **第 1 轮迭代（$k = 0$）**：
+    全局索引 $\text{idx} \in [0, 511]$ 的 512 个线程同时启动。所有线程均满足 $i < 1000$，并行计算 $c[0 \dots 511] = a[0 \dots 511] + b[0 \dots 511]$。
+  - **第 2 轮迭代（$k = 1$）**：
+    所有线程跨步递增：$i = \text{idx} + 512 \in [512, 1023]$。
+    - 线程索引 $0 \dots 487$ 对应的计算位置为 $i \in [512, 999]$，依然满足 $i < 1000$，顺利计算剩余的 488 个元素；
+    - 线程索引 $488 \dots 511$ 对应的计算位置为 $i \in [1000, 1023]$，此时条件 $i < 1000$ 判定为假，这 24 个边界线程**自然安全退出**。
+- **全量覆盖验证**：共执行两轮迭代，精确完成 $512 + 488 = 1000$ 个元素的计算，无任何越界写入，且全流程维持 128 字节合并访存。
 
 ## 实践任务：唯一代码填空题
 
@@ -214,15 +264,29 @@ void launch_vector_add(
 
 ### Q1 参考答案
 
-全局索引为 blockIdx.x·blockDim.x+threadIdx.x；grid-stride loop 每轮跨整个 grid，使固定 grid 也能覆盖任意长度。
+- **输入状态**：GPU 接收到输入指针 `a, b, c`、数据规模 $n$ 以及发射配置 `<<<grid, block>>>`。每个线程硬件内建寄存器被赋予其唯一的坐标 `(blockIdx.x, threadIdx.x)`。
+- **状态变化（执行演化）**：
+  1. 线程通过基准公式计算首轮全局线性索引：$\text{idx} = \text{blockIdx.x} \times \text{blockDim.x} + \text{threadIdx.x}$；
+  2. 若 $\text{idx} < n$，线程执行合并读取 $a[\text{idx}], b[\text{idx}]$，计算加法并写回 $c[\text{idx}]$；
+  3. 步长递增：$\text{idx} \leftarrow \text{idx} + \text{blockDim.x} \times \text{gridDim.x}$，进入下一轮跨步循环，直到所有超出 $n$ 的线程自然退出。
+- **输出状态**：所有 $n$ 个元素被精确且仅被计算一次，结果完整写回全局内存，无越界污染，且连续线程在全生命周期内维持连续访存事务。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：循环条件必须保护 N=0 与尾块；相邻线程访问相邻元素才有利于合并访存。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+- **偶然看似正常的根本原因（内存填充与页对齐）**：
+  1. **CUDA 驱动内存分配对齐**：通过 `cudaMalloc` 申请显存时，底层驱动通常按照 256 字节或 4 KB（甚至更大页面）进行物理内存对齐分配。若实际数组长度 $n$ 较小（如 1000 个 float 占 4000 字节），操作系统分配的真实物理页可能容纳 4096 字节。
+  2. **脏读脏写发生在有效页内**：尾部超出 $n$ 的 24 个越界线程写入了这部分未被应用使用的对齐内衬区域（Padding Memory），未触发 MMU 缺页异常或段错误（`cudaErrorIllegalAddress`）。
+  3. **输出校验盲区**：宿主机在比对时通常只核验 `c[0 ... n-1]` 的数值，完全无法觉察越界非法写入。
+- **潜在危害**：一旦数据规模 $n$ 恰好触及物理页边界，或者在连续申请的多张量布局中越界踩踏了相邻张量的数据，将引发极其难以复现的数据损坏与静默崩溃。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：更大 block 不必然更快；寄存器、occupancy、launch 数和内存带宽共同决定。
+- **数学与硬件机制**：
+  在网格跨步循环中，整个 Grid 的瞬时并发能力上限为 $W_{\text{grid}} = \text{gridDim.x} \times \text{blockDim.x}$。
+  无论 $N$ 达到数千万还是数亿（远大于硬件最大活跃线程数），循环将原本的“一维空间并行展平”转化为了“空间向量化 + 时间序列化”的双重正交执行：
+  $$\text{Iteration } k \implies \text{处理元素区间 } [k \cdot W_{\text{grid}} + \text{idx}]$$
+  每个物理线程类似于 CPU 上的一个工作进程（Worker），每轮循环吞吐一个步长的元素，不断轮询直至遍历整个线性空间。
+- **性能优势**：避免了向 GPU 驱动发射数十万个微型 Block 的发射排队开销，使硬件调度开销降至最低。
 
 ## 参考资料
 

@@ -53,46 +53,61 @@ flowchart LR
 <p class="caption" align="center"><em>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流</em></p>
 
 
-### 1. 激活为什么需要保存
+### 1. 动态激活值的本质与二次方爆炸
 
-反向传播要用到前向的中间结果。若每个可学习操作之间都保存一份隐藏状态，则激活显存随模型层数 L 线性增长，并且**随序列长度近似二次、随 batch size 线性增长**——这与第 1 课的静态账本（与 batch/序列无关）形成鲜明对比。
+在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 $\frac{\partial L}{\partial W}$ 需要用到输入 $X$：$\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}$）。
 
-Playbook 给出的混合精度近似公式（L 层、seq、bs、隐藏维度 h、注意力头数 n_heads）：
+在大语言模型（Transformer）中，混合精度（16-bit）下单层的激活显存由两部分构成：
 
 $$m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \frac{n_{\text{heads}} \cdot s}{h}\right) \quad \text{bytes}$$
 
-- 第一项 `34·L·seq·bs·h`：逐层中间激活的线性部分。
-- 第二项 `5·n_heads·seq²·bs`：注意力分数矩阵 `QK^T` 的贡献，它使激活随序列长度**二次增长**。
+其中参数定义为：模型层数 $L$、输入序列长度 $s$、微批次大小 $b$、隐藏层维度 $h$、自注意力头数 $n_{\text{heads}}$。
 
-### 2. 重计算（activation recomputation / gradient checkpointing / rematerialization）
+- **线性增长项 $34 \cdot L \cdot s \cdot b \cdot h$**：来自 Transformer 块内的常规张量。包括 Q/K/V 投影输入、注意力输出投影、两层 LayerNorm/RMSNorm 输入、SwiGLU/GeLU 激活函数输入及残差连接。每个张量在 16 位精度下占 $2$ 字节，整层累加约为 $34h$ 字节/token。
+- **二次方爆炸项 $5 \cdot L \cdot b \cdot n_{\text{heads}} \cdot s^2$**：来自自注意力矩阵。计算 $Q K^T$ 会生成形状为 $[b, n_{\text{heads}}, s, s]$ 的注意力分数矩阵（Attention Score），后续还要保存 Softmax 输出概率矩阵与 Dropout 掩码。由于该部分显存与序列长度呈**二次方关系（$O(s^2)$）**，当序列长度从 2k 扩展至 32k、128k 时，注意力激活值将迅速暴涨并彻底压垮显存！
 
-- 思想：前向时**丢弃部分激活**，反向时从最近保存的检查点**重新计算**。用额外计算换内存。
-- Full：只在每层边界保存激活，反向时每层重算一遍前向。内存最省，计算开销通常 +30~40%。
-- Selective：选择"占内存大且重算便宜"的激活丢弃。注意力计算正好属于这一类。对 GPT-3(175B)：激活内存降 70%，计算开销仅 +2.7%。
-- **FlashAttention 本身就在反向时重算注意力分数**，所以"用了 FlashAttention 的人已经默认在享受 selective 重计算"。
-- 反直觉点：重计算常**不降速甚至提速**，因为 GPU 上访存（HBM）往往比计算更贵；少访存 + 多计算可能更快。MFU/HFU 的区分（重计算计入 HFU 不计入 MFU）在第 12 课展开。
+### 2. 激活重计算（Activation Checkpointing / Rematerialization）
 
-### 3. 梯度累积
+激活重计算的核心思想是**以算力换显存**：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如上图 2-1 所示）。
 
-- 把一个大 batch 拆成 `grad_acc` 个 micro-batch，逐个 forward/backward，梯度**累加**，攒够后做一次 optimizer step。
-- `gbs = mbs × grad_acc`。优化步更新时用**平均**（除以 grad_acc），使结果与 grad_acc 无关。
-- 内存收益：任意时刻只保留一个 micro-batch 的激活，激活内存与 gbs 无关。
-- 代价：多个前后向串行执行，计算总开销增加、训练变慢。无免费午餐。
-- 注意：梯度累积需要**跨 micro-batch 持久的梯度缓冲区**；若不累积，反向时梯度随激活一起被释放，峰值更低。
-- 与 DP 的关系：DP 就是"并行版梯度累积"（第 4 课）。
+- **全量重计算（Full Recomputation）**：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。  
+  - *收益*：激活显存开销直接压减为原来的约 $1/L$（几乎只剩单层激活）。  
+  - *代价*：训练计算量增加约 $30\% \sim 33\%$（因为整个前向计算被执行了两次）。
+- **选择性重计算（Selective Recomputation）**：Megatron-LM 与 FlashAttention 提出的重大突破。观察表明：**注意力矩阵 $Q K^T$ 占据了 $70\%$ 以上的激活显存，但其计算 FLOPs 仅占整层计算的不到 $3\%$！** 相比之下，MLP 层的 GEMM 占据了绝大部分 FLOPs 却只贡献线性显存。因此，选择性重计算**只丢弃注意力分数与 Softmax 激活**，而保留 MLP 与投影的中间值。  
+  - *收益*：以仅 **$+2.7\%$ 的轻微计算开销**，削减了高达 **$70\%$ 的激活显存**！
+  - *与 FlashAttention 的关系*：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此**使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算**。
 
-### 4. 峰值显存与第一轮的特殊性
+### 3. 梯度累积（Gradient Accumulation）的工作机制
 
-- 训练中显存是动态的：前向时激活上升 → 反向时激活释放、梯度建立 → optimizer step 需要全部梯度与优化器状态。
-- **第一轮的 profile 与后续不同**：CUDA caching allocator 在第一轮做大量准备（预热）；optimizer 状态在第一次 step 后才会完整出现在显存里——这就是"第一轮成功、第二轮 OOM"的常见原因之一。
-- 测量峰值用 `torch.cuda.max_memory_allocated()`，而不是看 `nvidia-smi` 的瞬时占用；`reserved` 与 `allocated` 的差是 caching allocator 预留（碎片来源之一）。
+在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 $N_{\text{acc}}$ 个微批次（Micro-Batch），如上图 2-2 所示：
 
-## 具体演示
+$$\text{全局批大小 (GBS)} = \text{微批大小 (MBS)} \times \text{累积步数 (grad\_acc)} \times \text{数据并行度 (DP)}$$
 
-以 Llama 类模型为例（h=4096，n_heads=32，L=32，bs=1），每 token 系数 = 34 + 5·n_heads·seq/h，总激活 ≈ L·seq·bs·h·系数：
+- **执行流程**：每个 Micro-Batch 独立执行前向与反向，并将求得的梯度直接累加到一个常驻的梯度缓冲区（Grad Buffer）中；在累积满 $N_{\text{acc}}$ 步后，执行**平均化归一（除以 $N_{\text{acc}}$）**，随后触发一次优化器更新，最后清空梯度缓冲区。
+- **显存与性能权衡**：  
+  - *显存优势*：任意时刻显存中仅需保留 1 个 Micro-Batch 的动态激活，激活峰值与全局 Batch 大小完全解耦。  
+  - *性能代价*：多个 Micro-Batch 在单卡上串行执行，增加了显存中梯度缓冲区的驻留开销，且引入了微批次循环的调度开销。
 
-- seq=512 时激活约 3.6 GB；seq=2048 时约 31 GB；seq=4096 时约 104 GB（注意力二次项已占大头）；seq=8192 时约 380 GB。而静态账本（如 7B 模型）与序列长度无关，始终 ~112 GB。
-- 结论：短序列下激活几乎可忽略；2k–4k token 起激活开始显著；超长序列下激活成为最大负担（第 8 课 CP 的动机）。
+### 4. 显存峰值与“第一步成功后续 OOM”陷阱
+
+在系统调优中，经常出现“第一步训练正常通过，第二步突然报 CUDA OOM”的现象，其物理根因在于：
+
+1. **优化器状态的延迟初始化**：在标准 PyTorch 训练循环中，Adam 的动量 $m$ 和方差 $v$（共 $8N$ 字节）通常在首次调用 `optimizer.step()` 时才被惰性分配（Lazy Allocation）到显存中。第一步前向反向时这 $8N$ 字节尚未存在，第二步前向时静态底噪已暴增，从而触发 OOM。
+2. **Caching Allocator 预热与显存碎片**：首个 Step 会触发大量的显存池预分配，随着多步迭代中张量形状变动与张量生命周期交错，显存池碎片逐渐增多。
+3. **测量标准**：必须使用 `torch.cuda.max_memory_allocated()` 测量真实物理张量峰值，而非 `nvidia-smi` 报告的驱动级预留显存（Reserved Memory）。
+
+## 具体演示：序列长度增加下的激活显存爆炸
+
+以 LLaMA-7B 典型超参数（$L=32, h=4096, n_{\text{heads}}=32, b=1$）为例，计算混合精度下无重计算的单样本激活显存：
+
+$$\text{系数} = 34 + 5 \cdot \frac{32 \cdot s}{4096} = 34 + \frac{5s}{128}$$
+
+$$\text{总激活显存} \approx 32 \times s \times 1 \times 4096 \times \left(34 + \frac{5s}{128}\right) \text{ bytes}$$
+
+- **$s = 512$**（短序列）：系数 $= 34 + 20 = 54$，激活显存 $\approx 3.6\text{ GB}$（远小于 104 GiB 静态显存，几乎可忽略）。
+- **$s = 2048$**（标准序列）：系数 $= 34 + 80 = 114$，激活显存 $\approx 30.6\text{ GB}$（已达到显著量级）。
+- **$s = 4096$**（长序列）：系数 $= 34 + 160 = 194$，激活显存 $\approx 104.2\text{ GB}$（**二次方项占比反超线性项，且激活显存已与 104 GiB 静态账本持平！**）。
+- **$s = 8192$**（超长序列）：系数 $= 34 + 320 = 354$，激活显存 $\approx 380.1\text{ GB}$（激活显存成为绝对主导瓶颈，必须开启选择性重计算并结合上下文并行 CP）。
 
 ## 代码填空题
 

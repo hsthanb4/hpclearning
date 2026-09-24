@@ -60,69 +60,77 @@ sequenceDiagram
 <p class="caption" align="center"><em>图 1-2：训练单步生命周期中的显存峰值与状态释放时序流</em></p>
 
 
-一次普通训练迭代包括：
+### 1. 训练迭代的三阶段与显存生命周期
 
-1. Forward：计算预测，并保存反向传播需要的激活。
-2. Backward：利用激活计算梯度，逐步释放部分激活。
-3. Optimizer step：使用梯度和优化器状态更新参数。
+一次标准的深度学习模型训练迭代由三个紧密耦合的阶段构成（如上图 1-2 所示）：
 
-训练显存的四个主要部分是：
+1. **前向传播（Forward Pass）**：根据输入微批次数据逐层执行矩阵乘与激活计算，输出预测值与 Loss。在此过程中，必须在 GPU 显存中保存反向传播求导所需的中间隐藏状态（即**动态激活值 Activation**）。随着网络深度推进，动态显存占用持续攀升至整个训练周期的最高点（激活峰值）。
+2. **反向传播（Backward Pass）**：从标量 Loss 出发，沿着计算图逆向逐层应用链式法则计算参数梯度。在此阶段，上一层的激活值在完成求导后立即被显式释放，同时申请显存用于存放计算出的梯度（Gradient）。激活释放与梯度建立交替进行，显存曲线呈现锯齿状回落。
+3. **优化器更新（Optimizer Step）**：在累积完全部梯度后，优化器遍历所有参数张量，结合历史动量与方差状态执行数值更新。更新完成后立即将梯度缓冲区清零或释放，显存回落至基线静态常驻状态。
 
-$$\text{总显存需求} = \text{模型参数} + \text{梯度} + \text{优化器状态} + \text{动态激活值}$$
+### 2. 训练显存的四大支柱与静态账本
 
-前三项主要取决于参数量和精度，称为本课的"静态账本"。激活还取决于 batch size、序列长度和模型结构，将在第 2 课处理。
+在整个训练生命周期中，显存需求由四个核心部分构成：
 
-设模型有 \(N\) 个参数。
+$$\text{总显存需求} = \text{模型参数 (Model Parameters)} + \text{梯度 (Gradients)} + \text{优化器状态 (Optimizer States)} + \text{动态激活值 (Activations)}$$
 
-普通 FP32 + Adam：
+其中前三项仅取决于模型架构参数量 $N$ 与数值精度，与输入的 Batch Size 和序列长度无关，构成了大模型训练的**静态显存账本（Static Memory Footprint）**。第四项动态激活值则与 Batch Size、序列长度紧密相关，将在第 2 课深入拆解。
+
+#### 方案一：标准全精度训练（FP32 + Adam）
+
+设模型参数总量为 $N$。在传统的单精度训练中：
 
 $$\begin{aligned}
-\text{FP32 参数} &: 4N \text{ bytes} \\
-\text{FP32 梯度} &: 4N \text{ bytes} \\
-\text{Adam 一阶、二阶状态} &: 8N \text{ bytes} \\
+\text{FP32 模型参数} &: 4N \text{ bytes} \quad (4 \text{ bytes/param}) \\
+\text{FP32 参数梯度} &: 4N \text{ bytes} \quad (4 \text{ bytes/param}) \\
+\text{Adam 一阶动量 } m_t &: 4N \text{ bytes} \quad (\text{FP32 均值估算}) \\
+\text{Adam 二阶动量 } v_t &: 4N \text{ bytes} \quad (\text{FP32 方差估算}) \\
 \hline
 \mathbf{静态显存总计} &: \mathbf{16N \text{ bytes}}
 \end{aligned}$$
 
-典型 BF16 混合精度 + Adam：
+#### 方案二：工业级主流混合精度训练（BF16 / FP16 + Adam）
+
+在现代大模型分布式预训练中，计算普遍采用 16 位浮点（BF16 或 FP16）以充分释放 Tensor Core 算力。此时显存构成如下：
 
 $$\begin{aligned}
-\text{BF16 参数} &: 2N \text{ bytes} \\
-\text{BF16 梯度} &: 2N \text{ bytes} \\
-\text{FP32 Master Weights} &: 4N \text{ bytes} \\
-\text{FP32 Adam 状态} &: 8N \text{ bytes} \\
+\text{BF16 / FP16 模型参数} &: 2N \text{ bytes} \quad (\text{用于前向与反向高效计算}) \\
+\text{BF16 / FP16 参数梯度} &: 2N \text{ bytes} \quad (\text{用于反向计算与通信}) \\
+\text{FP32 主权重 (Master Weights)} &: 4N \text{ bytes} \quad (\text{高精度参数副本，防止数值下溢}) \\
+\text{FP32 Adam 一阶动量 } m_t &: 4N \text{ bytes} \quad (\text{必须保持单精度以保证数值稳定性}) \\
+\text{FP32 Adam 二阶动量 } v_t &: 4N \text{ bytes} \quad (\text{梯度平方累加极易溢出，必须单精度}) \\
 \hline
 \mathbf{静态显存总计} &: \mathbf{16N \text{ bytes}}
 \end{aligned}$$
 
-如果另外保留 FP32 梯度累积缓冲区，再增加 \(4N\) bytes，总计 \(20N\)。
+若开启高精度梯度累积（保留一个独立的 FP32 梯度缓冲区以避免跨微批次累加时的舍入误差），则需额外增加 $4N$ bytes，总计达到 **$20N$ bytes**。
 
-这说明一个常见面试误区：**混合精度不一定降低参数、梯度和优化器状态的总显存。** 它的重要优势还包括更快的低精度计算和更小的激活。
+> **核心认知与面试关键考点**：  
+> **混合精度训练并不必然减少模型的静态显存占用！**  
+> 为什么？因为当学习率 $\eta \sim 10^{-4}$、梯度 $g \sim 10^{-3}$ 时，参数单步更新量 $\Delta W = -\eta \cdot g \sim 10^{-7}$。BF16 的尾数仅有 7 位有效数字，直接在 BF16 上做加法会导致该增量被截断归零（Underflow / 浮点加法下溢）。因此必须维持一份 FP32 Master Weights，导致混合精度下的静态账本仍然高达 $16N$ 甚至 $20N$ 字节。混合精度的核心价值在于**将张量算力翻倍、通信带宽压力减半、并将动态激活显存压减为原来的 $50\%$**。
 
-这些估算不包含：
+### 3. 静态显存与物理峰值的真实边界
 
-- 激活
-- CUDA context 和内核开销
-- 临时缓冲区
-- 显存碎片
-- 通信缓冲区
+上述 $16N \sim 20N$ 仅是纯数学理论下界，在生产环境中，显存物理峰值还包括以下必要开销：
 
-因此它是下界或组成分析，不是准确的峰值显存预测。
+- **动态激活显存（Activation Memory）**：多层 Transformer 的注意力与 MLP 中间张量，长序列下往往显著反超静态账本。
+- **CUDA Context 与运行时驻留**：cuBLAS、NCCL 等底层库的驱动上下文与执行内核，通常常驻占用约 $1 \sim 2\text{ GB}$。
+- **临时与通信工作缓冲区（Workspace / Scratchpad）**：GEMM 内核计算缓冲、跨卡通信聚合分桶（如 DDP 的 Bucket，默认 25MB）。
+- **显存内存池碎片（Allocator Fragmentation）**：PyTorch Caching Allocator 采用分块复用机制，频繁申请/释放变长张量时通常会产生 $10\% \sim 25\%$ 的物理显存碎片。
 
-## 具体演示
+## 具体演示：7B 模型的显存估算推演
 
-一个 7B 参数模型，在不保留 FP32 梯度缓冲区时：
+以标准的 LLaMA-7B 模型（$N = 7 \times 10^9$）为例，采用无额外 FP32 累积缓冲区的 BF16 + Adam 配置：
 
 $$\begin{aligned}
-7 \times 10^9 \text{ parameters} \times 16 \text{ bytes/parameter} &= 112 \times 10^9 \text{ bytes} \\
-&= 112 \text{ GB} \approx 104.3 \text{ GiB}
+\text{静态显存总量} &= 7 \times 10^9 \text{ 参数} \times 16 \text{ 字节/参数} \\
+&= 112 \times 10^9 \text{ bytes} \\
+&= 112.0 \text{ GB (十进制)} \approx 104.3 \text{ GiB (二进制，} 112 \times 10^9 / 1024^3 \text{)}
 \end{aligned}$$
 
-仅静态状态就超过 80 GB，还没有计算激活。但严谨的结论应当是：
-
-> 标准、未切分、未卸载的这种训练配置无法放进一张 80 GB GPU。
-
-不能扩大成"7B 模型绝对无法在一张 80 GB GPU 上训练"，因为优化器、量化、分片、卸载和冻结参数都可能改变前提。
+一台配备 80 GB 显存的 NVIDIA A100/H100 SXM 节点，实际可用物理显存约为 $80 \times 10^9 \text{ bytes} \approx 74.5\text{ GiB}$。这意味着：
+- 单张 80GB 卡甚至连 7B 模型的静态权重和优化器状态都无法完整装入（$104.3\text{ GiB} > 74.5\text{ GiB}$），尚未运行任何前向计算就会直接 OOM！
+- **严谨的系统设计推论**：标准、全参数、单副本的 7B 模型训练**绝不可能单卡完成**，必须引入参数与优化器分片（ZeRO / FSDP，详见第 5 课）或多维并行拆分。只有在采用 LoRA（冻结基座、仅更新约 $1\%$ 参数）、8-bit 优化器（如 bitsandbytes 将优化器状态压减至 $2N$）或模型卸载（CPU Offloading）等特殊手段下，单卡 80GB 才能跑通训练。
 
 ## 代码填空题
 

@@ -24,8 +24,8 @@ flowchart TD
         GPU3["GPU 3"] <--> PCIe1
         NIC1["RDMA NIC 1"] <--> PCIe1
     end
-    NUMA0 <==>|UPI / QPI 跨节点互联 (高时延低带宽)| NUMA1
-    GPU0 <===>|NVSwitch / 全互联 NVLink (超高带宽)| GPU2
+    NUMA0 <==>|"UPI / QPI 跨节点互联 (高时延低带宽)"| NUMA1
+    GPU0 <==>|"NVSwitch / 全互联 NVLink (超高带宽)"| GPU2
 ```
 <p class="caption" align="center"><em>图 1-1：现代 8 卡 GPU 节点拓扑、NVLink 高速网与 NUMA/NIC 亲和性架构</em></p>
 """,
@@ -199,8 +199,8 @@ flowchart LR
 flowchart TD
     MetricStream["时序指标持续采集 (Prometheus + DCGM-Exporter)"] --> EvalWindow["多窗口联合评估: 1小时消耗率 > 14.4x 或 6小时 > 6x"]
     EvalWindow --> Spike{"是否发生急剧突发严重故障?"}
-    Spike -->|是 (高 Burn Rate)| P1Alert["触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离"]
-    Spike -->|否 (慢速漂移)| P3Ticket["创建 P3 低优先级工单排查慢掉队节点"]
+    Spike -->|"是 (高 Burn Rate)"| P1Alert["触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离"]
+    Spike -->|"否 (慢速漂移)"| P3Ticket["创建 P3 低优先级工单排查慢掉队节点"]
     P1Alert --> HotMigration["触发作业热迁移与断点恢复自愈"]
 ```
 <p class="caption" align="center"><em>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程</em></p>
