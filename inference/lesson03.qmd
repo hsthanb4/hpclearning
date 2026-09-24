@@ -32,8 +32,7 @@ jupyter: python3
 
 源码快照：SGLang `9deb6952afa4`。
 
-## 核心对象
-
+## 核心心智模型
 
 ### 核心操作与执行流程图解
 
@@ -66,32 +65,61 @@ flowchart LR
 <p class="caption" align="center"><em>图 3-2：SGLang SRT 混合批处理与 CUDA Graph 捕获分发时序流程</em></p>
 
 
+### 1. 它是什么，解决什么问题
 
-SGLang SRT 的 `Scheduler` 比教科书中的“排队策略”承担更多运行时编排：接收请求、维护 waiting/running/chunked 状态、选择 prefill 或 decode、协调 Radix/HiCache、调用 TP worker、处理结果、输出和健康检查。`Req` 是单请求持久状态；`ScheduleBatch` 是某次 forward 的批量视图；`NextBatchPlan` 显式返回 `batch_to_run` 和更新后的 `running_batch`。
+**SGLang SRT（SGLang Runtime）**是由加州大学伯克利分校团队开发的高性能大语言模型推理引擎。与纯通用批处理推理系统不同，SGLang 最初专为复杂的结构化生成、多轮对话与智能体（Agent）复杂逻辑树探索而生。
+在复杂大模型程序（如 ReAct Agent、Tree-of-Thought、自我纠错长思维链）中，系统面临严重的**复杂前缀重复计算与小批量自回归的 CPU 驱动瓶颈**：
+- 传统系统仅能缓存固定的 System Prompt，无法高效捕捉在会话中途分叉、并发探索的多路径前缀；
+- 在单步 Decode 过程中，PyTorch Eager 模式下的 Python 循环与 Kernel 发射延迟高达数百微秒，严重压制 GPU 算力利用率。
 
-`TpModelWorker` 负责分布式 worker 包装；`ModelRunner` 负责模型加载、KV pool、attention backend、CUDA graph、forward 和 sample。不要把 `ScheduleBatch` 误认为 PyTorch DataLoader batch。
+SGLang SRT 提出了以 **RadixAttention（基数树动态前缀感知）**与 **多尺寸 CUDA Graph 捕获分发引擎**为核心的运行时体系（图 3-1 与图 3-2）。它解决的核心工程问题是：**通过树状结构全自动追踪任何历史 Token 前缀，并利用高效的分层合批容器（`ScheduleBatch`）与 CUDA Graph，将多轮交互与复杂 Agent 工作流的 TTFT 与推理吞吐推向极致**。
 
-## 调用链与状态变化
+### 2. 它如何工作
 
-请求经 scheduler receiver 进入 `handle_generate_request`，初始化 `Req` 并放入 waiting queue。每轮 `get_next_batch_to_run` 先合并上轮完成 prefill 的 batch、处理 chunked request/HiSparse，再尝试构造新 prefill；若没有 prefill，才更新并运行 decode batch。`run_batch` 把 `ScheduleBatch` 交给 TP worker；后者转换为 `ForwardBatch`，由 ModelRunner 执行 attention/model/sampling；`process_batch_result` 更新 `Req.output_ids`、finish reason、cache 与输出流。
+SGLang SRT 的分层协作与批处理推进时序如图 3-1 与图 3-2 所示：
 
-这是一条状态机，不是简单 `queue.get → model.generate`。batch copy、future map 和 stream barrier 用于 overlap 模式下保持上轮结果与本轮准备的依赖。
+1. **三大核心抽象分工解耦（图 3-1）**：
+   - **`Req`（单请求持久业务实体）**：拥有单请求完整的跨步语义状态，包括输入/输出 Token 列表、采样参数、停止条件，以及在 Radix Tree 中的当前挂载节点；
+   - **`ScheduleBatch`（调度器层批量控制视图）**：由 `Scheduler` 在 CPU 侧负责编排维护的动态批次容器。负责请求优先级排序、Prefill 与 Decode 区分聚合，以及向物理内存池请求分配 KV Slot；
+   - **`ForwardBatch`（设备端执行描述符）**：由 `TpModelWorker` / `ModelRunner` 消费的 GPU 物理张量集合。包含打平的 Input Tokens、序列长度偏移数组 `seq_lens`、PagedAttention 物理查找表指针，以及与 CUDA Graph 对齐的批次元数据。
+2. **两阶段批处理决策（Prefill 优先与 Decode 轮转，图 3-2）**：
+   在调度器核心函数 `get_next_batch_to_run()` 中，状态机遵循严谨的转移次序：
+   - **第一步：合并已就绪的 Prefill**：上一个 step 中刚刚执行完前向 Prefill 的请求，在当前轮首先被合并进入活跃的 `running_batch` 集合；
+   - **第二步：新 Prefill 准入判定**：若 WAITING 队列中存在可接纳的新请求，利用 Radix Tree 检索最长公共前缀后，优先构造 `prefill` 批次；
+   - **第三步：Decode 批次推进**：若无新 Prefill，则将存活的 `running_batch` 请求打包为 `decode` 批次下发执行。
+3. **CUDA Graph 捕获与回放（图 3-2）**：
+   ModelRunner 在启动阶段预先针对一系列典型的批次大小（如 Batch Size = 1, 2, 4, 8, 16, 32, 64, 128）录制捕获了静态的 CUDA Graph。当本轮 `ForwardBatch` 的请求数恰好命中捕获尺寸时，直接重放（Replay）整张图，彻底绕过 PyTorch 的 CPU 解释与底层驱动启动开销；若尺寸未命中，则平滑回退至 Eager 动态前向模式。
 
-## 正确性条件与常见误区
+### 3. 正确性条件与常见误区
 
-正确性条件：`Req` 的 KV 长度、`seq_lens`、output ids 和 pool indices 必须一致；prefill 完成后才能安全进入 decode；retract/abort 必须释放 request slot 与 KV；chunked request 不能因为暂时移出 running batch 而丢失所有权；overlap 时读取共享 buffer 的阶段必须在写者复用前发布 WAR 完成。
+- **禁止跨层合并三大对象（`Req` / `ScheduleBatch` / `ForwardBatch`）**：
+  初学者常试图将三者合为一个大对象。这一做法是致命的：`Req` 是长周期 CPU 业务对象，而 `ForwardBatch` 包含了大量与具体 step 强绑定的物理 GPU Tensor。若将其混为一谈，会导致庞大的中间激活与张量随长请求一直驻留显存引发 OOM，且彻底破坏了 Overlap 异步调度流水线的隔离性。
+- **异步 Overlap 调度中的写后读（WAR）屏障**：
+  在 SGLang 的 Overlap 模式中，CPU 主线程在准备当前轮 Batch 元数据时，GPU 正在并发读取上一个轮次的输入 Buffer。系统必须通过 Stream Barrier（CUDA Event / 内存栅障）保证 GPU 完全完成读取后，CPU 才能向共享内存复写新的输入张量，杜绝发生脏读与内存撕裂。
+- **Radix Tree 引用计数与修剪互斥不变量**：
+  只要某个树节点对应的 KV 块正被某个活跃 `Req` 读取，其引用计数必须严格大于 0。LRU 驱逐算法只能修剪引用计数归零的闲置叶子节点，严禁误删活跃节点。
 
-常见误区是只读 `scheduler.py` 的 `get_next_batch_to_run`，不追 `ScheduleBatch.prepare_for_extend/decode` 与 ModelRunner；这样看不到 CPU 列表何时变成设备 tensor、KV location 何时分配。
+### 4. 性能与工程取舍
 
-## 当前前沿与工程取舍
+- **CUDA Graph Padding 开销 vs CPU 发射延迟**：
+  为了提高 CUDA Graph 命中率，系统通常需要把不成整数倍的请求向上对齐填充（Padding）到最近的静态尺寸桶。Padding 带来了一定程度的无用计算，但消除了数十微秒的 Python 解释开销，在小 Batch Decode 场景下利远大于弊。
+- **Prefill 优先策略对 TTFT 与 ITL 的博弈**：
+  `get_next_batch_to_run` 默认优先调度新到达的 Prefill 请求，这极大优化了首字到达时间（TTFT）；但代价是正在生成的 Decode 请求会被暂时挂起一轮，导致字间生成延迟（ITL）产生短暂尖峰。因此，SGLang 在长序列场景下引入了 Chunked Prefill 与动态优先级调节来平抑这种抖动。
 
-SGLang 当前代码同时容纳 overlap scheduling、PD disaggregation、DP attention、HiCache/HiSparse、spec V2 与多后端，所以 `scheduler.py` 很大。源码面试不要求背完分支，而要找到稳定骨架：接收 → 计划 → 准备 batch → forward/sample → 结果提交。与 vLLM 的主要差异应基于具体 snapshot 和 workload 讨论，不能用“RadixAttention 一定更快”作结论。
+## 具体演示：`NextBatchPlan` 批次选择决策演算
 
-## 具体推演
+考虑调度循环中的一个经典决策时刻：
+- 当前运行队列：`running = ["d0"]`（包含 1 个正在进行自回归的请求）；
+- 上一轮刚刚完成 Prefill 计算的请求：`completed_prefill = ["p_done"]`；
+- 等待队列中新到达、且通过 Radix 匹配准备执行 Prefill 的请求：`new_prefill = ["p_new"]`。
 
-当 waiting 中有可接纳 prefill 时，`get_next_batch_to_run` 优先返回新 prefill；否则把存活 running requests 准备为 decode。上轮 prefill batch 会先并入 running batch。这个策略解释了 TTFT 与 ITL 的竞争，也解释了 chunked prefill、prefill delayer 等机制存在的原因。
-
-请先口头复述“输入 → 状态所有者 → 状态迁移 → 输出/指标”，再做练习。
+**调度决策推导**：
+1. **合并上一轮成果**：`running.extend(completed_prefill) \implies running = ["d0", "p_done"]`。此时持久运行集合已经原子扩充为 2 个请求；
+2. **判定运行批次**：
+   - 检测到 `new_prefill` 非空，根据“新 Prefill 优先以压低首字时延”策略，本次调度计划选出执行 `batch_to_run = ("prefill", ["p_new"])`；
+   - 最终返回计划字典：`{"batch_to_run": ("prefill", ["p_new"]), "running_batch": ["d0", "p_done"]}`。
+3. **后继演进**：
+   在下一个 step 中，若没有更新的 Prefill 进入，系统将执行 `batch_to_run = ("decode", ["d0", "p_done"])`，正式对两路请求并发进行自回归解码。状态机转移清晰无歧义。
 
 ## 实践任务：唯一代码填空题
 
@@ -182,15 +210,23 @@ assert choose_sglang_batch(["d0"], [], []) == {
 
 ### Q1 参考答案
 
-`Req` 跨多轮持有单请求语义状态、停止条件和 cache 引用；`ScheduleBatch` 是 scheduler 为某轮组合请求后的批量控制视图；`ForwardBatch` 是 ModelRunner/attention backend 消费的设备执行描述。三者生命周期、设备位置和写入者不同。合并后会让持久请求对象携带易过期 GPU tensor，或让 kernel 层修改业务状态，难以 overlap、retract 和测试。
+`Req`、`ScheduleBatch` 和 `ForwardBatch` 三者各自代表了完全不同的抽象层级、生命周期、设备存储位置和状态写入者，严格解耦是现代大模型推理引擎高吞吐与正确性的根基：
+1. **生命周期与存储介质的分离**：`Req` 是全生命周期驻留在 CPU 上的长周期状态机，包含原始 Prompt tokens、已生成的采样 tokens、采样参数（temperature/top_p）、停止条件、结构化约束（Regex/JSON schema）以及 Radix Tree 节点的引用引用，跨数十甚至上千个 step 存活；`ScheduleBatch` 是调度器单步决策产生的控制对象，驻留在 CPU 端，管理本步调度的一组请求列表、KV block 增减分配意图、内存配额检查与抢占/回退（preempt/retract）元数据；`ForwardBatch` 则是经过 flattened 和 tensorized 后的设备端结构体，通常在 TP worker / ModelRunner 层面生成，持有 GPU 上的平铺张量（如 `input_ids`, `req_pool_indices`, `seq_lens`, `out_cache_loc`, attention metadata 等），仅用于喂给 PyTorch / FlashInfer / Triton kernels 执行当轮 forward，生命周期仅为单次 forward。
+2. **状态写入者与并发所有权（Ownership & Concurrency）**：`Req` 仅由 CPU 调度器事件循环独占更新；`ForwardBatch` 是纯粹的只读设备视图，由底层 C++/CUDA 算子直接解包并高效消费。若将三者混为一体，会让持久的请求对象长期悬挂大尺寸临时显存张量导致显存泄露，或者迫使模型执行层反向侵入调度器业务逻辑，破坏关注点分离。
+3. **Overlap 流水线掩盖机制**：在 SGLang overlap 调度模式下，当 GPU 正在执行 Step $t$ 的 `ForwardBatch` 时，CPU Scheduler 已经在准备 Step $t+1$ 的 `ScheduleBatch` 并投递 `ForwardBatch`。三者严格解耦是保证 CPU 调度逻辑与 GPU 计算完全流式掩盖（latency hiding）的前提。
 
 ### Q2 参考答案
 
-本轮可能合并上轮 prefill、移出 chunked request、过滤完成/abort、接入 HiSparse ready requests 或 retract decode。即使最终运行的是新 prefill，持久 running 集合也已变化。显式返回能让调用者原子替换 scheduler 状态，避免只拿到执行 batch 却丢失跨轮请求所有权。
+`running_batch` 并非静态只读的 FIFO 队列，而是一个动态聚合的调度生命周期容器。`get_next_batch_to_run` 在规划本步批次的同时，伴随了一系列核心状态机的原子演进：
+1. **跨轮状态转化与清理**：上一轮成功完成预填充（`completed_prefill`）的请求必须正式转正并入 `running_batch`，成为后续 decode 的候选集；已生成终止符（`<|endoftext|>`）或达到最大输出长度、或被客户端中止（aborted）的请求需要在此刻被析构并释放 Radix 树上的引用；因显存高水位被驱逐（preempt/retract）的请求被移出。
+2. **调度决策与全局所有权原子推进**：调度器做出的“单步执行决策”（如当前优先运行突发的新 prefill batch `batch_to_run = ("prefill", new_prefill)`）只代表当前 step 提交给 GPU 的任务切片，但背景中处于挂起等待状态的 decode 请求集合同样在经历生命周期更新。显式返回更新后的 `running_batch`，使得调度器主循环能够以原子赋值的方式推进调度器内部的请求所有权指针，杜绝了由于条件分支跳转而遗漏已就绪请求或悬挂僵尸请求的竞态 Bug。
 
 ### Q3 参考答案
 
-在 `run_event_loop/get_next_batch_to_run/prepare_*`、`run_batch/TpModelWorker`、`ModelRunner.forward/_forward_raw/sample` 分段打点并结合 GPU timeline。若 forward stream 间有 CPU 空洞且计划阶段长，是 scheduler/prepare；若 batch 已提交但 kernel 长，是模型/通信；若频繁 graph fallback 或 tensor copy，则看 ForwardBatch shape、CUDA graph 与 attention backend。必须用同一请求分布对照。
+定位 SGLang SRT 性能瓶颈需要结合代码分段高精度计时与 Nsight Systems / PyTorch Profiler 全链路 GPU timeline 分析：
+1. **Scheduler CPU 与 Batch Preparation 瓶颈**：在 `run_event_loop`、`get_next_batch_to_run` 以及 `prepare_for_decode / prepare_for_extend` 注入微秒级打点。如果在 Nsys timeline 上观察到 CUDA Compute Stream 上不同 step 的 kernel 之间存在明显的空洞（GPU 气泡，通常超过 $200\ \mu\mathrm{s}$），且 CPU 单核利用率达到 100%，则说明瓶颈在于 Python 侧的调度循环、Radix Tree 节点遍历查找开销或 Python 对象的 tensorization 拼接开销。
+2. **CUDA Graph 捕获与回退瓶颈**：若 GPU 单步执行时延显著高于预期，排查是否频繁触发 Eager 模式回退。在 Nsys 中比对单步 launch 的 kernel 个数：正常命中 CUDA Graph 时整张网络仅有数个 Graph Launch 节点；若观察到成百上千个零碎 kernel 串行发射，说明实际并发 batch size 频繁脱离预捕获的 Graph buckets，导致算子发射开销完全暴露在关键路径上。
+3. **ModelRunner 与算子/通信瓶颈**：若 batch 已快速入队且 CUDA Graph 稳定生效，但单步 forward kernel 持续时间极长，需进一步下钻：在多卡 TP 部署下，检查 `ncclKernel_AllReduce` 通信占空比是否反常偏高（排查跨 NUMA 节点传输、NVLink 拓扑降级或卡间负载不均）；在单卡 kernel 内部，使用 NCU 排查 FlashInfer / PagedAttention 算子的 memory-bound 程度、L2 缓存命中率与 KV cache 读取带宽是否已逼近硬件物理瓶颈。
 
 ## 参考资料
 

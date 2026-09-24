@@ -30,8 +30,7 @@ jupyter: python3
 
 源码快照：vLLM `8e958902eee5`；SGLang `9deb6952afa4`。
 
-## 核心对象
-
+## 核心概念与运行机制
 
 ### 核心操作与执行流程图解
 
@@ -50,33 +49,67 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 6-2：量化 GEMM 在线标定、Tensor Core 计算与反量化流水线</em></p>
 
+### 1. 它是什么，解决什么问题
 
+在当代超大规模语言模型（LLM）的工业化部署中，全精度（FP16/BF16）模型面临着严峻的物理制约：
+1. **显存容量瓶颈（VRAM Capacity Wall）**：一个 70B 参数的 BF16 模型仅权重就需要占据约 140 GB 显存，至少需要两张 80GB GPU 才能勉强加载，留给 KV Cache 和高并发并发批处理（Batch Size）的显存空间极其逼仄；
+2. **访存带宽瓶颈（Memory Bandwidth Wall）**：在自回归 Decode 阶段，计算强度（FLOPs/Byte）极低，GPU 绝大部分时间都在等待从 HBM 中读取庞大的模型权重与长序列 KV Cache。
 
-量化方案由四层合同组成：数值格式（INT/FP、bit width、scale/zero point）、粒度（tensor/channel/group/micro-block/token）、checkpoint metadata（packing、axis、scheme）和执行 kernel（输入 dtype、反量化融合、硬件 capability）。registry 只完成“名字→配置类”；配置类再为具体 Linear/MoE/Attention layer 选择 quant method，method 创建 packed weights 并在 `apply` 调 kernel。
+**模型量化（Model Quantization）**通过将高精度浮点数映射到低比特离散数值空间（如 INT8、INT4、FP8、NVFP4、MXFP4），实现显存占用大幅缩减与访存/计算吞吐的数倍跃升。如图 6-1 所示，从 FP16 到 FP8 再到 INT4，模型显存占用可降低 50%~75%，为 KV Cache 腾出巨大的并发容量，同时推动系统吞吐成倍增长。
 
-W4A16 主要压权重带宽与容量，常适合低 batch decode；W8A8/FP8 同时量化激活，更依赖原生低精度 Tensor Core；NVFP4/MXFP4 是 micro-scaling 4-bit 路线，scale 编码和 block size 不同；KV quantization 独立影响长上下文容量和 attention 误差。
+在现代高性能推理引擎（vLLM 与 SGLang）中，量化不仅仅是一套数学离散化算法，更是一套横跨 **权重存储打包（Packing）**、**运行时配置注册（Registry）**、**动态在线标定（Calibration）**与 **GPU 底层硬件算子分发（Kernel Dispatch）** 的完整系统工程。
 
-## 调用链与状态变化
+### 2. 它如何工作
 
-加载时读取模型 quant config，runtime registry 解析为 `QuantizationConfig`；每层通过 prefix/layer type 获得 method，`create_weights` 建立 packed parameter 与 scales，checkpoint loader 填充，`process_weights_after_loading` 重排/pack，forward 时 `apply` 根据 shape/platform 选择 Marlin、CUTLASS/FlashInfer、Triton 或其他 kernel。
+工业级推理引擎中的量化执行流水线具有严密的分层架构（如图 6-2 所示）：
 
-Online/dynamic activation quant 每次 forward 计算 scale；静态校准使用保存的 scale。Micro-scaling 把连续小 block 共享 scale，减少 outlier 对全 tensor 的污染，但增加 scale metadata 和 layout 约束。
+1. **量化范式与精度矩阵**：
+   - **W4A16（权重量化，激活保持高精度）**：如 AWQ、GPTQ、Marlin。仅将静态权重压缩为 INT4 存放于 HBM，在 GEMM 算子内部流式反量化回 FP16/BF16 进行计算。核心收益是节省 75% 的权重显存带宽与容量，极度契合单请求或小 Batch 的 Decode 场景。
+   - **W8A8 / FP8（权重与激活双量化）**：利用现代 GPU（NVIDIA Ada/Hopper/Blackwell）原生的 FP8 Tensor Core（E4M3 用于前向计算，E5M2 用于梯度或长动态范围），在输入激活进入 GEMM 前执行动态在线量化：
+     $$\tilde{X} = \text{clip}\left(\text{round}\left(\frac{X}{s_x}\right), -q_{\max}, q_{\max}\right)$$
+     Tensor Core 直接执行原生的 8-bit 点积累加，吞吐比 FP16 翻倍。
+   - **NVFP4 / MXFP4（Micro-scaling 微缩放 4-bit 范式）**：传统 Per-Tensor 或 Per-Channel 量化在 4-bit 下极易因激活异常值（Outliers）导致全盘精度崩溃。NVFP4 与 OCP MXFP4 引入细粒度微块缩放（Micro-block Scaling，如每 16 或 32 个元素共享一个独立的 E2M1 浮点缩放因子），有效将 Outlier 限制在局部微块内，并在 Blackwell 原生 FP4 Tensor Core 上实现近乎 4 倍的计算吞吐。
+   - **KV Cache 量化**：独立于模型权重量化，针对长上下文场景将 Paged KV Cache 压缩为 FP8 或 INT4 格式，使单卡支持的上下文长度与最大并发量激增数倍。
+2. **源码分层架构与生命周期**：
+   - **Registry 注册分发**：引擎启动时解析 `--quantization` 命令行参数与模型 `config.json`，在 `QuantizationRegistry` 中匹配对应的 `QuantizationConfig` 实现类；
+   - **层级注入与权重打包**：模型初始化时，`QuantizeMethodBase` 拦截模型的 `Linear` 或 `MoE` 算子，调用 `create_weights` 创建低精度 Packed 参数（如将 8 个 INT4 紧凑打包为一个 `int32`）与对应的 Scale/Zero-Point 张量；
+   - **权重重排（Layout Transformation）**：针对硬件 Tensor Core 的特定内存访问模式（如 Marlin 算子的 Interleaved 权重交织排列），在 `process_weights_after_loading` 中完成离线内存布局转换；
+   - **前向执行与算子分发**：运行时 `apply` 方法根据当前的 Batch 尺寸、序列长度与底层硬件 Capability，动态选择最优执行内核（如小 Batch 选择访存优化的 Marlin 内核，大 Batch 选择计算密集的 CUTLASS FP8 内核）。
 
-## 正确性条件与常见误区
+### 3. 正确性条件与常见误区
 
-格式名称相同不保证 layout/kernel 相同；checkpoint metadata、group size、zero point、scale dtype 和 axis 必须与 loader/kernel 一致。目标硬件没有原生/优化 kernel 时，低 bit 可能因解包和转换更慢。量化质量必须以目标 tokenizer、模型 revision、长上下文和任务集验证。
+- **数值范围溢出与不对称 Zero-Point 不变量**：
+  - 在对称量化（Symmetric Quantization）中，量化网格严格关于 0 对称：$X_q = \text{round}(X / s)$。若输入激活存在显著的单向分布偏移（如全部大于 0），对称量化会白白浪费一半的离散表达区间；
+  - 若采用非对称量化（Asymmetric Quantization），必须维护零点偏移量 $z$：$X_q = \text{round}(X / s) + z$。此时矩阵乘计算必须补偿与零点相关的交叉项，若反量化融合算子遗漏该交叉项，将引发致命的数值偏置与累积误差。
+- **微块缩放（Micro-Scaling）的内存对齐与布局约束**：
+  - NVFP4 / MXFP4 的微块大小（如 16 或 32）要求矩阵的 $K$ 维度和 $N$ 维度必须是微块尺寸的整数倍。若模型存在非对齐的隐藏层维度（如某些特殊 Vocab Size 或 SwiGLU 中间层），必须执行 Padding 填充或特殊边界处理，否则将导致非法显存越界访问。
+- **“显存占用直接除以量化比率”的伪常识**：
+  - *常见误区*：误以为将 16-bit 模型量化为 4-bit，整机显存消耗就必定降为原来的 $1/4$。
+  - *实际情况*：显存账本不仅包含模型权重，还包含庞大的 KV Cache 显存池、CUDA Graphs 预捕获显存空间、激活工作区（Workspace）、未量化的 Embedding/LM-Head 浮点张量、以及量化引入的额外 Scale/Zero-Point 元数据张量。
 
-不要把模型文件缩小比例直接当 GPU 显存或吞吐提升：还要计 KV、workspace、未量化层、scales、CUDA graph 和 allocator reserve。
+### 4. 性能与工程取舍
 
-## 当前前沿与工程取舍
+- **W4A16 vs. W8A8 (FP8) 的适用边界**：
+  - **W4A16** 适合**小 Batch（并发数 $\le 8$）的自回归 Decode**。此时系统处于严重的访存带宽瓶颈，减小权重体积即可线性降低权重拉取时间；但由于激活仍为高精度，Tensor Core 无法启用低精度计算单元，在大 Batch Prefill 下无法提供算力加速。
+  - **W8A8 (FP8)** 适合**大 Batch 吞吐优先或长 Prompt 的 Prefill 场景**。此时系统进入计算受限（Compute-Bound）区间，FP8 Tensor Core 提供的 2 倍峰值算力可显著压缩 TTFT，但在极小 Batch 下由于权重体积大于 INT4，访存延迟反而略逊于 W4A16。
+- **动态量化（Dynamic Quant） vs. 静态标定（Static Quant）**：
+  - 动态在线量化每次前向实时计算激活张量的最大绝对值并推导 Scale，精度极高且无需离线校准集；但代价是引入了规约（Reduction）Kernel 的额外执行时延与显存同步。
+  - 静态标定使用离线数据集提前计算固定的 Scale，运行时零额外计算开销；但在遭遇分布外（OOD）提示词或极端 Outliers 时极易产生严重截断误差。
 
-当前生产前沿是硬件感知的混合路线，而非单一算法冠军：Hopper/部分平台常用 FP8 W8A8；Blackwell 原生 NVFP4 提供 W4A4 路线；MXFP4强调标准化 micro-scaling/跨平台潜力；W4A16 INT4 仍是广泛适用的权重容量方案；KV FP8/FP4 面向长上下文。MR-GPTQ、旋转/scale 优化等论文改善 FP4 质量，但是否已被目标 engine/kernel 集成必须另行核对。
+## 具体演示
 
-## 具体推演
-
-values `[0,1,-2,8]` 若整 tensor 共用 scale，8 这个 outlier 会让前三项格点变粗；按 2 元素 micro-block 分组后，前两项和后两项各自得到 scale。更细粒度降低局部误差，却增加 scale 数和 kernel 访存/转换成本。
-
-请先口头复述“输入 → 状态所有者 → 状态迁移 → 输出/指标”，再做练习。
+设输入激活微块为包含 4 个元素的向量：$X = [0.0, 1.0, -2.0, 8.0]$，采用对称量化映射到 3-bit 有符号整数空间 $[-q_{\max}, q_{\max}]$，其中 $q_{\max} = 7$：
+1. **计算绝对值最大值**：$\max(|X|) = \max([0.0, 1.0, 2.0, 8.0]) = 8.0$；
+2. **计算缩放因子**：$s = \frac{\max(|X|)}{q_{\max}} = \frac{8.0}{7} \approx 1.142857$；
+3. **执行整型量化与截断**：
+   $$q_0 = \text{round}(0.0 / s) = 0$$
+   $$q_1 = \text{round}(1.0 / (8/7)) = \text{round}(0.875) = 1$$
+   $$q_2 = \text{round}(-2.0 / (8/7)) = \text{round}(-1.75) = -2$$
+   $$q_3 = \text{round}(8.0 / (8/7)) = 7$$
+   量化整型向量为 $Q = [0, 1, -2, 7]$；
+4. **反量化还原**：
+   $$\hat{X} = Q \times s = [0 \times \frac{8}{7}, 1 \times \frac{8}{7}, -2 \times \frac{8}{7}, 7 \times \frac{8}{7}] = [0.0, 1.143, -2.286, 8.0]$$
+   最大值 $8.0$ 得到精确无损表达，局部较小数值产生微小的舍入误差。若采用更细粒度的 2 元素微块，误差将被进一步局限和稀释。
 
 ## 实践任务：唯一代码填空题
 
@@ -167,15 +200,32 @@ assert blockwise_symmetric_fake_quant([0.0, 0.0], 2, 7) == ([0.0, 0.0], [1.0])
 
 ### Q1 参考答案
 
-CLI/model config 先解析量化名和 checkpoint metadata；registry 返回 `QuantizationConfig`；config 按 layer/prefix 选择 `QuantizeMethodBase`/Linear/MoE method；method 创建 packed weights/scales并在 load 后重排；forward 的 `apply` 根据 platform、shape 和 scheme 调具体 kernel。任何一层 layout/dtype/capability 不匹配都可能报错、fallback 或产生错误数值。
+从命令行参数 `--quantization` 到底层硬件执行 GEMM Kernel，在 vLLM/SGLang 等现代推理引擎中需历经严密的六层系统映射：
+1. **CLI 解析与引擎配置层（CLI & EngineConfig Parser）**：命令行解析器捕获 `--quantization fp8`（或读取模型权重目录下的 `quantization_config`），构建全局 `ModelConfig` 与 `EngineConfig`；
+2. **注册表匹配与配置实例化层（Quantization Registry & Factory）**：调用 `get_quantization_config(quant_name)`，在静态注册表中根据量化方案名称与 checkpoint 元数据匹配并实例化专用的 `QuantizationConfig` 子类（如 `FP8Config`, `AWQConfig`, `MarlinConfig`）；
+3. **算子方法注入层（Layer Method Binding & Linear Replacement）**：模型构造期间，`QuantizationConfig.get_quant_method(layer, prefix)` 拦截模型内部的各类线性投影算子（QKV 投影、MLP Gate/Up/Down 等），注入对应的 `QuantizeMethodBase` 算子实现类；
+4. **权重声明与分片打包层（Weight Allocation & Parameter Packing）**：调用 `QuantizeMethodBase.create_weights`，在 GPU 显存上声明紧凑打包的低精度整数或浮点张量（如 INT32 容纳 8 个 INT4 权重）以及对应的 Scale 与 Zero-Point 张量；
+5. **检查点加载与内存重排层（Weight Loading & Layout Transformation）**：模型加载器将权重写入 GPU，并调用 `process_weights_after_loading`，根据硬件 Tensor Core 的访存特征执行权重交错重排（如 Marlin 的通道交织和局部转置）；
+6. **运行时前向分发与 Kernel 执行层（Forward Runtime & Kernel Dispatch）**：在每次前向传播的 `apply` 函数中，根据当前的 Batch Size（$M$ 维度）、隐层维度（$K, N$）以及当前 GPU 的 Compute Capability（如 SM80/SM90），动态选择最优的底核实现（如 Marlin、CUTLASS W8A8 GEMM、FlashInfer FP8 GEMM 或 Triton JIT Kernel）。
 
 ### Q2 参考答案
 
-NVFP4 是带两级 micro-block scale、面向原生硬件的 FP4 路线，可实现 W4A4 高吞吐，但要求相应 GPU/kernel和校准；INT4 W4A16 在更多 GPU 上有成熟 weight-only kernel，低 batch decode 和容量受限场景可能更实际。还要比较模型敏感性、激活 outlier、scales、quality、TTFT/ITL 和成本。先进格式不是跨硬件的支配关系。
+声称“NVFP4 绝对比 INT4 更先进、一定更好”是典型的脱离硬件微架构与负载边界的工程误区：
+1. **硬件微架构的原生支持鸿沟（Hardware Capability & ISA Constraint）**：NVFP4 强依赖新一代 GPU（如 NVIDIA Blackwell 架构）原生提供的 FP4 Tensor Core。若在缺乏硬件 FP4 指令集的旧卡（如 Hopper H100 或 Ampere A100）上运行，引擎必须在软件层将 FP4 解包并提升为高精度（Upcasting），不仅无法获得算力加速，反而因为额外的解包开销导致吞吐显著劣于原生 INT4 或 FP16；
+2. **W4A4 对比 W4A16 的精度与 Outlier 挑战（Activation Outliers & Precision Risk）**：工业界常用的 INT4 主要是 W4A16（仅权重量化，输入激活保持高精度 FP16/BF16），模型精度通常几乎无损；而 NVFP4 属于 W4A4（权重与激活均压缩至 4-bit）。大语言模型深层网络中普遍存在具有极端数值的通道激活异常值（Outliers），将激活压缩至仅有 16 个离散点位的 FP4，即便有 Micro-scaling 微块缩放保护，在复杂数学推理或长上下文检索中仍存在显著的精度劣化风险；
+3. **算子生态成熟度与小 Batch Decode 瓶颈**：INT4 W4A16 拥有经过工业界数年千锤百炼的极致访存优化算子（如 Marlin），在小 Batch 自回归 Decode（极度访存受限）场景下能够将 HBM 带宽打满至 85% 以上。NVFP4 虽然理论计算算力翻倍，但在单并发或小 Batch 场景下受限于两级 Scale 解码访存开销，其实际端到端时延未必优于成熟的 W4A16。
 
 ### Q3 参考答案
 
-拆分 weights、KV、workspace/CUDA graph、activations、scales/packing 和 allocator reserve。若 KV/graph 占主导，权重节省不会同比转成并发；也可能 runtime 解包或保留高精度副本。应读取实际 memory snapshot/engine KV capacity，再按 prompt/output 长度压测，而不是从 checkpoint 文件大小推断。
+模型量化后权重显存减半，但系统最大支持的并发请求数（Max Concurrency）仅提升 10%，通常说明系统瓶颈存在严重的非对称性。必须通过精细化显存做账和系统分析来定位根因：
+1. **全景显存做账拆解（VRAM Ledger Audit）**：
+   $$\text{Total VRAM} = \text{Model Weights} + \text{KV Cache Pool} + \text{CUDA Graphs Capture} + \text{Activation Workspace} + \text{Allocator Reserve / Fragmentation}$$
+2. **核心嫌疑点逐一排查**：
+   - **KV Cache 显存未联动压缩**：若请求平均序列较长（如 8K~32K Tokens），KV Cache 的显存消耗量往往数倍于模型权重自身。若 KV Cache 仍维持 FP16 精度，并发提升带来的 KV 显存需求呈陡峭线性增长，权重释放出来的少量空间很快被几个长序列并发吞噬；
+   - **CUDA Graphs 静态空间硬性挤占**：推理引擎为了消除算子发射开销，通常会为各个 Batch 预捕获 CUDA Graphs。这些图所预留的中间激活缓冲区（Activation Pool）在引擎初始化时就被永久占用（可能高达 10~20 GB），无法转化为 KV Cache 动态池；
+   - **Runtime 存在解包临时副本或内存泄漏（Shadow Buffers）**：某些低效的量化实现并未在 Kernel 内部流水线反量化，而是由 Python 在前向计算前将 Packed 权重动态解包为 FP16 临时张量，瞬间制造出巨大的显存尖峰；或者在模型加载后未释放 CPU/GPU 上的原始高精度临时张量；
+   - **显存分配器外部碎片化（Memory Fragmentation）**：PyTorch 底层 CachingAllocator 碎片率过高，导致物理上存在可用显存但无法聚合成连续的虚拟页面。
+3. **诊断与定位手段**：在服务运行时导出 `torch.cuda.memory_snapshot()` 观察显存分配树与内存块碎片分布；查询推理引擎 `KVCacheManager` 实际可用的 Free Blocks 数量；在固定 Prompt 长度下递增并发压测，核对显存增长斜率与理论预期的偏差。
 
 ## 参考资料
 
