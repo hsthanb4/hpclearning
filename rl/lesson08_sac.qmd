@@ -59,25 +59,72 @@ flowchart LR
 
 ### 1. 它是什么，解决什么问题
 
-SAC 在回报之外奖励策略熵，连续控制中通常用重参数化采样得到低方差梯度。
+**软策略演员-评论家（Soft Actor-Critic, SAC）**由加州大学伯克利分校（Tuomas Haarnoja 等人，2018）提出，是目前连续动作空间与机器人强化学习中样本效率最高、最稳健的 Off-Policy 算法之一。
+传统强化学习（如 DDPG 或标准 Actor-Critic）以累积折现回报的最大化为单一目标：$\max_\pi \sum_t \mathbb{E}[r_t]$。这种设定在复杂的高维连续控制中存在显著弊端：
+- 策略极易陷入确定性的局部极值点（Local Optima），无法探索到更优的动作模态；
+- 策略对环境扰动极度脆弱，稍微改变初始状态或增加控制噪声，性能就会大幅坍塌。
+
+SAC 建立在**最大熵强化学习（Maximum Entropy RL）框架**之上，其将优化目标拓展为在**最大化回报的同时最大化策略的信息熵**：
+$$ \mathcal{J}(\pi) = \sum_{t=0}^T \mathbb{E}_{(s_t, a_t) \sim \rho_\pi} \left[ r(s_t, a_t) + \alpha \mathcal{H}(\pi(\cdot \mid s_t)) \right] $$
+其中 $\alpha$ 为温度系数（Temperature Parameter），动态权衡探索多样性与奖励利用率。
+它解决的核心工程问题是：**在 Off-Policy 高样本利用率的前提下，彻底消除确定性策略容易早熟收敛的缺陷，使策略在获得同等高奖励的前提下，尽可能保留多样化的探索选项（Multi-modal Policy），具备对非平稳环境的超强泛化鲁棒性**。
 
 ### 2. 它如何工作
 
-critic 目标含 min(Q1,Q2)-α logπ(a'|s')；双 Q 的最小值抑制过估计，温度决定探索权重。
+SAC 双 Q 架构、重参数化采样与温度自适应调节如图 8-1 与图 8-2 所示：
+
+1. **双 Q 网络（Twin Q-Networks）与软状态价值（图 8-1）**：
+   为了根除连续控制中的 Q 值过估计偏置，SAC 维护两套完全独立的 Critic 估值网络 $Q_{\phi_1}$ 与 $Q_{\phi_2}$。在构造软 Bellman 目标时，选取双网络预测的极小值，并扣除熵惩罚项：
+   $$ y_t^{\text{SAC}} = r_t + \gamma (1 - \text{terminated}_t) \left[ \min(Q_{\phi_1^-}(s_{t+1}, a'), Q_{\phi_2^-}(s_{t+1}, a')) - \alpha \log \pi_\theta(a' \mid s_{t+1}) \right] $$
+   其中下一时刻动作 $a' \sim \pi_\theta(\cdot \mid s_{t+1})$ 必须由**当前最新的 Actor 策略网络**在后继状态上采样得到。
+2. **重参数化技巧（Reparameterization Trick）与有界映射（图 8-2）**：
+   连续控制中的梯度如果使用传统似然比公式，方差极其巨大。SAC 采用重参数化路径导数（Pathwise Derivative）：
+   - 策略网络输出高斯分布的均值 $\mu_\theta(s)$ 与对数标准差 $\log \sigma_\theta(s)$；
+   - 引入独立标准高斯白噪声 $\epsilon \sim \mathcal{N}(0, I)$，构造无界潜变量：$u = \mu_\theta(s) + \sigma_\theta(s) \odot \epsilon$；
+   - 通过双曲正切函数实现物理动作有界限制：$a = \tanh(u) \in (-1, 1)$。
+   这种变换使得整个从策略参数 $\theta$ 到具体动作 $a$ 的生成过程完全光滑可微，反向传播可以直接沿着 Critic 价值面对 Actor 参数求偏导，梯度方差大幅削减。
+3. **Actor 策略与温度 $\alpha$ 的自适应拉格朗日调节（图 8-2）**：
+   - **策略损失函数**：直接最大化软 Q 价值：
+     $$ \mathcal{L}_{\text{actor}}(\theta) = \mathbb{E}_{s \sim \mathcal{D}, \epsilon \sim \mathcal{N}} \left[ \alpha \log \pi_\theta(a \mid s) - \min(Q_{\phi_1}(s, a), Q_{\phi_2}(s, a)) \right] $$
+   - **温度损失函数（自动化熵约束）**：设定目标期望熵 $\bar{\mathcal{H}} = -\dim(\mathcal{A})$（负动作维度），通过双对偶变量梯度更新温度 $\alpha$：
+     $$ \mathcal{L}(\alpha) = \mathbb{E}_{s \sim \mathcal{D}, a \sim \pi_\theta} \left[ -\alpha \left( \log \pi_\theta(a \mid s) + \bar{\mathcal{H}} \right) \right] $$
+     当策略分布由于收缩导致熵过低（$-\log \pi < \bar{\mathcal{H}}$）时，$\alpha$ 被自动推高强行激活探索；当策略在未知区域充分散开后，$\alpha$ 自动回落加速收敛。
+4. **软更新（Polyak Averaging）**：
+   目标网络每步以滑动平均 $\phi_i^- \leftarrow \tau \phi_i + (1 - \tau) \phi_i^-$ 平滑推进，彻底杜绝硬拷贝带来的价值震荡。
 
 ### 3. 正确性条件与常见误区
 
-tanh-squash 后 log-prob 要加 Jacobian 修正；target Q 与 sampled action 的梯度边界必须符合实现。
+- **双曲正切变量代换的雅可比行列式修正（The Tanh-Jacobian Bug）**：
+  在计算动作对数概率 $\log \pi(a \mid s)$ 时，由于 $a = \tanh(u)$ 是非线性映射，根据概率密度转换定理，必须加上雅可比变换的对数行列式惩罚：
+  $$ \log \pi(a \mid s) = \log p(u \mid s) - \sum_{i=1}^d \log \left( 1 - \tanh^2(u_i) + 10^{-6} \right) $$
+  若漏掉这一项（直接将 $\log p(u \mid s)$ 当作动作概率），会导致越靠近边界（$a \to \pm 1$）的状态熵被极度高估，策略会病态地把动作概率全部死锁在边界极值上。
+- **目标后继动作的采样源混淆**：
+  计算 $y_t$ 中的 $a'$ 时，**绝对不能从 Replay Buffer 中直接读取该转移当时存储的历史动作**！因为经验池中存储的是历史旧策略采样的动作，而 Soft Bellman 目标评估的是当前在线策略 $\pi_\theta$ 的软期望价值。必须在计算目标时将 $s_{t+1}$ 重新喂入当前 Actor 进行动态采样。
+- **Critic 权重必须冻结反传**：
+  在更新 Actor 损失 $\mathcal{L}_{\text{actor}}$ 时，虽然计算图中包含了 $\min(Q_1(s, a), Q_2(s, a))$，但 Critic 网络的权重 $\phi_1, \phi_2$ 必须被冻结梯度，只能允许梯度穿透 $a$ 传递回 Actor 的参数 $\theta$。
 
 ### 4. 性能与工程取舍
 
-自动温度调节减少人工搜索，但目标熵设置错误会使策略过随机或过早确定。
+- **多网络并行显存与计算开销**：
+  SAC 需要同时常驻 5 个深度神经网络（Actor、2 个在线 Critic、2 个目标 Critic）。为了降低前向反向的内存占用与 Kernel 启动开销，工业级实现（如 Stable-Baselines3 / CleanRL）通常将双 Critic 的前向计算合并在一个 Batched Linear 矩阵乘中执行，显著提升 GPU 计算吞吐。
+- **目标熵 $\bar{\mathcal{H}}$ 的先验设置**：
+  标准经验法则是令 $\bar{\mathcal{H}} = -\prod \text{shape}(A)$。但在某些动作自由度受限或关节阻尼极大的复杂机械控制场景中，若严格按照动作维度设置可能导致动作方差过大。此时通常需要将目标熵系数适当调小（如 $-0.5 \times \dim(A)$），以加速控制器的精细定位精度。
 
-## 具体演示
+## 具体演示：SAC Soft Value 计算数值演算
 
-Q1=4、Q2=3、logπ=-.5、α=.2，soft value=3.1，而不是 2.9。
+假定对于某个后继状态 $s'$ 和采样的后继动作 $a'$，模型输出的分量数据如下：
+- 双 Critic 估值：$Q_1 = 4.0$，$Q_2 = 3.0$
+- 采样的动作对数概率：$\log \pi(a' \mid s') = -0.5$（对应一个具有一定随机性的探索动作）
+- 当前自适应温度系数：$\alpha = 0.2$
 
-请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。
+代入 SAC 软状态价值（Soft Value）公式：
+$$ V_{\text{soft}}(s') = \min(Q_1, Q_2) - \alpha \log \pi(a' \mid s') $$
+计算推导：
+- 抑制过估计的极小值取值：$\min(4.0, 3.0) = 3.0$；
+- 加上最大熵探索红利：$- \alpha \log \pi = -0.2 \times (-0.5) = +0.1$；
+- 最终软价值：$V_{\text{soft}}(s') = 3.0 + 0.1 = 3.1$。
+
+注意符号因果律：因为 $\log \pi \le 0$，其取负数后为正，熵的奖励在数学上等价于为探索动作提供额外的正向价值补偿！如果误算为 $3.0 - 0.1 = 2.9$，说明写成了惩罚高熵动作的错误逻辑。
 
 ## 实践任务：唯一代码填空题
 
@@ -145,15 +192,27 @@ assert abs(soft_value(4., 3., -.5, .2) - 3.1) < 1e-12
 
 ### Q1 参考答案
 
-critic 目标含 min(Q1,Q2)-α logπ(a'|s')；双 Q 的最小值抑制过估计，温度决定探索权重。
+1. **输入阶段（高斯潜变量重参数化与双 Critic 估值）**：输入由状态观测向量 $s$、通过网络输出的高斯分布均值 $\mu_\theta(s)$ 与对数方差 $\log \sigma_\theta(s)$、引入的独立白噪声 $\epsilon \sim \mathcal{N}(0, I)$ 构成的可微连续动作 $a = \tanh(u)$、两个独立 Critic 网络计算的 Q 估值 $Q_{\phi_1}(s, a), Q_{\phi_2}(s, a)$，以及当前的动态温度系数 $\alpha$。
+2. **状态变化阶段（双重压制与最大熵闭环更新）**：
+   - **Soft Bellman 目标合成**：针对后继状态 $s'$，使用当前最新 Actor 重新采样动作 $a'$ 并经雅可比修正计算对数概率。通过取双目标 Critic 极小值压制过估计，并注入熵增奖励得到软目标 $y = r + \gamma (1 - d) [\min(Q_1^-, Q_2^-) - \alpha \log \pi(a' \mid s')]$；
+   - **Actor 路径导数反传**：Actor 沿着可微动作采样路径，直接最大化软价值目标 $\mathcal{L}_{\text{actor}} = \alpha \log \pi - \min(Q_1, Q_2)$；
+   - **双对偶温度自适应调节**：计算当前策略熵与目标熵的落差，通过梯度 $\nabla_\alpha [-\alpha (\log \pi + \bar{\mathcal{H}})]$ 自动推高或压低温度 $\alpha$。
+3. **输出阶段（平滑策略与多模态鲁棒控制）**：输出更新后的连续控制策略网络 $\theta$、双 Critic 参数 $\phi_1, \phi_2$ 以及目标网络平滑权重。策略在最大化物理控制回报的同时保留了最大的动作探索自由度，展现出对外界扰动的极强自适应适应能力。
 
 ### Q2 参考答案
 
-判断时先检查本课不变量：tanh-squash 后 log-prob 要加 Jacobian 修正；target Q 与 sampled action 的梯度边界必须符合实现。  若不成立，最终数值或系统状态即使暂时正常也不可信。
+若在对高斯潜变量实施 $a = \tanh(u)$ 压缩后，**忘记在计算对数概率时加上变量代换的对数行列式惩罚（$\sum \log(1 - \tanh^2(u))$）**，会导致**动作边缘区域的概率密度被极度低估，从而引起策略熵的严重系统性虚假高估（Spurious Entropy Overestimation）**：
+1. **数学代换公式本质**：由于 $\frac{da}{du} = 1 - \tanh^2(u)$，真实动作空间的对数概率密度严格遵循：
+   $$ \log \pi(a \mid s) = \log p(u \mid s) - \sum_{i=1}^d \log (1 - a_i^2) $$
+2. **忽略雅可比项的数值后果**：当潜变量 $|u|$ 较大（例如 $u = 3.0$）时，$a = \tanh(3.0) \approx 0.995$。此时导数项 $1 - a^2 \approx 0.01$，导致真实的修正项 $-\log(1 - a^2) \approx -\log(0.01) \approx +4.6$！真实的 $\log \pi$ 实际上被大幅推高（概率密度极度集中在边界）。若遗漏这一项，直接使用 $\log p(u)$，计算出的 $\log \pi$ 会显得极小（例如负很多）；
+3. **恶性控制后果**：算法会误以为“策略在边界附近非常分散、熵非常大”，因此在自适应温度调节中错误地过早降低探索温度 $\alpha$；同时由于 Actor 误以为边界动作的负对数概率很划算，会诱导策略病态地将所有动作概率压在 $\pm 1$ 的物理死限极限位置（Saturating at Actuator Limits），彻底破坏连续控制的平滑度。
 
 ### Q3 参考答案
 
-迁移时先保证正确性，再比较代价。这里的核心取舍是：自动温度调节减少人工搜索，但目标熵设置错误会使策略过随机或过早确定。
+动作空间维数翻倍（例如从 $d$ 维扩展到 $2d$ 维机械臂关节控制）时，目标熵 $\bar{\mathcal{H}}$ 必须**成比例同向线性缩放（通常设为负的动作维度，即从 $-d$ 同步调整为 $-2d$）**：
+1. **微分熵的维度线性可加性**：假设各动作维度在探索初期服从条件独立同分布的高斯分布，多元高斯分布的微分熵公式为 $\mathcal{H}(a) = \sum_{i=1}^d \mathcal{H}(a_i)$。当动作维度从 $d$ 翻倍为 $2d$ 时，若维持单维度的标准探索方差不变，总空间的微分熵数值自然会随之翻倍（绝对值线性翻倍）；
+2. **若保持原目标熵不动的灾难后果**：若维度翻倍后仍维持原有的 $-d$（而不是 $-2d$），相当于要求 $2d$ 维动作的总熵与原来 $d$ 维相同。根据均摊原理，平摊到每个独立维度的目标熵被腰斩为原本的一半，迫使每个维度的方差从 $\sigma$ 骤降至 $\sigma^2$ 极小值！这会导致自适应温度 $\alpha$ 瞬间暴跌归零，策略在训练刚开始几个 Step 内就在高维空间彻底丧失探索能力，发生灾难性的维度早熟崩溃；
+3. **工程标准规范**：在所有工业级实现（如 Softlearning / SB3）中，默认的目标熵统一定义为 `target_entropy = -float(np.prod(action_space.shape))`，严格保证了单位动作维度的基础探索裕量不随系统维度的扩增而萎缩。
 
 ## 参考资料
 

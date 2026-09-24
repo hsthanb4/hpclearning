@@ -53,27 +53,71 @@ flowchart TD
 <p class="caption" align="center"><em>图 3-2：REINFORCE 带基线策略梯度的完整迭代循环流程</em></p>
 
 
-### 1. 用回报给 log-prob 梯度定方向
+### 1. 它是什么，解决什么问题
 
-J(θ)=E[R]，策略梯度为 E[∇logπ(a|s)(G-b(s))]。baseline 与当前动作独立时，E[b(s)∇logπ(a|s)]=0，因此只改变估计方差。实际最小化负号损失，return/advantage 应 stop-gradient；无需也不能把普通反向传播穿过离散采样动作。
+策略梯度定理（Policy Gradient Theorem）与似然比技巧（Likelihood Ratio Trick / Log-derivative Trick）是现代策略优化（Policy Optimization）与大模型后训练（RLHF / PPO / GRPO）的数学核心。
+在环境动力学 $\mathcal{P}(s' \mid s, a)$ 未知且物理不可导、且动作采样操作离散不可导的前提下，我们定义全局优化目标为期望总回报：
+$$ \mathcal{J}(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} [R(\tau)] = \int P(\tau; \theta) R(\tau) d\tau $$
+直接对其求导，应用微积分恒等式 $\nabla_\theta P(\tau; \theta) = P(\tau; \theta) \nabla_\theta \log P(\tau; \theta)$，将导数重新转化为对当前策略采样轨迹的数学期望：
+$$ \nabla_\theta \mathcal{J}(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} \left[ \sum_{t=0}^{T-1} \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot G_t \right] $$
 
-### 2. 完整回答的 REINFORCE
+它解决的核心工程问题是：
+1. **黑盒与离散动作空间的梯度反传问题**：现实环境和神经自回归解码中的离散 Token 采样在数学上均不可导。似然比技巧绕过了对采样操作符的直接微分，转而对生成该动作的对数概率 $\log \pi_\theta(a \mid s)$ 求导，并以标量回报 $G_t$ 作为权重缩放梯度——使得回报高于平均的动作被鼓励提高概率，回报低于平均的动作被抑制；
+2. **蒙特卡洛方差爆炸与基线减方差（Variance Reduction via Baseline）**：纯 REINFORCE 依赖长轨迹的真实累积回报 $G_t$ 作为权重，方差随序列长度成平方级爆炸。通过引入仅依赖于状态而独立于当前动作的基线 $b(s)$，构造优势函数 $A_t = G_t - b(s)$，在严格保证期望梯度数学无偏的前提下，大幅削减了估计方差。
 
-单轮结果奖励下，L=−meanᵢ[Aᵢ Σₜ mᵢₜ logπθ(yᵢₜ|xᵢ,yᵢ,<ₜ)]。m 只选择模型生成的回答 token，排除 prompt/padding。序列 log-prob 是求和；额外除回答长度会重加权样本，并非无影响的实现细节。
+### 2. 它如何工作
 
-### 3. RLOO：不让样本给自己做 baseline
+策略梯度数据流拓扑与训练循环如图 3-1 与图 3-2 所示：
 
-同一 prompt 独立采样 K≥2 个回答，bᵢ=Σⱼ≠ᵢRⱼ/(K−1)，Aᵢ=Rᵢ−bᵢ。不训练 critic，但要支付多回答采样成本。若用包含自身的组均值，Aᵢ=(K−1)/K × Aᵢ,RLOO；未再做标准化时会缩小期望梯度，不能称其完全无偏。
+1. **基线减方差数据流（图 3-1）**：
+   - 策略网络 $\pi_\theta(a \mid s)$ 接收状态 $s$，输出动作概率分布并采样得到具体动作 $a \sim \pi_\theta$。环境交互产出折现回报 $G_t$；
+   - 状态价值网络（Critic）预测状态预期基准 $V_\phi(s)$（或通过 RLOO 计算留一组均值），合成中心化优势权重：
+     $$ A_t = G_t - V_\phi(s) $$
+   - **基线无偏性严格数学证明**：
+     $$ \mathbb{E}_{a \sim \pi_\theta} \left[ \nabla_\theta \log \pi_\theta(a \mid s) \cdot b(s) \right] = b(s) \sum_{a \in \mathcal{A}} \pi_\theta(a \mid s) \frac{\nabla_\theta \pi_\theta(a \mid s)}{\pi_\theta(a \mid s)} = b(s) \nabla_\theta \sum_{a \in \mathcal{A}} \pi_\theta(a \mid s) = b(s) \nabla_\theta (1) = 0 $$
+     这证明：任何与当前动作 $a$ 条件独立的基线 $b(s)$，其对策略梯度的期望贡献严格等于零！因此，从回报中扣除基线**绝对不会歪曲梯度方向，仅大幅消除不同状态间固有的均值偏移方差**。
+2. **REINFORCE 完整闭环流水线（图 3-2）**：
+   - Rollout 阶段收集批次交互轨迹，自后向前逆序计算每步折扣回报 $G_t = r_t + \gamma G_{t+1}$；
+   - 计算优势值 $A_t = G_t - V_\phi(s_t)$，并将其转化为代理策略损失函数：
+     $$ \mathcal{L}_{\text{policy}}(\theta) = - \frac{1}{B} \sum_{i=1}^B \sum_{t=0}^{T_i-1} A_{i, t} \cdot \log \pi_\theta(a_{i, t} \mid s_{i, t}) $$
+   - 同时利用均方误差损失更新价值网络 $\phi$：$\mathcal{L}_{\text{value}}(\phi) = \frac{1}{2B} \sum (V_\phi(s_{i,t}) - G_{i,t})^2$。
+3. **大模型后训练中的 RLOO（REINFORCE Leave-One-Out）机制**：
+   在单轮 Prompt 生成大模型对齐中，完整回答 $y$ 的对数概率为联合累加：$\log \pi_\theta(y \mid x) = \sum_{t=1}^T \log \pi_\theta(y_t \mid x, y_{<t})$。
+   RLOO 针对同一 Prompt $x$ 独立并行生成 $K \ge 2$ 个完整回答，各自获得标量奖励 $R_1, \dots, R_K$。针对第 $i$ 个回答，剔除自身后的其余 $K-1$ 个样本均值构成其专属状态基线：
+   $$ b_i = \frac{1}{K-1} \sum_{j \neq i} R_j, \quad A_i^{\text{RLOO}} = R_i - b_i $$
+   由于其余样本与当前第 $i$ 次采样的具体 Token 严格条件独立，RLOO 在零 Critic 训练成本的前提下实现了严格无偏的方差归约。
 
-### 4. 边界与取舍
+### 3. 正确性条件与常见误区
 
-RLOO 的无偏 baseline 论证要求条件于 prompt 的独立采样；复制同一个回答不是 K 个独立样本。学到的 critic 则用额外训练换取 token 级价值估计，后续在 GAE/PPO 中使用。
+- **优势权重必须阻断反传（Stop-Gradient / Detach）**：
+  在深度学习实现中，损失定义为 $-\text{mean}(A \cdot \log \pi)$。此时优势张量 $A_t$（无论是 $G_t - V(s)$ 还是 $R_i - b_i$）**必须严格执行 `detach()`**。如果允许梯度反向穿透到计算优势的节点中，反向传播将把优化目标篡改为“修改策略使基线变小”，导致网络陷入病态梯度崩塌。
+- **全局均值基线的自相关有偏陷阱**：
+  若在计算基线时图省事直接使用包含自身的组均值 $\bar{R} = \frac{1}{K} \sum_{j=1}^K R_j$，并将优势定义为 $A_i = R_i - \bar{R}$：
+  $$ A_i = R_i - \frac{1}{K} \left( R_i + \sum_{j \neq i} R_j \right) = \frac{K-1}{K} \left( R_i - \frac{1}{K-1} \sum_{j \neq i} R_j \right) = \frac{K-1}{K} A_i^{\text{RLOO}} $$
+  此时基线与当前动作强相关，违反了基线独立性假设。虽然形式上相似，但如果不进行方差标准化，梯度期望会被系统性人为收缩 $\frac{K-1}{K}$ 倍，造成等效学习率剧烈萎缩。
+- **Masking 掩码泄露（Prompt / Padding 污染）**：
+  在自回归 LLM 训练中，损失求和必须严格只对模型自主生成的有效 Token 施加掩码（$m_{it} = 1$），必须坚决剔除 Prompt Token 与尾部 Padding Token。若对 Prompt 计算策略梯度，相当于对固定的环境输入状态进行错误概率更新，导致模型自注意力层发生严重语义漂移。
 
-## 具体演示
+### 4. 性能与工程取舍
 
-同 prompt 奖励 [3,1,2]：RLOO baseline 为 [1.5,2.5,2]，优势 [1.5,−1.5,0]；包含自身的均值 baseline 得 [1,−1,0]，正好小了 2/3。
+- **训练专用 Critic vs 纯采样 RLOO**：
+  - **Critic 模式（PPO / A2C）**：可输出 Token 级的密集细粒度优势估值，单 Prompt 仅需采样 1 条轨迹即可更新；但需维护单独的 Critic 权重（占满同等显存），且面临 Critic 价值漂移和拟合延迟带来的误差；
+  - **RLOO 模式**：完全无需训练 Critic 模型，显存占用直降 50%，无价值网络过拟合或自举漂移问题；但代价是每个 Prompt 必须生成至少 $K \ge 2$（通常推荐 $K=4 \sim 8$）条回答，推理解码（Rollout）吞吐压力成倍增加。
+- **序列级别长度均一化（Length Normalization Trade-off）**：
+  联合对数概率 $\sum_{t=1}^T \log \pi(y_t)$ 会随文本长度线性累加，导致长文本回答在批次中主导梯度更新。若将其除以生成长度 $T$ 转化为平均对数概率，虽能平抑梯度范数，但在数学上相当于对不同长度回答的隐式重加权，可能诱导模型产生“偏好短文本避错”的短视倾向。
 
-若回答两个 token 的 log-prob 为 [−0.2,−0.7]，则序列 log-prob 是 −0.9，不是 −0.45。练习的 log_probs 输入可表示动作或完整序列的 log-prob，returns 表示已冻结的学习信号。
+## 具体演示：RLOO 留一基线与包含自身均值的数值差异
+
+假设针对同一个输入 Prompt，独立解码采样出 3 个候选回答，环境奖励模型给出的奖励分别为 $[3.0, 1.0, 2.0]$：
+- **方案 A（RLOO 留一无偏基线）**：
+  - 对样本 0：基线 $b_0 = \frac{1.0 + 2.0}{2} = 1.5 \implies A_0 = 3.0 - 1.5 = +1.5$；
+  - 对样本 1：基线 $b_1 = \frac{3.0 + 2.0}{2} = 2.5 \implies A_1 = 1.0 - 2.5 = -1.5$；
+  - 对样本 2：基线 $b_2 = \frac{3.0 + 1.0}{2} = 2.0 \implies A_2 = 2.0 - 2.0 = 0.0$；
+  - 输出优势向量为 $[+1.5, -1.5, 0.0]$，优势总和严格为 0，且每个基线与当前样本无相关性。
+- **方案 B（包含自身的全局均值基线）**：
+  - 全局均值 $\bar{R} = \frac{3.0 + 1.0 + 2.0}{3} = 2.0$；
+  - 得到优势 $[3.0 - 2.0, 1.0 - 2.0, 2.0 - 2.0] = [+1.0, -1.0, 0.0]$；
+  - 对比可见，方案 B 计算出的优势值刚好是真实无偏 RLOO 优势的 $\frac{K-1}{K} = \frac{2}{3}$，使得策略梯度更新步长被凭空压缩了 33.3%。
 
 ## 实践任务：唯一代码填空题
 
@@ -203,15 +247,35 @@ for logps, returns in [([], []), ([1.], [])]:
 
 ### Q1 参考答案
 
-∇J=E[∇logπ(a|s)(G-b(s))]；因为对动作分布求和时 E[∇logπ]=0，状态基线不改变期望。
+1. **输入阶段（探索采样与价值基准获取）**：输入由策略网络 $\pi_\theta$ 与环境交互采样的动作及对应的对数概率序列 $\log \pi_\theta(a_t \mid s_t)$、外部环境或奖励模型给出的折现累积回报序列 $G_t$（或单轮 LLM 生成的标量奖励 $R_i$）、以及状态基线估值 $b(s_t)$（由 Critic 网络前向预测或 RLOO 组内留一均值生成）。
+2. **状态变化阶段（优势居中化与目标函数微分）**：
+   - **消除基准偏移（优势构造）**：计算中心化优势 $A_t = G_t - b(s_t)$。由于 $b(s_t)$ 与当前采样的具体动作条件独立，根据积分恒等式 $\mathbb{E}_{a \sim \pi} [\nabla_\theta \log \pi_\theta(a \mid s) \cdot b(s)] = 0$，从回报中扣除基准完全不会改变策略梯度的无偏期望，但将方差大幅压缩；
+   - **反向传播与对数概率加权**：优势项 $A_t$ 必须被严格冻结梯度（`stop_gradient` / `detach()`）。通过损失函数 $\mathcal{L}_{\text{policy}} = - \frac{1}{B} \sum A_t \log \pi_\theta(a_t \mid s_t)$ 反向传播，网络权重沿着 $\nabla_\theta \mathcal{J} = \mathbb{E}[\nabla_\theta \log \pi_\theta(a \mid s) \cdot A_t]$ 移动：当动作表现优于基线（$A_t > 0$）时，主动提升该动作的选择概率；表现劣于基线（$A_t < 0$）时，主动抑制其概率。
+3. **输出阶段（策略更新与方差收缩）**：输出更新后的策略参数 $\theta$，实现动作分布的单调性能提升。通过基准中心化消除环境固有状态价值均值波动的干扰，使策略更新方向高度对齐于“动作本身的相对优劣”，保障深度神经网络在随机非平稳奖励下的收敛稳定性。
 
 ### Q2 参考答案
 
-∇π=π∇logπ。对按 π 采样的动作再用 π 乘回报，会额外乘一次动作概率，过度偏向已经常见的动作；它不是 REINFORCE 对 E[R] 的无偏梯度估计。
+若错误地用概率 $\pi_\theta(a \mid s)$ 替代对数概率 $\log \pi_\theta(a \mid s)$ 乘以回报，梯度估计将发生严重的**采样分布重叠偏置（Double-Sampling Probability Bias）**，彻底丧失 REINFORCE 的数学无偏性：
+1. **数学推导失真**：真实的策略梯度来自于似然比展开：
+   $$ \nabla_\theta \mathbb{E}_\pi [R] = \sum_a \nabla_\theta \pi_\theta(a \mid s) R(s, a) = \sum_a \pi_\theta(a \mid s) \frac{\nabla_\theta \pi_\theta(a \mid s)}{\pi_\theta(a \mid s)} R(s, a) = \mathbb{E}_{a \sim \pi} \left[ \nabla_\theta \log \pi_\theta(a \mid s) R(s, a) \right] $$
+2. **错误方案的实际等效目标**：若直接用 $\nabla_\theta \pi_\theta(a \mid s) R(s, a)$ 对经验采样求均值，由于动作 $a$ 已经是按照 $\pi_\theta$ 分布采样出来的，该经验均值的期望实际为：
+   $$ \mathbb{E}_{a \sim \pi} \left[ \nabla_\theta \pi_\theta(a \mid s) R(s, a) \right] = \sum_a \pi_\theta(a \mid s) \cdot \nabla_\theta \pi_\theta(a \mid s) R(s, a) = \sum_a \pi_\theta^2(a \mid s) \nabla_\theta \log \pi_\theta(a \mid s) R(s, a) $$
+3. **病态自增强收敛陷阱**：这相当于在原有真实梯度上，额外乘了一次动作概率 $\pi_\theta(a \mid s)$！高频、大概率动作获得的有效学习率被二次放大，而低频但潜在高回报的探索动作被施加了平方级的极端抑制。算法将丧失基本的探索能力，迅速陷入对高初始概率次优动作的盲目病态过拟合，甚至导致策略过早熵崩溃。
 
 ### Q3 参考答案
 
-先分别取得 policy loss 和 value loss 对共享参数的梯度，比较范数与余弦相似度；持续负余弦提示方向冲突。再用相同样本做 loss 权重或独立 critic 的对照，观察策略指标和价值误差。advantage 必须 detach，但 value loss 仍可按设计更新共享 backbone。
+在共享骨干网络（Shared Backbone）的 Actor-Critic 架构中，排查与验证两个损失（Policy Loss 与 Value Loss）是否发生负向梯度冲突的标准工程方案如下：
+1. **梯度余弦相似度与范数监测（Gradient Cosine Conflict）**：
+   在反向传播前，对共享层参数 $W_{\text{shared}}$ 分别独立计算关于策略损失 $\mathcal{L}_\pi$ 的梯度 $g_\pi = \nabla_{W} \mathcal{L}_\pi$ 与关于价值损失 $\mathcal{L}_V$ 的梯度 $g_V = \nabla_{W} \mathcal{L}_V$。计算二者的余弦相似度：
+   $$ \cos(g_\pi, g_V) = \frac{\langle g_\pi, g_V \rangle}{\|g_\pi\|_2 \cdot \|g_V\|_2} $$
+   - 若余弦相似度持续显著为负（$\cos < 0$），确凿证明策略更新与价值拟合在底层表征空间发生对抗性破坏（Destructive Interference），即一个任务在拉扯参数改善动作分布的同时破坏了状态价值表征；
+   - 比较梯度范数比值 $\|g_\pi\|_2 / \|g_V\|_2$。若 Value Loss 的梯度范数高出 Policy Loss 数个数量级，说明价值拟合主导了整个表征更新，挤压了策略梯度的演进空间。
+2. **消融对照与架构解耦诊断**：
+   - 使用相同的采样数据和批次，运行两套架构对比实验：一套为共享 Backbone（多任务头），另一套为 Actor 与 Critic 彻底解耦的独立双塔模型（Separate Models）；
+   - 若独立双塔模型训练平稳收敛且回报持续攀升，而共享模型出现性能突降、Policy 熵过早归零或 Value 损失剧烈振荡，即可判定存在严重的梯度负迁移。
+3. **工程解法**：
+   - 采用梯度投影正交化技术（如 PCGrad: Projecting Conflicting Gradients），当检测到 $\langle g_\pi, g_V \rangle < 0$ 时，将 $g_\pi$ 投影到 $g_V$ 的正交法平面，消除破坏性反向分量；
+   - 动态调整多任务损失系数 $\mathcal{L}_{\text{total}} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_e \mathcal{H}$ 中的 $c_v$，或在工业级大模型训练（如 DeepSeek-R1 / OpenAI PPO）中直接将 Actor 与 Critic 部署在不同的物理进程与独立模型上。
 
 ## 参考资料
 

@@ -61,33 +61,67 @@ flowchart LR
 <p class="caption" align="center"><em>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程</em></p>
 
 
-### 1. 从权重版本到可重放样本
+### 1. 它是什么，解决什么问题
 
-发布权重 v → rollout 生成回答/工具调用 → RM 或环境打分 → 有界队列 → trainer 消费并更新。异步可重叠生成与训练，但策略版本可能在一个长轨迹完成前已经变化。版本差是诊断量，不是自动接收样本的正确性证明。
+在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个**分布式异构流式流水线（Heterogeneous Streaming Pipeline）**。
+在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：
+- **算力瓶颈转移（生成延迟主导）**：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。**超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段**；
+- **推理与训练的物理资源冲突**：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。
 
-### 2. 两类分布差异要分开
+大规模 RL 系统解决的核心工程问题是：**通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化**。
 
-同权重的训练/推理引擎也可能因精度、kernel、temperature/top-p 等不同产生分布差异。若 πold 是训练后端对采样快照的分布，πrollout 是实际行为分布，则有：
+### 2. 它如何工作
 
-πθ/πrollout = (πθ/πold) × (πold/πrollout)。
+工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：
 
-前项描述优化后的更新，后项描述行为分布到训练锚点的差异。TIS（截断重要性采样）可以限制校正权重的方差，但引入偏差；它与 PPO clip 的职责不同。也可直接把行为分布当 old 锚点，但不能再无意重复校正。重要性采样要求行为分布覆盖目标支持；top-p 硬截断丢掉的动作不能靠权重恢复。具体权重粒度和目标以算法实现为准。
+1. **Rollout 与 Learner 物理双集群解耦架构（图 12-1）**：
+   - **Rollout 生成集群（Inference Workers）**：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；
+   - **解耦中转缓冲层（Buffer Queue）**：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；
+   - **训练优化集群（Learner Workers）**：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；
+   - **权重热加载同步环（Weight Sync Ring）**：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。
+2. **策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）**：
+   在完全异步或流水线并行的架构中，当 Worker 依据权重版本 $v_{\text{sample}}$ 采样出一条长达 8192 Token 的轨迹推入队列时，Learner 可能已经完成了 $k$ 步梯度更新，当前最新模型版本已演化至 $v_{\text{current}}$。
+   定义策略版本陈旧度：
+   $$ \text{Staleness} = v_{\text{current}} - v_{\text{sample}} $$
+   - 若 $\text{Staleness} \le \tau_{\text{max}}$（在容忍阈值内，通常 $\tau \le 1 \sim 2$）：样本被合法消费；
+   - 若 $\text{Staleness} > \tau_{\text{max}}$：说明该样本严重过期，强行消费会引发严重的 Off-Policy 梯度震荡，系统在队列头部将其**主动丢弃（Drop Outdated Trajectory）**；
+   - 若 $v_{\text{sample}} > v_{\text{current}}$：属于严重的系统时序悖论错误，必须立即阻断报错。
+3. **两类微观分布漂移的双重校准（Dual-Distribution Decomposition）**：
+   在严苛工业实践中，即使版本号相同（$\text{Staleness}=0$），推理集群与训练集群也可能因推理引擎采用 FP8/INT8 量化、非确定性 FlashAttention Kernel 或不同的解码随机种子导致微观概率不一致。定义真实比率为双重展开：
+   $$ \frac{\pi_\theta(y_t)}{\pi_{\text{rollout}}(y_t)} = \underbrace{\frac{\pi_\theta(y_t)}{\pi_{\text{old}}(y_t)}}_{\text{PPO 优化更新比率}} \times \underbrace{\frac{\pi_{\text{old}}(y_t)}{\pi_{\text{rollout}}(y_t)}}_{\text{引擎后端微观校正项}} $$
+   系统通过截断重要性采样（Truncated Importance Sampling, TIS）对后端漂移进行微调校正，杜绝因引擎实现差异导致的静默梯度偏差。
+4. **多轮 Agent 数据契约（Multi-turn Data Contract）**：
+   在 Tool Use 与 Agent 系统中，上下文由交织的交互块构成：`[Prompt, Agent_Call, Tool_Observation, Agent_Answer, Padding]`。
+   数据契约必须保证：**只有由当前模型自主生成的 Token（`Agent_Call` 与 `Agent_Answer`）其动作掩码置为 1，外部环境或工具返回的 Observation 必须严格置 0**。工具结果只能作为上下文参与后续注意力计算，绝对不能对工具输出计算策略梯度！
 
-### 3. 数据合同比 checkpoint 名更具体
+### 3. 正确性条件与常见误区
 
-单轮样本至少要关联 token ids/前缀、有效动作 mask、奖励位置、真实行为 log-prob、生成权重版本及解码设置；使用独立 old 锚点时还需其冻结 log-prob。reference log-prob 服务于 KL，不代替前两者。
+- **未来版本时空错乱检测**：
+  在分布式跨节点并发通信中，网络抖动可能导致版本号传输异常。代码必须严格断言 `sample_version <= current_version`。任何声称来自“未来策略”的样本必须立即被拒绝并告警。
+- **Checkpoint 命名不等于数据契约（Data Contract Loss）**：
+  常见初学者误以为只要保存了生成该批样本的 Checkpoint 权重名称，后续就可以随时重算。事实上，没有记录采样当时的解码参数（Temperature、Top-p、Repetition Penalty）以及推理引擎输出的精确旧对数概率 `old_logp`，任何在训练端重新推导旧概率的尝试都会因为量化、算子实现不同而发生严重分布漂移，导致重要性采样分母完全失效。
+- **盲目提升异步深度换取“纸面高吞吐”**：
+  放宽陈旧度阈值（例如允许 $\text{Staleness} = 10$）可以使 GPU 显存利用率和吞吐指标看起来极其饱满；但过时的样本导致有效样本梯度利用率极低，PPO Clip 比例居高不下，模型实际收敛所消耗的物理总时间（Wall-clock Time）反而会急剧恶化。
 
-Agent 多轮中工具输出/观测进入上下文，但不是模型采样的动作；policy loss mask 只能选择 agent 生成 token。记录终止/截断、环境与验证器版本；一次轨迹若允许中途换权重，不能只用一个版本号概括行为策略。
+### 4. 性能与工程取舍
 
-### 4. 评测与成本
+- **解耦独立集群（Disaggregated Cluster）vs 同机交替切换（Colocated Switching）**：
+  - **同机交替切换**：一套物理 GPU 集群，Rollout 阶段运行 vLLM，随后调用 Megatron 权重就地转换，再执行训练。显卡购置成本低，但每次阶段切换需要经历耗时数秒的权重重新广播与显存碎片整理；
+  - **解耦物理双集群**：Rollout 与 Learner 部署在各自物理隔离的专业机器上（例如 Rollout 机器重配高速显存，Learner 机器重配高速互联 NVLink）。流水线 100% 满打满算重叠并发，无任何切换空转；代价是集群管理复杂度与物理机器成本增加。
+- **背压控制与动态丢弃策略（Backpressure & Dynamic Dropping）**：
+  当题目极难导致长思维链生成严重拥堵时，队列发生积压。健壮的系统必须引入背压机制（Backpressure）：根据当前 Learner 的消费速度动态限流推理解码 Worker 的并发请求，并在队列积压超标时优先丢弃陈旧度最高的批次，维持高新鲜度的数据流转。
 
-先固定模型、prompt、采样数、temperature 和 token/tool 预算，再比较独立正确率与总生成/训练/环境耗时；同时看队列等待、样本丢弃率、陈旧度及 ratio 尾部。高 GPU 利用率不等于单位成本有效学习更多。续训需恢复 trainer、数据/RNG 和队列版本语义，而非只恢复权重。
+## 具体演示：版本陈旧度与多轮 Agent 掩码计算
 
-## 具体演示
+假定当前训练器刚刚更新到了版本 $v_{\text{current}} = 12$，数据队列中出队了来自版本 $v_{\text{sample}} = 10$ 的样本：
+- 版本落后度为：$\text{staleness} = 12 - 10 = 2$（属于轻度异步，在容忍窗口内）；
+- 若出队样本版本号为 15，由于 $15 > 12$，系统立即抛出 `ValueError("sample cannot come from a future policy")`。
 
-trainer 为 v=12、样本来自 v=10，staleness=2；即使 staleness=0，后端/解码分布仍可能不同。若一个 token 的 πθ=.4、πold=.5、πrollout=.25，则更新比率 .8、后端校正比率 2，两者相乘才是行为到当前的 1.6。
-
-Agent 序列 [prompt, agent_call, tool_result, agent_answer, padding] 的动作 mask=[0,1,0,1,0]。工具结果可影响后续 log-prob，但不能被当作 agent 动作优化。检查中的标量比率仅演示分解，不是完整序列无偏校正算法。
+在多轮工具调用 Agent 轨迹中，序列包含 5 个物理片段：
+`roles = ["prompt", "agent_call", "tool_result", "agent_answer", "padding"]`
+- 掩码过滤逻辑：`policy_mask = [int(r in {"agent_call", "agent_answer"}) for r in roles]`；
+- 输出掩码为 `[0, 1, 0, 1, 0]`。
+工具执行输出（`tool_result`）虽然影响后续推理逻辑，但作为外部客观环境观测，其梯度被严格阻断。
 
 ## 实践任务：唯一代码填空题
 
@@ -191,15 +225,36 @@ assert policy_mask == [0, 1, 0, 1, 0]
 
 ### Q1 参考答案
 
-发布版本后采样，保存真实行为概率与动作边界，打分后进入有界队列；trainer 检查陈旧度和分布差异，用所选算法消费样本并发布下一版本。重叠可提高资源利用率，但必须有背压、明确的接收/丢弃规则和独立质量评测。
+1. **输入阶段（解耦生成、环境交互与数据契约封包）**：Rollout 引擎（vLLM）基于当前快照权重并发接收批次 Prompt，利用 Continuous Batching 自回归生成候选回答与多轮 Agent 工具交互序列。环境验证器（沙箱/RM）对终态给出评分。将序列 Tokens、物理动作掩码 `action_mask`、采样端行为对数概率 `rollout_logp`、生成时的权重版本号 $v_{\text{sample}}$ 及解码超参数打包为不可变数据契约（Data Contract），异步推入中转经验队列。
+2. **状态变化阶段（陈旧度门禁过滤、微观校准与分布式并行更新）**：
+   - **流水线陈旧度检查**：Learner 从队列消费批次经验，核算版本差 $\text{staleness} = v_{\text{current}} - v_{\text{sample}}$。若超过容忍阈值直接丢弃（Drop），防止陈旧策略的梯度反噬；
+   - **双重重要性采样校准**：通过截断重要性采样（TIS）补偿推理引擎与训练引擎间的微观数值偏差；
+   - **3D 混合并行反向传播**：在 Megatron/ZeRO 集群上执行 PPO/GRPO 梯度更新，完成权重版本推进 $v_{\text{current}} \leftarrow v_{\text{current}} + 1$。
+3. **输出阶段（权重热同步广播与无偏差评测）**：Learner 将最新模型权重通过高速分布式网络热加载同步给 Rollout 引擎，维持高效流水线循环。同时，评测 Worker 定期在固定解码超参的无偏黄金测试集上运行客观性能基准，监控真实推理胜率与长度漂移，规避盲目追求吞吐带来的伪收敛。
 
 ### Q2 参考答案
 
-缺的是该批 PPO 更新使用的冻结 old log-prob。行为分布直接作为 old 锚点时，它就是实际采样概率；使用独立训练后端 old 锚点时，还需区分 rollout log-prob，并按配方处理两者差异。checkpoint 名不包含后端、解码和前缀语义；只有完整重建并验证相同分布后才可重算，不能把当前 log-prob 冒充 old。
+若在经验回放或训练日志中**仅记录了 Checkpoint 模型文件名（如 `model_step_100.pt`），而没有在 Rollout 采样时当场记录并保存每个 Token 的真实行为对数概率（`old_logp`）**，在重放训练时会面临致命缺陷：
+1. **重要性采样比率分母缺失**：PPO 的核心更新动力来自 $r_t = \exp(\log \pi_\theta - \log \pi_{\text{old}})$。若缺少 `old_logp`，训练端被迫在训练集群上对历史文本重新执行一次前向推理（Forward Pass）来“补算”旧概率；
+2. **软硬件实现异构带来的“幽灵分布漂移”**：
+   - 即使加载了相同的权重文件，Rollout 推理引擎（如使用 vLLM 的 FP8 权重量化、非确定性 PagedAttention 算子、特定 Top-p/Top-k 剪枝）与 Learner 训练引擎（如使用 BF16 混合精度、FlashAttention-2）在浮点输出上存在无法避免的微小舍入差异；
+   - 这种微观差异经过数百个 Token 的累加与 Softmax 指数放大后，补算出的 Log-prob 会显著偏离采样当时的真实概率（例如原本采样概率为 0.1，训练端重算变成 0.3），导致重要性采样比率从根本上失真，使 PPO 策略梯度方向被严重误导；
+3. **正确工程规范**：工业级框架（如 verl / OpenRLHF）必须强制在采样阶段直接抓取推理解码的原始对数概率，并作为一等公民数据流转至训练端。
 
 ### Q3 参考答案
 
-先分解 prefill/decode、奖励/环境耗时、有效生成长度和队列等待，确认 trainer 真因缺数据空闲；再优化 batching/KV、任务长尾或资源配比，并比较有效样本/秒与独立评估。最后才考虑扩大异步窗口；若样本更陈旧、丢弃更多，名义吞吐提升可能没有学习收益。
+当监控显示“Rollout 推理集群长期 100% 满载，而 Learner 训练 GPU 频繁处于饥饿等待（Starvation Idle）”时，表明当前系统被推理解码延迟严重阻塞。标准工业排查与优化落地顺序如下：
+1. **第一步：性能瓶颈细粒度剖析（Profiling & Breakdown）**：
+   - 使用 Nsys / PyTorch Profiler 拆解 Rollout 内部耗时：区分是 Prefill 耗时、Decode 串行生成耗时、还是规则验证器（如 Python 沙箱运行单元测试）的外部 I/O 阻塞；
+   - 检查生成文本的平均长度与截断机制。若模型陷入重复死循环生成直到最大时限 `max_tokens`，需立即修复 EOS 停止符逻辑或引入重复惩罚。
+2. **第二步：推理引擎算法级与算子级压榨（Inference Engine Optimization）**：
+   - 升级推理框架至 SGLang / vLLM 最新版本，开启 RadixAttention（前缀缓存 Prefix Caching），消除重复 Prompt 的 Prefill 冗余计算；
+   - 启用 FP8 激活与权重推理量化，减少 KV Cache 显存带宽占用，成倍提升解码阶段的并发 Batch Size；
+   - 在数学/代码推理场景中，启用推测解码（Speculative Decoding）或多 Token 预测（MTP），将串行解码吞吐提升 1.5～2.5 倍。
+3. **第三步：动态调整物理卡数配比（Cluster Resizing）**：
+   - 重新规划算力分配：大模型 RL 的经典黄金配比通常为 **Rollout:Learner = 3:1 甚至 4:1**。将空闲的部分 Learner GPU 划拨给 Rollout 推理集群，扩大分布式并行采样吞吐；
+4. **最后防线：谨慎放宽流水线异步步长（Staleness Window）**：
+   - 在保证策略稳定性的前提下，适当允许 1 步的异步重叠（Overlap Rollout & Train），消除严格串行交替等待；但坚决杜绝为了刷高利用率而过度放宽陈旧度，避免样本质量雪崩。
 
 ## 参考资料
 

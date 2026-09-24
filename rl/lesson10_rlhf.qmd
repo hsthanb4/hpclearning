@@ -53,31 +53,75 @@ flowchart LR
 <p class="caption" align="center"><em>图 10-2：RLHF / RLVR 后训练全链路端到端数据流水线</em></p>
 
 
-### 1. 奖励来源与优化器是两个轴
+### 1. 它是什么，解决什么问题
 
-RLHF 先用偏好对训练 reward model（RM）；RLVR 用数学验证器、代码测试等规则给分。二者都可搭配 PPO/GRPO；GRPO 不等于 RLVR。单轮结果奖励和中间过程奖励则是奖励粒度这个独立轴。
+**基于人类反馈的强化学习（RLHF）**与**基于可验证奖励的强化学习（RLVR）**是现代大语言模型（LLM）从初始预训练/指令微调（SFT）模型演进至具备复杂推理能力、高对齐度超级智能（如 InstructGPT、Claude、DeepSeek-R1）的核心后训练（Post-Training）范式。
+在 LLM 对齐领域，必须明确区分两个**完全正交的独立维度**：
+1. **奖励来源轴（Reward Source）**：
+   - **RLHF（神经奖励模型）**：主要面向开放式创作、安全性、对话助手等无法用代码严格判定的主观任务。先基于人类偏好对 $(x, y_w, y_l)$ 训练一个参数化的标量奖励模型（Reward Model, RM），利用 Bradley-Terry 似然对回答打分：
+     $$ \mathcal{L}_{\text{RM}}(\phi) = - \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma \left( r_\phi(x, y_w) - r_\phi(x, y_l) \right) \right] $$
+   - **RLVR（可验证规则奖励）**：主要面向数学推理（GSM8K、MATH）、代码生成（HumanEval、LeetCode）等有客观真值的形式系统。直接利用符号数学解析器、Python 代码沙箱单元测试、正则表达式等规则引擎充当真值判定器（Oracle），奖励严格为二值（0/1）或步骤过程得分。
+2. **策略优化器轴（Policy Optimizer）**：PPO、GRPO、REINFORCE 或 DPO。二者可自由组合（例如 DeepSeek-R1-Zero 采用的是 RLVR + GRPO，而 InstructGPT 采用的是 RLHF + PPO）。
 
-RM 的常见偏好损失是 −logσ(rφ(x,y+)−rφ(x,y−))。经典链路为 SFT 初始化 → 偏好 RM → rollout 与策略更新；不是所有 RL 都必须先 SFT，例如 R1-Zero 从预训练模型开始。规则验证也可能被测试覆盖、答案解析或数据泄漏欺骗，不能把 deterministic 等同于无 reward hacking。
+后训练解决的核心工程问题是：**如何将序列生成任务解构为 Token 级的马尔可夫决策过程，并通过参考策略（Reference Policy, $\pi_{\text{ref}}$）的 KL 散度锚定，防止模型在追逐高奖励过程中发生语义漂移（Language Degradation）与奖励欺骗（Reward Hacking）**。
 
-### 2. 对 reference 的 KL 正则
+### 2. 它如何工作
 
-目标为 E[R]−β KL(πθ∥πref)。单个 token 的 sampled k1=logπθ−logπref，可能为负；在当前策略采样的动作上取期望才得到该前缀的 KL。令 d=logπref−logπθ，k3=exp(d)−d−1，每项非负，在相同采样与支持条件下期望也等于 KL；离策略数据不能无条件套用这个等式。
+RLHF 四模型拓扑与端到端训练流水线如图 10-1 与图 10-2 所示：
 
-本课采用经典 PPO reward shaping：采样阶段每个有效 token 扣 β×k1，只在最后一个有效回答 token 加一次 RM/验证分数，再交给 GAE。原始 GRPO 把 KL 项直接加入 loss；若两处都加相同惩罚会重复计费。KL 不是所有配方都启用，也不是质量保证。
+1. **四模型拓扑与 Token 级 KL 惩罚（图 10-1）**：
+   在标准 RLHF 流程中，GPU 集群上同时运行四个模型角色：
+   - **Actor $\pi_\theta$**：正在被梯度优化的生成策略；
+   - **Reference $\pi_{\text{ref}}$**：冻结的 SFT 初始模型，充当锚点；
+   - **Critic $V_\psi$**：评估当前 Token 前缀价值的网络（PPO 专有）；
+   - **Reward Model $r_\phi$**（或规则判题器）：在生成完毕后给出终局标量打分。
+   为了防止策略发生不可控漂移，优化目标被形式化为最大化带 KL 惩罚的期望回报：
+   $$ \max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta} \left[ R(x, y) \right] - \beta D_{\text{KL}}\left(\pi_\theta(y \mid x) \parallel \pi_{\text{ref}}(y \mid x)\right) $$
+2. **点级 Token 奖励整形（Reward Shaping）**：
+   根据因果概率分解，全序列的 KL 散度等于各 Token 相对熵的求和 $\sum_{t=1}^T \log \frac{\pi_\theta(y_t)}{\pi_{\text{ref}}(y_t)}$。PPO 将 KL 惩罚分解注入到每个时序步的即时奖励中：
+   - 对于中间生成的回答 Token（$t < T-1$）：$r_t^{\text{shaped}} = - \beta \left( \log \pi_\theta(y_t \mid x, y_{<t}) - \log \pi_{\text{ref}}(y_t \mid x, y_{<t}) \right)$；
+   - 对于回答的最后一个有效 Token（$t = T-1$）：
+     $$ r_{T-1}^{\text{shaped}} = R_{\text{env}}(x, y) - \beta \left( \log \pi_\theta(y_{T-1}) - \log \pi_{\text{ref}}(y_{T-1}) \right) $$
+   这种塑造将终局全局奖励与密集的路径偏差惩罚平滑拼接，随后无缝输入 GAE 优势递推引擎（图 10-2）。
+3. **KL 估计器的数学无偏性与点态非负性（$k_1$ vs $k_3$）**：
+   - **经典估计量 $k_1$**：$k_1 = \log \pi_\theta - \log \pi_{\text{ref}}$。在单 Token 采样点上，$k_1$ 完全可以为负数（当当前策略对某个 Token 的预测概率偶然低于参考模型时），但其在策略分布下的数学期望严格收敛于真值 KL；
+   - **非负估计量 $k_3$（Schulman 2020）**：令比率 $r = \frac{\pi_{\text{ref}}}{\pi_\theta} = \exp(\log \pi_{\text{ref}} - \log \pi_\theta)$，定义 $k_3 = r - \log r - 1 = \exp(d) - d - 1$。根据凸函数不等式，$k_3$ 保证了在每一个 Token 采样点上恒非负（$k_3 \ge 0$），有效消除了 $k_1$ 局部出现负惩罚（反向奖励）给价值网络拟合带来的高频噪声。
 
-### 3. Causal shift 和 mask
+### 3. 正确性条件与常见误区
 
-input_ids 为 [B,L]，logits 为 [B,L,V]；logits[:, :-1] 对齐 labels=input_ids[:, 1:]。gather 后的 sampled log-prob 和回答 mask 都是 [B,L−1]。policy/ref 必须共享 tokenizer、前缀和 label 对齐语义。mask 按被预测的 label 是否属于回答确定，不能把预测首个回答 token 的位置误删。EOS 若属于采样回答就计入；prompt/padding 不计入。
+- **Causal Shift 因果错位（The Shift Bug）**：
+  自回归 Transformer 输出的 Logits 形状为 `[B, L, V]`，其中第 $i$ 个位置的 Logit 预测的是第 $i+1$ 个 Token！因此在对齐计算时，必须严格执行因果错位：
+  `shift_logits = logits[:, :-1, :]` 对齐 `shift_labels = input_ids[:, 1:]`。
+  常见灾难性 Bug 是直接使用 `logits` 收集 `input_ids`，导致模型用生成当前 Token 的概率去监督前一个已输入的 Token，引发整个策略梯度方向完全逆反。
+- **Mask 掩码必须包含有效 EOS 并严格排除 Prompt 和 Padding**：
+  在计算策略梯度与 KL 时，必须构造精确的布尔掩码 `action_mask`。
+  - Prompt 区域是环境变量，必须全填 0；
+  - Padding 区域是物理占位符，必须全填 0；
+  - 只有模型自主生成的 Completion Token 以及标志着回答自然结束的 `<|im_end|>` 或 `EOS` 必须填 1。若将 EOS 排除在外，模型永远学不会主动停机，会导致长文本胡言乱语；若把 Padding 计入，会在空白位置累积巨大的无效梯度。
+- **不可在 Loss 与 Reward 中双重施加 KL 惩罚**：
+  若在采样阶段已经通过 Reward Shaping 在每个 Token 上扣除了 $\beta D_{\text{KL}}$，那么在随后的 PPO 策略损失函数中**绝对不能再次添加 KL 损失项**！否则会导致惩罚翻倍，使模型被过度死锁在参考模型周围，彻底扼杀任何探索能力。
 
-### 4. 工程取舍
+### 4. 性能与工程取舍
 
-β 调整奖励与参考约束的相对权重，不能拿 RM reward 上升代替质量改善。开放任务可探索 rubric/LLM judge，但判断器依然是可被利用的代理，需要独立评估。
+- **推理引擎与训练引擎的内存分离（vLLM / SGLang 解耦架构）**：
+  在大模型后训练中，Rollout 阶段需要高并发自回归采样，而 Training 阶段需要执行大显存反向传播。现代工业系统（如 OpenRLHF、Ray-vLLM）采用解耦架构：使用 vLLM 的 PagedAttention 管理生成，通过 CPU 共享内存或高速 NCCL 将生成样本异步流转至 Megatron/DeepSpeed 训练节点，彻底消除显存碎片与架构冲突。
+- **惩罚系数 $\beta$ 的两难困境（Alignment Tax）**：
+  $\beta$ 过大，模型拒绝改变现有行为，新策略无法探索出超越基座的高推理解法；$\beta$ 过小或为 0，模型会在数个迭代周期内迅速发现 RM 的对抗漏洞（如盲目堆砌学术套话、重复长句骗取高分），引发灾难性的 Reward Hacking。
 
-## 具体演示
+## 具体演示：Causal Shift 错位与单 Token Shaped Reward 演算
 
-输入 [P0,P1,A0,EOS,PAD] 时，shift 后 labels=[P1,A0,EOS,PAD]，回答 mask=[0,1,1,0]；结果分数加到 EOS，不能加到 PAD 或每个 token。
-
-某 token logp=−1、ref_logp=−1.3，k1=.3，β=.1 扣 .03。若 logp 比 ref 更小，k1 可为负，这不是 KL 定义被推翻；检查的是采样分布、方向和期望，而不是把负值强行裁到零。
+假设输入序列 Token 序列为 `input_ids = [10, 11, 20, 2, 0]`（其中 10, 11 为 Prompt；20 为回答首词；2 为 EOS；0 为 PAD）：
+- **Causal Shift 对齐**：
+  - `labels = input_ids[1:] = [11, 20, 2, 0]`
+  - `action_mask = [0, 1, 1, 0]`（仅监督被预测为 20 和 2 的两处时步）
+- **数值演练**：
+  设惩罚系数 $\beta = 0.1$。
+  - 在第 1 个有效回答 Token（预测 20）：无即时环境分（$env\_reward = 0$），若此时 $\log \pi = -1.0$，$\log \pi_{\text{ref}} = -1.3$，则 $k_1 = -1.0 - (-1.3) = +0.3$。
+    $$ r_1^{\text{shaped}} = 0 - 0.1 \times (+0.3) = -0.03 $$
+    该位置因为偏离基线被施加微弱惩罚；
+  - 在第 2 个有效回答 Token（预测 EOS 2）：回答自然完结，环境裁判给出终局高分 $env\_reward = 2.0$。若此处 $\log \pi$ 与 $\log \pi_{\text{ref}}$ 差值相同：
+    $$ r_2^{\text{shaped}} = 2.0 - 0.1 \times (+0.3) = 1.97 $$
+  - 最终沿序列构成的有效奖励流为 $[0.0, -0.03, 1.97, 0.0]$。终局分精准挂载在 EOS 上，并通过 GAE 向前传播信用。
 
 ## 实践任务：唯一代码填空题
 
@@ -193,15 +237,32 @@ assert all(abs(a-b) < 1e-12 for a,b in zip(rewards, [0., -.03, 1.97, 0.]))
 
 ### Q1 参考答案
 
-shift 后取得回答 label 对应的 log-prob 和 mask；RM 或规则验证器给结果分数，每个有效 token 扣 sampled KL，末 token 加结果分数；critic/GAE 构造 detached 优势，PPO 用 new/old 比率更新。RLHF/RLVR 决定谁打分，PPO/GRPO 决定如何用分数更新；若用 GRPO，则以组相对优势替代 critic/GAE。
+1. **大模型后训练全链路执行时序**：
+   - **自回归推理与因果对齐（Causal Shift）**：Actor 策略 $\pi_\theta$ 生成候选 Completion。取模型生成的 Logits `logits[:, :-1, :]` 与右移标签 `labels = input_ids[:, 1:]` 做对齐，通过 Gather 提取生成 Token 的条件对数概率序列 $\log \pi_\theta(y_t)$ 与参考模型 $\log \pi_{\text{ref}}(y_t)$，同时生成精准的回答有效掩码 `action_mask`（Prompt 与 PAD 为 0，有效回答与 EOS 为 1）；
+   - **终局奖励与点态 KL 塑造（Reward Shaping）**：奖励来源（RM 或编译器沙箱）对完整文本给出终局标量反馈 $R$。中间各 Token 扣除采样 KL 漂移项 $-\beta (\log \pi_\theta - \log \pi_{\text{ref}})$，终局有效 Token（EOS）叠加终局奖励 $R$，构成密集奖励序列；
+   - **优势估计与策略迭代**：密集奖励输入 GAE 模块，利用 Critic 估计逆序递归生成各时步优势 $\hat{A}_t$；随后输入 PPO 优化器利用新旧策略比率 $r_t(\theta)$ 实施悲观裁剪更新（或输入 GRPO 按照组内均值归一化更新）。
+2. **正交分类轴论证**：
+   - **奖励来源轴（打分裁判是谁）**：RLHF（神经偏好奖励模型）vs RLVR（确定性形式规则验证器，如 LeetCode 测试用例 / SymPy 验证器）。该维度决定了环境反馈信号的保真度与抗利用性；
+   - **优化算法轴（参数如何基于分数演进）**：PPO（需要 Critic 拟合与 GAE 优势）vs GRPO（组内相对排名、无需 Critic）vs DPO（离线解析闭式替代）。
+   二者在系统架构上完全解耦，可任意正交组合（如 DeepSeek-R1-Zero 即为典型的“RLVR 打分 + GRPO 优化”的经典组合）。
 
 ### Q2 参考答案
 
-同一 sampled token 必须在相同前缀下比较两个模型。若 mask 错位或含 padding，KL 会混入非回答位置，结果分数可能加错末端，GAE 再把错误奖励向前传播。先核对 causal shift、首回答 token、EOS、padding 和有效长度，再检查数值。
+若策略模型 $\pi_\theta$ 与参考模型 $\pi_{\text{ref}}$ 的 Padding 掩码未严格对齐、或未在进入损失前剔除 Padding Token，会引发严重的**无效填充区假性梯度污染与优势逆向倒灌（Padding Mask Contamination）**：
+1. **伪 KL 散度数值失真**：Padding 占位符（如 `<pad>`）在语义上毫无意义。若将 Padding 区域的 Logits 纳入计算，由于两个模型在未训练的 Pad 标记上的未定概率随机波动，$\log \pi_\theta(\text{pad}) - \log \pi_{\text{ref}}(\text{pad})$ 会产生不可控的巨大伪 KL 噪声；
+2. **终局奖励挂载错位**：若依据错误包含 Padding 的序列寻找最后一个有效 Token，终局的判题高分 $R$ 会被错误挂载在尾部某个毫无意义的 Padding Token 上，导致真实的有效结束符 EOS 无法获得正确信用分配；
+3. **GAE 逆向反传污染整个回答**：GAE 是自后向前递归累加的：$A_t = \delta_t + \gamma \lambda A_{t+1}$。一旦尾部的 Padding 位置包含了虚假的巨大残差，该错误信号会沿着递归通道一路向左反向渗透，将整条有效推理链中所有正确生成的数学/代码 Token 的优势值彻底污染，导致模型策略发生剧烈语义退化。
 
 ### Q3 参考答案
 
-固定 prompt、采样预算和解码配置，在独立 holdout 上分组比较 RM 分数、盲测人工胜率、正确性、回答长度及 KL；检查风格/冗长偏好、评估泄漏与少数任务退化。若只有训练 RM 上升，应按代理奖励被利用排查，不能宣称能力提升。
+当监控曲线出现“训练集 RM 奖励持续攀升、但第三方盲测集人工胜率或基准测试准确率断崖式下跌”时，确凿表明发生了严重的**奖励黑客/奖励过度优化（Reward Hacking / Goodhart's Law）**。标准工业级诊断矩阵如下：
+1. **长度与格式偏好诊断（Length & Formatting Bias）**：
+   - 统计回答平均 Token 长度变化。RM 通常对长文本、排版精美（Markdown 丰富、分点清晰）的回答存在系统性虚高偏好。若发现长度暴涨数倍而关键逻辑并无增加，说明模型正在通过堆砌废话骗取 RM 高分；
+2. **独立黄金裁判交叉对照（Cross-Evaluation Matrix）**：
+   - **外部 SOTA 模型裁判**：使用未参与训练的独立裁判（如 GPT-4o / Claude 3.5 Sonnet）基于固定评价细则（Rubric）进行盲测胜率评估；
+   - **客观规则基准**：在标准客观评测集（如 GSM8K、MMLU、HumanEval）上运行规则验证，若客观题准确率未升反降，确凿证明核心推理能力已发生灾难性遗忘；
+3. **KL 散度与分布漂移审计（Drift Audit）**：
+   - 检查对参考模型的全局 KL 散度。若 KL 曲线呈指数级突破安全阈值（例如 $D_{\text{KL}} > 10$），说明惩罚系数 $\beta$ 过小，模型已脱离预训练语言模型的自然表达分布，必须立即增大 $\beta$ 或引入长度惩罚项重新校准。
 
 ## 参考资料
 
