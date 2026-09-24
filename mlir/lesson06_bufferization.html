@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -555,31 +584,53 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>Bufferization 为 tensor SSA 值选择 memref 存储；One-Shot Bufferize 通过读写与别名分析决定复用还是分配。</p>
+<p>在函数式张量计算图（如 PyTorch、JAX 或 MLIR 的 <code>tensor</code> 方言）中，张量拥有<strong>纯值语义（Value Semantics）</strong>：每个 SSA 变量代表不可变的纯数学实体。在值语义下，<code>%t2 = tensor.insert %x into %t1[...]</code> 表面上如同对 <code>%t1</code> 进行了深拷贝并修改产生全新的 <code>%t2</code>。 然而，物理计算机硬件（CPU/GPU）没有无限的物理显存，实际执行必须依赖具备物理指针和可变内存状态的<strong>引用语义（Buffer Reference Semantics）</strong>，即 <code>memref</code> 方言。 若将每一个高阶张量算子都朴素地分配一块全新的物理内存（<code>memref.alloc</code>），会导致恐怖的显存占用和毁灭性的内存带宽瓶颈（如 <a href="file:///Users/wujie/hpclearning/mlir/lesson06_bufferization.qmd">图 6-1</a> 所示）。 本课解决的核心工程问题是：<strong>理解 MLIR 的核心降级设施——One-Shot Bufferize，掌握基于别名分析（Alias Analysis）与读后写/写后读（RAW/WAR）冲突判定的原地复用决策算法，以及利用目标传递风格（Destination-Passing Style, DPS）最大化削减物理内存开销</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>若后续仍需旧 tensor 值，而某 op 会原地写同一 buffer，就存在 RaW conflict，必须 out-of-place 或复制。</p>
+<p>One-Shot Bufferize 的内存决策流程与别名分析架构如图 6-1 与图 6-2 所示：</p>
+<ol type="1">
+<li><strong>全局可达性与别名图分析（Alias Analysis）</strong>： 与传统的局部逐算子 bufferize 不同，One-Shot Bufferize 首先对全图进行全局拓扑扫描，分析每一个 <code>OpOperand</code>（操作数）与 <code>OpResult</code>（返回值）之间的潜在别名集合（Alias Set），判断它们是否可能映射到同一个底层底层物理内存块。</li>
+<li><strong>写后读冲突检测（RAW Conflict Detection）</strong>： 算法判定某个算子能否安全原地复用（In-place）输入缓冲区的不变量公式为： <span class="math display">\[ \text{Conflict} = \text{WritesBuffer} \land \text{ReadAfterWrite} \land \neg \text{ProvenNoAlias} \]</span>
+<ul>
+<li>若操作数被原地覆写（WritesBuffer）；</li>
+<li>且在程序的控制流中，<strong>旧的原始 Tensor 值（或其别名）在写操作发生之后仍有读取需求（ReadAfterWrite）</strong>；</li>
+<li>且无法静态证明两者内存绝无重叠。 则判定为存在冲突！</li>
+</ul></li>
+<li><strong>决策与代码生成（Buffer Assignment &amp; Lowering）</strong>： 如图 6-2 所示：
+<ul>
+<li>若<strong>存在冲突</strong>：驱动器插入 <code>memref.alloc</code> 分配全新的缓冲区，或显式插入 <code>memref.copy</code>，确保旧值的物理内存不被篡改；</li>
+<li>若<strong>无冲突</strong>：安全将输出直接绑定到输入的 <code>memref</code> 物理地址上（In-place），消除所有冗余分配与拷贝；</li>
+<li>最终将 <code>tensor</code> 算子转换为等价的 <code>memref</code> 操作（如 <code>linalg.matmul</code> 在原地 buffer 上执行），并交由 <code>BufferDeallocation</code> Pass 在精确的作用域末尾插入 <code>memref.dealloc</code> 防止内存泄漏。</li>
+</ul></li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>tensor 是不可变值语义，memref 有可变别名；错误 in-place 会让旧 SSA 值观察到新内容，违反原 IR。</p>
+<ul>
+<li><strong>值语义与可变别名的语义割裂</strong>： 在原始 IR 中，<code>%t1</code> 在执行 <code>%t2 = op(%t1)</code> 后在数学上依然保持原初的值。若编译器错误地执行了 In-place，使底层物理指针被改写，随后消费 <code>%t1</code> 的下游算子就会“观察”到被修改后的脏数据，导致整个程序的数值结果出现致命静默错误。</li>
+<li><strong>函数边界与跨函数别名分析</strong>： 若函数参数是 <code>tensor</code>，在独立编译该函数时，编译器默认无法知晓外部调用者传入的多个张量指针是否指向同一块底层物理内存（Aliasing）。必须依赖 Module-level 的跨过程分析或通过属性明确声明非别名约束（如 <code>bufferization.writable</code>）。</li>
+<li><strong>动态内存泄漏防范</strong>： 在循环体或动态分支内部插入 <code>memref.alloc</code> 时，必须确保有对应且无条件执行的 <code>memref.dealloc</code>；否则在迭代数十万步的深度学习训练循环中，显存会在几秒内迅速被打爆。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>in-place 少分配/拷贝但受别名限制；destination-passing style 能显式提供可复用输出并提高成功率。</p>
+<ul>
+<li><strong>Destination-Passing Style (DPS) 的巨大加速</strong>： MLIR 倡导所有产生张量的算子均采用 DPS 设计（如 <code>linalg.generic ins(%a, %b) outs(%init)</code>）。调用方通过 <code>outs</code> 显式提供承载结果的容器张量（例如在循环外预先分配好）。这为 One-Shot Bufferize 提供了确定性的原地写入目标，几乎能将复杂的全局分析简化为 100% 的 In-place 成功率，将中间临时缓冲区的显存占用削减为 0（如 <a href="file:///Users/wujie/hpclearning/mlir/lesson06_bufferization.qmd">图 6-1</a> 实测所示）。</li>
+<li><strong>静态分析保守性与拷贝开销</strong>： 若控制流过于复杂或存在指针逃逸，静态分析器出于正确性第一原则会保守地选择插入拷贝。工程优化的核心就是消除模糊别名，引导编译器证明 <code>proven_no_alias</code>。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p><code>%b=tensor.insert ... into %a</code> 后若 <code>%a</code> 仍被读取，%a/%b 不能无条件共享同一可写 buffer。</p>
+<p>以 <code>%b = tensor.insert %val into %a[%idx]</code> 为例： - <strong>场景 A（存在 RAW 冲突）</strong>： 若后续代码中既消费了 <code>%a</code>（读取原始数据），又消费了 <code>%b</code>（读取插入后的数据）。 此时 <code>old_value_used_after_write = True</code>，<code>needs_copy</code> 判定为 True。编译器被迫为 <code>%b</code> 分配新的内存块并做整块数据拷贝。 - <strong>场景 B（无冲突，成功 In-place）</strong>： 若 <code>%a</code> 在插入操作之后再无任何读取者（<code>old_value_used_after_write = False</code>）。 <code>needs_copy</code> 判定为 False。编译器直接将 <code>%a</code> 对应的物理 <code>memref</code> 赋予 <code>%b</code>，在底层生成一条原地的标量写入指令 <code>memref.store %val, %memref_a[%idx]</code>，零内存分配开销！</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐最小 RaW 冲突判定。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="b5a662c3" class="cell" data-course_role="exercise">
+<div id="d03d5311" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> needs_copy(writes_buffer, old_value_used_after_write, proven_no_alias):</span>
@@ -636,7 +687,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="facdcd02" class="cell" data-course_role="solution">
+<div id="1bcc4f3f" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> needs_copy(writes_buffer, old_value_used_after_write, proven_no_alias):</span>
@@ -651,15 +702,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>若后续仍需旧 tensor 值，而某 op 会原地写同一 buffer，就存在 RaW conflict，必须 out-of-place 或复制。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（全局可达性扫描与别名图构建）</strong>：分析器接收高阶不可变张量计算图（Tensor IR），遍历所有操作数与结果，利用图遍历算法构建完整的别名集合（Alias Set）与数据存取状态（Read/Write 状态标记）。 2. <strong>状态变化阶段（写后读冲突检测与原地复用决策）</strong>：针对每一个产生张量结果的节点，分析器检验三要素：当前算子是否写入缓冲区、原始张量及其别名在控制流后序中是否仍有读取需求（RAW 冲突）、以及两块内存是否存在重叠。若满足冲突条件，标记为 Out-of-place 并规划新的缓冲区分配；若无冲突，将其安全并入输入缓冲区的等价类中，确立 In-place 原地写入决策。 3. <strong>输出阶段（MemRef 指令替换与生命周期析构注入）</strong>：将所有抽象 <code>tensor</code> 类型彻底重写为承载物理指针、偏移与步长的 <code>memref</code> 类型，将张量算子替换为物理可变内存写入算子。最后通过生命周期分析（BufferDeallocation），在支配树的边界精准植入 <code>memref.dealloc</code>，输出完全消除冗余内存拷贝的底层 IR。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：tensor 是不可变值语义，memref 有可变别名；错误 in-place 会让旧 SSA 值观察到新内容，违反原 IR。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>“SSA（静态单赋值）值在 IR 中只被赋值一次”这一性质，仅仅是<strong>高级编译器中间表示中的变量命名约束与纯数学值语义抽象</strong>，绝不能自动推论出底层 <code>memref</code> 没有内存别名： 1. <strong>抽象层面的根本错位</strong>：在 SSA 中，<code>%t1</code> 和 <code>%t2</code> 是两个不同的 SSA 符号，每一个符号确实只在定义处被绑定一次。但当它们被 Bufferize 降低到物理机器时，多个不同的 SSA 变量完全可以映射并引用到底层同一个物理内存地址区间（例如通过切片 <code>subview</code>、重塑 <code>reshape</code> 或原地复用 In-place）。 2. <strong>指针与引用的可变别名本质</strong>：一旦映射到底层物理内存 <code>memref</code>，该地址空间的内容就变成了可变状态（Mutable State）。一个针对 <code>%t2</code> 底层指针的覆写操作，会直接改变 <code>%t1</code> 底层指针所指向的物理内存数据。若因为 SSA 符号不同就盲目断言底层无别名，会导致原本期望读取 <code>%t1</code> 历史数据的代码读取到被篡改后的脏数据，彻底违背 SSA 值的不可变数学语义。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：in-place 少分配/拷贝但受别名限制；destination-passing style 能显式提供可复用输出并提高成功率。</p>
+<p>利用目标传递风格（Destination-Passing Style, DPS，如 <code>linalg.matmul ... outs(%out_tensor)</code>）提升 In-place 成功率的工程机制为： 1. <strong>显式暴露输出内存的所有权链条</strong>： 在传统的纯函数式算子中（如 <code>%c = matmul(%a, %b)</code>），输出张量是由算子黑盒凭空创造出来的，编译器难以推断谁将提供这块内存，极易导致保守地插入临时分配。而在 DPS 规范下，算子强制要求调用者显式传入预分配的输出容器张量（<code>outs(%out)</code>）。 2. <strong>消除中间孤儿分配，构建确定性复用通道</strong>： 调用者可以将已经退役、不再被读取的前序张量作为 <code>outs</code> 传入。One-Shot Bufferize 分析器能够直接通过绑定的 <code>outs</code> 操作数与算子 Result 建立强确定性的别名对应关系。由于输出目标已经由调用者显式指定且其后序无 RAW 冲突，编译器可以 100% 自信地将该计算降低为在 <code>outs</code> 对应的 <code>memref</code> 缓冲区上进行就地原地覆写，彻底抹除中间算子的显存分配与拷贝。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1194,112 +1245,153 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>Bufferization 为 tensor SSA 值选择 memref 存储；One-Shot Bufferize 通过读写与别名分析决定复用还是分配。</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>若后续仍需旧 tensor 值，而某 op 会原地写同一 buffer，就存在 RaW conflict，必须 out-of-place 或复制。</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>tensor 是不可变值语义，memref 有可变别名；错误 in-place 会让旧 SSA 值观察到新内容，违反原 IR。</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>in-place 少分配/拷贝但受别名限制；destination-passing style 能显式提供可复用输出并提高成功率。</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="in">`%b=tensor.insert ... into %a`</span> 后若 <span class="in">`%a`</span> 仍被读取，%a/%b 不能无条件共享同一可写 buffer。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>补齐最小 RaW 冲突判定。</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>在函数式张量计算图（如 PyTorch、JAX 或 MLIR 的 <span class="in">`tensor`</span> 方言）中，张量拥有**纯值语义（Value Semantics）**：每个 SSA 变量代表不可变的纯数学实体。在值语义下，<span class="in">`%t2 = tensor.insert %x into %t1[...]`</span> 表面上如同对 <span class="in">`%t1`</span> 进行了深拷贝并修改产生全新的 <span class="in">`%t2`</span>。</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>然而，物理计算机硬件（CPU/GPU）没有无限的物理显存，实际执行必须依赖具备物理指针和可变内存状态的**引用语义（Buffer Reference Semantics）**，即 <span class="in">`memref`</span> 方言。</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>若将每一个高阶张量算子都朴素地分配一块全新的物理内存（<span class="in">`memref.alloc`</span>），会导致恐怖的显存占用和毁灭性的内存带宽瓶颈（如 <span class="co">[</span><span class="ot">图 6-1</span><span class="co">](file:///Users/wujie/hpclearning/mlir/lesson06_bufferization.qmd)</span> 所示）。</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解 MLIR 的核心降级设施——One-Shot Bufferize，掌握基于别名分析（Alias Analysis）与读后写/写后读（RAW/WAR）冲突判定的原地复用决策算法，以及利用目标传递风格（Destination-Passing Style, DPS）最大化削减物理内存开销**。</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>One-Shot Bufferize 的内存决策流程与别名分析架构如图 6-1 与图 6-2 所示：</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**全局可达性与别名图分析（Alias Analysis）**：</span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>   与传统的局部逐算子 bufferize 不同，One-Shot Bufferize 首先对全图进行全局拓扑扫描，分析每一个 <span class="in">`OpOperand`</span>（操作数）与 <span class="in">`OpResult`</span>（返回值）之间的潜在别名集合（Alias Set），判断它们是否可能映射到同一个底层底层物理内存块。</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**写后读冲突检测（RAW Conflict Detection）**：</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>   算法判定某个算子能否安全原地复用（In-place）输入缓冲区的不变量公式为：</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>   $$ \text{Conflict} = \text{WritesBuffer} \land \text{ReadAfterWrite} \land \neg \text{ProvenNoAlias} $$</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若操作数被原地覆写（WritesBuffer）；</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>且在程序的控制流中，**旧的原始 Tensor 值（或其别名）在写操作发生之后仍有读取需求（ReadAfterWrite）**；</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>且无法静态证明两者内存绝无重叠。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>   则判定为存在冲突！</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**决策与代码生成（Buffer Assignment &amp; Lowering）**：</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>   如图 6-2 所示：</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若**存在冲突**：驱动器插入 <span class="in">`memref.alloc`</span> 分配全新的缓冲区，或显式插入 <span class="in">`memref.copy`</span>，确保旧值的物理内存不被篡改；</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若**无冲突**：安全将输出直接绑定到输入的 <span class="in">`memref`</span> 物理地址上（In-place），消除所有冗余分配与拷贝；</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>最终将 <span class="in">`tensor`</span> 算子转换为等价的 <span class="in">`memref`</span> 操作（如 <span class="in">`linalg.matmul`</span> 在原地 buffer 上执行），并交由 <span class="in">`BufferDeallocation`</span> Pass 在精确的作用域末尾插入 <span class="in">`memref.dealloc`</span> 防止内存泄漏。</span>
 <span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
 <span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> needs_copy(writes_buffer, old_value_used_after_write, proven_no_alias):</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""教学模型：无法证明无别名且旧值后用时，写会要求 copy。"""</span></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>    <span class="co"># TODO：只补齐下面这个表达式。</span></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> ______</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**值语义与可变别名的语义割裂**：</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>  在原始 IR 中，<span class="in">`%t1`</span> 在执行 <span class="in">`%t2 = op(%t1)`</span> 后在数学上依然保持原初的值。若编译器错误地执行了 In-place，使底层物理指针被改写，随后消费 <span class="in">`%t1`</span> 的下游算子就会“观察”到被修改后的脏数据，导致整个程序的数值结果出现致命静默错误。</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**函数边界与跨函数别名分析**：</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>  若函数参数是 <span class="in">`tensor`</span>，在独立编译该函数时，编译器默认无法知晓外部调用者传入的多个张量指针是否指向同一块底层物理内存（Aliasing）。必须依赖 Module-level 的跨过程分析或通过属性明确声明非别名约束（如 <span class="in">`bufferization.writable`</span>）。</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**动态内存泄漏防范**：</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>  在循环体或动态分支内部插入 <span class="in">`memref.alloc`</span> 时，必须确保有对应且无条件执行的 <span class="in">`memref.dealloc`</span>；否则在迭代数十万步的深度学习训练循环中，显存会在几秒内迅速被打爆。</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
 <span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">False</span>)</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">False</span>,<span class="va">False</span>)</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">True</span>)</span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Destination-Passing Style (DPS) 的巨大加速**：</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>  MLIR 倡导所有产生张量的算子均采用 DPS 设计（如 <span class="in">`linalg.generic ins(%a, %b) outs(%init)`</span>）。调用方通过 <span class="in">`outs`</span> 显式提供承载结果的容器张量（例如在循环外预先分配好）。这为 One-Shot Bufferize 提供了确定性的原地写入目标，几乎能将复杂的全局分析简化为 100% 的 In-place 成功率，将中间临时缓冲区的显存占用削减为 0（如 <span class="co">[</span><span class="ot">图 6-1</span><span class="co">](file:///Users/wujie/hpclearning/mlir/lesson06_bufferization.qmd)</span> 实测所示）。</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**静态分析保守性与拷贝开销**：</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>  若控制流过于复杂或存在指针逃逸，静态分析器出于正确性第一原则会保守地选择插入拷贝。工程优化的核心就是消除模糊别名，引导编译器证明 <span class="in">`proven_no_alias`</span>。</span>
 <span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
 <span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>运行本单元格；所有 <span class="in">`assert`</span> 必须通过。另手工构造一个边界输入，解释预期结果。</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Tensor→MemRef Bufferization 与别名”的工作机制。</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>以 <span class="in">`%b = tensor.insert %val into %a[%idx]`</span> 为例：</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**场景 A（存在 RAW 冲突）**：</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>  若后续代码中既消费了 <span class="in">`%a`</span>（读取原始数据），又消费了 <span class="in">`%b`</span>（读取插入后的数据）。</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>  此时 <span class="in">`old_value_used_after_write = True`</span>，<span class="in">`needs_copy`</span> 判定为 True。编译器被迫为 <span class="in">`%b`</span> 分配新的内存块并做整块数据拷贝。</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**场景 B（无冲突，成功 In-place）**：</span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>  若 <span class="in">`%a`</span> 在插入操作之后再无任何读取者（<span class="in">`old_value_used_after_write = False`</span>）。</span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>  <span class="in">`needs_copy`</span> 判定为 False。编译器直接将 <span class="in">`%a`</span> 对应的物理 <span class="in">`memref`</span> 赋予 <span class="in">`%b`</span>，在底层生成一条原地的标量写入指令 <span class="in">`memref.store %val, %memref_a[%idx]`</span>，零内存分配开销！</span>
 <span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
 <span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
 <span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>为什么“SSA 值只赋值一次”不能自动保证 memref 无别名？</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>补齐最小 RaW 冲突判定。</span>
 <span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
 <span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>如何用 destination-style op 提高 in-place bufferization 机会？</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> needs_copy(writes_buffer, old_value_used_after_write, proven_no_alias):</span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""教学模型：无法证明无别名且旧值后用时，写会要求 copy。"""</span></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>    <span class="co"># TODO：只补齐下面这个表达式。</span></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> ______</span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">False</span>)</span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">False</span>,<span class="va">False</span>)</span>
+<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">True</span>)</span>
+<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>运行本单元格；所有 <span class="in">`assert`</span> 必须通过。另手工构造一个边界输入，解释预期结果。</span>
 <span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
 <span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> needs_copy(writes_buffer, old_value_used_after_write, proven_no_alias):</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""教学模型：无法证明无别名且旧值后用时，写会要求 copy。"""</span></span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 参考实现：表达式直接对应上文不变量。</span></span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> writes_buffer <span class="kw">and</span> old_value_used_after_write <span class="kw">and</span> <span class="kw">not</span> proven_no_alias</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">False</span>)</span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">False</span>,<span class="va">False</span>)</span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">True</span>)</span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Tensor→MemRef Bufferization 与别名”的工作机制。</span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>为什么“SSA 值只赋值一次”不能自动保证 memref 无别名？</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
 <span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>如何用 destination-style op 提高 in-place bufferization 机会？</span>
 <span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>若后续仍需旧 tensor 值，而某 op 会原地写同一 buffer，就存在 RaW conflict，必须 out-of-place 或复制。</span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
 <span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
 <span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：tensor 是不可变值语义，memref 有可变别名；错误 in-place 会让旧 SSA 值观察到新内容，违反原 IR。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
 <span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：in-place 少分配/拷贝但受别名限制；destination-passing style 能显式提供可复用输出并提高成功率。</span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
 <span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">One-Shot Bufferize</span><span class="co">](https://mlir.llvm.org/docs/Bufferization/)</span></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
 <span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> needs_copy(writes_buffer, old_value_used_after_write, proven_no_alias):</span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""教学模型：无法证明无别名且旧值后用时，写会要求 copy。"""</span></span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 参考实现：表达式直接对应上文不变量。</span></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> writes_buffer <span class="kw">and</span> old_value_used_after_write <span class="kw">and</span> <span class="kw">not</span> proven_no_alias</span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">False</span>)</span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">False</span>,<span class="va">False</span>)</span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> needs_copy(<span class="va">True</span>,<span class="va">True</span>,<span class="va">True</span>)</span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（全局可达性扫描与别名图构建）**：分析器接收高阶不可变张量计算图（Tensor IR），遍历所有操作数与结果，利用图遍历算法构建完整的别名集合（Alias Set）与数据存取状态（Read/Write 状态标记）。</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（写后读冲突检测与原地复用决策）**：针对每一个产生张量结果的节点，分析器检验三要素：当前算子是否写入缓冲区、原始张量及其别名在控制流后序中是否仍有读取需求（RAW 冲突）、以及两块内存是否存在重叠。若满足冲突条件，标记为 Out-of-place 并规划新的缓冲区分配；若无冲突，将其安全并入输入缓冲区的等价类中，确立 In-place 原地写入决策。</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（MemRef 指令替换与生命周期析构注入）**：将所有抽象 <span class="in">`tensor`</span> 类型彻底重写为承载物理指针、偏移与步长的 <span class="in">`memref`</span> 类型，将张量算子替换为物理可变内存写入算子。最后通过生命周期分析（BufferDeallocation），在支配树的边界精准植入 <span class="in">`memref.dealloc`</span>，输出完全消除冗余内存拷贝的底层 IR。</span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a>“SSA（静态单赋值）值在 IR 中只被赋值一次”这一性质，仅仅是**高级编译器中间表示中的变量命名约束与纯数学值语义抽象**，绝不能自动推论出底层 <span class="in">`memref`</span> 没有内存别名：</span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**抽象层面的根本错位**：在 SSA 中，<span class="in">`%t1`</span> 和 <span class="in">`%t2`</span> 是两个不同的 SSA 符号，每一个符号确实只在定义处被绑定一次。但当它们被 Bufferize 降低到物理机器时，多个不同的 SSA 变量完全可以映射并引用到底层同一个物理内存地址区间（例如通过切片 <span class="in">`subview`</span>、重塑 <span class="in">`reshape`</span> 或原地复用 In-place）。</span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**指针与引用的可变别名本质**：一旦映射到底层物理内存 <span class="in">`memref`</span>，该地址空间的内容就变成了可变状态（Mutable State）。一个针对 <span class="in">`%t2`</span> 底层指针的覆写操作，会直接改变 <span class="in">`%t1`</span> 底层指针所指向的物理内存数据。若因为 SSA 符号不同就盲目断言底层无别名，会导致原本期望读取 <span class="in">`%t1`</span> 历史数据的代码读取到被篡改后的脏数据，彻底违背 SSA 值的不可变数学语义。</span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>利用目标传递风格（Destination-Passing Style, DPS，如 <span class="in">`linalg.matmul ... outs(%out_tensor)`</span>）提升 In-place 成功率的工程机制为：</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**显式暴露输出内存的所有权链条**：</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a>   在传统的纯函数式算子中（如 <span class="in">`%c = matmul(%a, %b)`</span>），输出张量是由算子黑盒凭空创造出来的，编译器难以推断谁将提供这块内存，极易导致保守地插入临时分配。而在 DPS 规范下，算子强制要求调用者显式传入预分配的输出容器张量（<span class="in">`outs(%out)`</span>）。</span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**消除中间孤儿分配，构建确定性复用通道**：</span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>   调用者可以将已经退役、不再被读取的前序张量作为 <span class="in">`outs`</span> 传入。One-Shot Bufferize 分析器能够直接通过绑定的 <span class="in">`outs`</span> 操作数与算子 Result 建立强确定性的别名对应关系。由于输出目标已经由调用者显式指定且其后序无 RAW 冲突，编译器可以 100% 自信地将该计算降低为在 <span class="in">`outs`</span> 对应的 <span class="in">`memref`</span> 缓冲区上进行就地原地覆写，彻底抹除中间算子的显存分配与拷贝。</span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">One-Shot Bufferize</span><span class="co">](https://mlir.llvm.org/docs/Bufferization/)</span></span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

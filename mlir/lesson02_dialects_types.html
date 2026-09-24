@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -573,31 +573,48 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>Dialect 是可组合 IR 词汇表；Type 描述 SSA 值的类别，Attribute 是编译期常量/配置，Interface 提供不依赖具体 op 名的能力契约。</p>
+<p>在传统的单一中间表示（如 GCC GIMPLE 或 LLVM IR）中，所有的优化分析都被迫适配在同一套封闭固化的指令集和类型系统上，导致上层领域特定（Domain-specific）语义在过早降级中被永久抹杀。 MLIR 提出了模块化、可无限扩展的<strong>Dialect（方言）</strong>生态系统。每个 Dialect 是一组语义自洽、命名隔离的 IR 词汇表（如 <code>arith</code> 负责算术、<code>linalg</code> 负责线性代数、<code>memref</code> 负责显式物理内存、<code>llvm</code> 负责底层硬件映射）。 在 Dialect 内部，四大核心正交正规化概念支撑起整个语义大厦： - <strong>Type（类型）</strong>：描述 SSA 变量的物理/抽象取值范围与数学类别（如 <code>tensor&lt;2x?xf32&gt;</code>, <code>f32</code>, <code>i64</code>）。 - <strong>Attribute（属性）</strong>：挂载在 Operation 上的<strong>编译期已知静态常量或元数据配置</strong>（如张量维度的静态排布、浮点常量数值、轴向索引 <code>{axis = 1 : i64}</code>）。 - <strong>Interface（接口）</strong>：跨 Dialect 的通用行为契约（如 <code>MemoryEffectOpInterface</code> 描述副作用、<code>InferTypeOpInterface</code> 描述形状推导）。 本课解决的核心工程问题是：<strong>深刻辨析 Type 与 Attribute 的物理分界，理解 Dialect 命名隔离机制，以及如何利用 Interface 实现跨方言的解耦多态分析与优化</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>parser 根据 <code>dialect.op</code> 找定义；operation verifier 检查 operand/result/type/attribute 约束，interfaces 让 pass 对一组 op 统一工作。</p>
+<p>多方言协同与 OpInterface 动态多态分发流程如图 2-1 与图 2-2 所示：</p>
+<ol type="1">
+<li><strong>方言前缀路由与语法解析</strong>： MLIR 源码以 <code>dialect.op</code>（如 <code>arith.constant</code>、<code>linalg.matmul</code>）为唯一标识。解析器 <code>AsmParser</code> 依据方言前缀路由到对应的 C++ 方言定义，构建 Operation 节点。</li>
+<li><strong>Type 与 Attribute 的正交约束</strong>：
+<ul>
+<li>SSA 值（Value）严格绑定单一 Type，运行时数据在 SSA 管道中流转；</li>
+<li>属性（Attribute）直接嵌入 Operation 的存储字典中，无需任何 SSA 依赖。</li>
+<li>例如语句 <code>%c = arith.constant dense&lt;[1.0, 2.0]&gt; : tensor&lt;2xf32&gt;</code> 中，<code>dense&lt;[1.0, 2.0]&gt;</code> 是一个属性实例（<code>DenseElementsAttr</code>），作为常量的字面值载荷；而 <code>tensor&lt;2xf32&gt;</code> 是 Type，约束 <code>%c</code> 的静态形状与元素类型。</li>
+</ul></li>
+<li><strong>接口动态查询与多态分发（Interface Dispatch）</strong>： 如图 2-2 所示，优化 Pass 在遍历 IR 时，绝不需要使用硬编码的 <code>if (op-&gt;getName() == "xxx")</code>。 Pass 通过 C++ RTTI 模式进行概念建模：<code>if (auto memOp = dyn_cast&lt;MemoryEffectOpInterface&gt;(op))</code>。 若该 Operation 实现了该接口，则直接调用接口方法查询其是否具有内存读写副作用，从而将 DCE（死代码消除）或 CSE（公共子表达式消除）算法与具体 Dialect 的具体 Op 完全解耦。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>不能把运行时 SSA 值塞进 attribute；未知 dialect 是否允许取决于工具注册与选项，验证通过也不代表语义已实现。</p>
+<ul>
+<li><strong>运行时数据与编译期属性的混淆（Attribute vs SSA Value）</strong>： Attribute 的值必须在<strong>编译期是完全已知且不可变的字面常量</strong>。若张量的维度或步长是由输入数据的运行时计算决定的（例如根据网络包大小动态决定的 <code>batch_size</code>），该数值必须以 SSA Value（<code>index</code> 或 <code>i64</code> 类型操作数）传递，绝对不能试图塞入编译期的 Attribute 中。</li>
+<li><strong>动态维度标记（Dynamic Dimension <code>?</code>）</strong>： 在静态类型中，未知维度用 <code>?</code> 表示（如 <code>tensor&lt;?x128xf32&gt;</code>）。动态维度的真实尺寸必须在运行时通过 <code>tensor.dim</code> 等操作动态获取为 SSA 值。</li>
+<li><strong>未注册方言与语义空洞（Unregistered Dialect Trap）</strong>： 若在 <code>mlir-opt</code> 中开启 <code>-allow-unregistered-dialect</code>，编译器允许解析任何任意前缀的未知 Op（如 <code>foo.bar</code>）。但此时该 Op 不具备任何 Verifier 校验规则、无法执行 Interface 查询，只能作为黑盒语法树节点存在。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>高层专用 type 保留语义、利于优化；过早降成 memref/LLVM pointer 会丢失 shape 与别名信息。</p>
+<ul>
+<li><strong>高层抽象类型保留 vs 过早降级（Lowering Timing）</strong>： 保留高层类型（如 <code>tensor&lt;4x16xf32&gt;</code>）能够完整携带张量的高阶数学代数语义，使得切片融合、转置消除、分块 Tiling 等高层图优化极易进行； 若过早将 <code>tensor</code> 降级为带物理步长的 <code>memref</code> 或底层 <code>llvm.ptr</code> 指针，指针别名（Aliasing）与扁平物理跨步会使编译器无法再恢复高维几何形状，造成严重的优化阻断。</li>
+<li><strong>Interface 虚表分发开销</strong>： Interface 底层通过类似 C++ Concept 或轻量级虚表分发实现。虽然有极轻微的寻址开销，但相比于硬编码匹配，它换来了整个编译器架构极高的可维护性与正交扩展性。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p><code>tensor&lt;4x?xf32&gt;</code> 是 type；<code>{axis = 1 : i64}</code> 中 axis 是 attribute；动态维度大小仍由 SSA 值携带。</p>
+<p>以 <code>%c = arith.constant dense&lt;[1.0, 2.0]&gt; : tensor&lt;2xf32&gt;</code> 为例： - <code>arith</code>：方言命名空间，避免与其它自定义方言的 <code>constant</code> 命名冲突。 - <code>dense&lt;[1.0, 2.0]&gt;</code>：DenseElementsAttr 属性，在编译器内存中以紧凑字节数组高效存储常量数据。 - <code>tensor&lt;2xf32&gt;</code>：RankedTensorType，静态声明该张量阶数为 1，长度为 2，元素为 32 位浮点数。 - 若将返回值错误声明为 <code>tensor&lt;3xf32&gt;</code>，MLIR Verifier 在构建期会立即捕获类型与属性形状不匹配的断言，从编译前端杜绝非法张量。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 tensor 常量的类型和 dense attribute。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="a09a7a67" class="cell" data-course_role="exercise">
+<div id="6a50b679" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson02.mlir</span>
@@ -653,7 +670,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="ab7314e6" class="cell" data-course_role="solution">
+<div id="38f8c80b" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson02.mlir</span>
@@ -667,15 +684,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>parser 根据 <code>dialect.op</code> 找定义；operation verifier 检查 operand/result/type/attribute 约束，interfaces 让 pass 对一组 op 统一工作。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（方言命名空间解析与静态属性绑定）</strong>：Parser 遇到以命名空间隔离的 Operation 字符串（如 <code>arith.constant</code>），将其路由至已在 <code>MLIRContext</code> 注册的方言模块。解析器解析挂载的编译期常量属性字典（如 <code>dense&lt;[1.0, 2.0]&gt;</code>），验证属性语法并存入 Operation 内部。 2. <strong>状态变化阶段（类型验证与接口多态判定）</strong>：Operation 实例化后调用自身的 <code>verify()</code> 逻辑，严格验证操作数类型、属性类型与结果类型三者间的静态约束契约（例如检查 DenseElementsAttr 的元素个数是否严格等于目标 RankedTensorType 的形状容量）。在此期间，Pass 框架可通过 <code>dyn_cast&lt;OpInterface&gt;</code> 动态探测并调用该 Operation 实现的能力，完成类型推导或副作用标记。 3. <strong>输出阶段（SSA 强类型赋值与 Def-Use 节点注入）</strong>：Operation 生成绑定了严格 Type（如 <code>tensor&lt;2xf32&gt;</code>）的全新 SSA 变量 <code>%c</code>。该 SSA 变量被正式注册进编译器的 Def-Use 依赖链条中，作为强类型操作数供给下游 Operation 安全使用。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：不能把运行时 SSA 值塞进 attribute；未知 dialect 是否允许取决于工具注册与选项，验证通过也不代表语义已实现。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在编译原理与系统体系结构中，“编译期元数据（Attribute）”与“运行时数据（SSA Value）”具有本质不可逾越的边界： 1. <strong>执行时机的根本矛盾</strong>：Attribute 的生命周期是在编译器运行阶段（Compile-Time），其值必须由编译器在编译生成二进制机器码时就完全知晓并固化在指令或只读数据段中。而动态 Shape（如变长 Prompt 的序列长度、动态 Batch 大小）的真实数值只有当程序部署在真实硬件上被具体数据触发执行时（Runtime）才会诞生。 2. <strong>内存分配与参数依赖</strong>：如果动态 Shape 的具体大小是基于前序算子的计算结果（例如 <code>torch.nonzero</code> 或动态掩码过滤出的有效元素个数），该尺寸本身就是一个必须通过 GPU 寄存器或显存传递的 SSA Value。试图将运行时才能确定的值写成编译期静态 Attribute，在因果律上无法实现。因此在 MLIR 中，动态维度在 Type 中标注为 <code>?</code>，而其具体的整数维度必须以 SSA Value 形式通过操作数动态传递。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：高层专用 type 保留语义、利于优化；过早降成 memref/LLVM pointer 会丢失 shape 与别名信息。</p>
+<p>在构建新领域 Dialect 时，复用 Builtin Type 还是创建 Custom Type 的决策矩阵如下： 1. <strong>必须复用 Builtin Type（如 <code>f32</code>, <code>i32</code>, <code>tensor</code>, <code>memref</code>）的场景</strong>： - 当数据的底层物理语义、位宽或多维数组排布与标准体系完全兼容时； - 当希望无缝复用 MLIR 上游已有的海量标准 Pass（如 <code>arith</code> 基础代数优化、<code>tensor-bufferization</code> 内存分配、<code>linalg</code> 分块融合）时。如果自定义了私有 Tensor 类型，上游的所有标准化优化管道将全部失效。 2. <strong>必须创建自定义 Custom Type 的场景</strong>： - <strong>领域特定抽象（Domain Invariants）</strong>：当类型携带现有 Builtin 无法表达的核心不变式时（例如量化模型中的非均匀量化标尺类型、通信拓扑中的分布式通信器句柄 <code>!mpi.comm</code>、硬件专有的寄存器片段布局 <code>!nvgpu.warp_matrix</code>）； - <strong>语义隔离与类型安全</strong>：防止类型混用导致的静默错误，通过自定义 Type 强制要求调用方使用专用的转换算子显式转换，在编译前端拦截非法数据流。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1220,111 +1237,152 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>Dialect 是可组合 IR 词汇表；Type 描述 SSA 值的类别，Attribute 是编译期常量/配置，Interface 提供不依赖具体 op 名的能力契约。</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>parser 根据 <span class="in">`dialect.op`</span> 找定义；operation verifier 检查 operand/result/type/attribute 约束，interfaces 让 pass 对一组 op 统一工作。</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>在传统的单一中间表示（如 GCC GIMPLE 或 LLVM IR）中，所有的优化分析都被迫适配在同一套封闭固化的指令集和类型系统上，导致上层领域特定（Domain-specific）语义在过早降级中被永久抹杀。</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>MLIR 提出了模块化、可无限扩展的**Dialect（方言）**生态系统。每个 Dialect 是一组语义自洽、命名隔离的 IR 词汇表（如 <span class="in">`arith`</span> 负责算术、<span class="in">`linalg`</span> 负责线性代数、<span class="in">`memref`</span> 负责显式物理内存、<span class="in">`llvm`</span> 负责底层硬件映射）。</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>在 Dialect 内部，四大核心正交正规化概念支撑起整个语义大厦：</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Type（类型）**：描述 SSA 变量的物理/抽象取值范围与数学类别（如 <span class="in">`tensor&lt;2x?xf32&gt;`</span>, <span class="in">`f32`</span>, <span class="in">`i64`</span>）。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Attribute（属性）**：挂载在 Operation 上的**编译期已知静态常量或元数据配置**（如张量维度的静态排布、浮点常量数值、轴向索引 <span class="in">`{axis = 1 : i64}`</span>）。</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Interface（接口）**：跨 Dialect 的通用行为契约（如 <span class="in">`MemoryEffectOpInterface`</span> 描述副作用、<span class="in">`InferTypeOpInterface`</span> 描述形状推导）。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**深刻辨析 Type 与 Attribute 的物理分界，理解 Dialect 命名隔离机制，以及如何利用 Interface 实现跨方言的解耦多态分析与优化**。</span>
 <span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>不能把运行时 SSA 值塞进 attribute；未知 dialect 是否允许取决于工具注册与选项，验证通过也不代表语义已实现。</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
 <span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>多方言协同与 OpInterface 动态多态分发流程如图 2-1 与图 2-2 所示：</span>
 <span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>高层专用 type 保留语义、利于优化；过早降成 memref/LLVM pointer 会丢失 shape 与别名信息。</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="in">`tensor&lt;4x?xf32&gt;`</span> 是 type；<span class="in">`{axis = 1 : i64}`</span> 中 axis 是 attribute；动态维度大小仍由 SSA 值携带。</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>补齐 tensor 常量的类型和 dense attribute。</span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson02.mlir</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>constant() <span class="op">-&gt;</span> tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span> {</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span>c <span class="op">=</span> arith.constant ______ : ______</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> <span class="op">%</span>c : tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>用 <span class="in">`mlir-opt`</span> 解析；再把返回类型故意改为 <span class="in">`tensor&lt;3xf32&gt;`</span>，确认 verifier 拒绝。</span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Dialect、Type、Attribute 与接口”的工作机制。</span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>为什么动态 shape 的实际数值不能只写成 attribute？</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a>设计新 dialect 时，何时复用 builtin type，何时创建自定义 type？</span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**方言前缀路由与语法解析**：</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>   MLIR 源码以 <span class="in">`dialect.op`</span>（如 <span class="in">`arith.constant`</span>、<span class="in">`linalg.matmul`</span>）为唯一标识。解析器 <span class="in">`AsmParser`</span> 依据方言前缀路由到对应的 C++ 方言定义，构建 Operation 节点。</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**Type 与 Attribute 的正交约束**：</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>SSA 值（Value）严格绑定单一 Type，运行时数据在 SSA 管道中流转；</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>属性（Attribute）直接嵌入 Operation 的存储字典中，无需任何 SSA 依赖。</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>例如语句 <span class="in">`%c = arith.constant dense&lt;[1.0, 2.0]&gt; : tensor&lt;2xf32&gt;`</span> 中，<span class="in">`dense&lt;[1.0, 2.0]&gt;`</span> 是一个属性实例（<span class="in">`DenseElementsAttr`</span>），作为常量的字面值载荷；而 <span class="in">`tensor&lt;2xf32&gt;`</span> 是 Type，约束 <span class="in">`%c`</span> 的静态形状与元素类型。</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**接口动态查询与多态分发（Interface Dispatch）**：</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>   如图 2-2 所示，优化 Pass 在遍历 IR 时，绝不需要使用硬编码的 <span class="in">`if (op-&gt;getName() == "xxx")`</span>。</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>   Pass 通过 C++ RTTI 模式进行概念建模：<span class="in">`if (auto memOp = dyn_cast&lt;MemoryEffectOpInterface&gt;(op))`</span>。</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>   若该 Operation 实现了该接口，则直接调用接口方法查询其是否具有内存读写副作用，从而将 DCE（死代码消除）或 CSE（公共子表达式消除）算法与具体 Dialect 的具体 Op 完全解耦。</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**运行时数据与编译期属性的混淆（Attribute vs SSA Value）**：</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>  Attribute 的值必须在**编译期是完全已知且不可变的字面常量**。若张量的维度或步长是由输入数据的运行时计算决定的（例如根据网络包大小动态决定的 <span class="in">`batch_size`</span>），该数值必须以 SSA Value（<span class="in">`index`</span> 或 <span class="in">`i64`</span> 类型操作数）传递，绝对不能试图塞入编译期的 Attribute 中。</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**动态维度标记（Dynamic Dimension `?`）**：</span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>  在静态类型中，未知维度用 <span class="in">`?`</span> 表示（如 <span class="in">`tensor&lt;?x128xf32&gt;`</span>）。动态维度的真实尺寸必须在运行时通过 <span class="in">`tensor.dim`</span> 等操作动态获取为 SSA 值。</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**未注册方言与语义空洞（Unregistered Dialect Trap）**：</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  若在 <span class="in">`mlir-opt`</span> 中开启 <span class="in">`-allow-unregistered-dialect`</span>，编译器允许解析任何任意前缀的未知 Op（如 <span class="in">`foo.bar`</span>）。但此时该 Op 不具备任何 Verifier 校验规则、无法执行 Interface 查询，只能作为黑盒语法树节点存在。</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**高层抽象类型保留 vs 过早降级（Lowering Timing）**：</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>  保留高层类型（如 <span class="in">`tensor&lt;4x16xf32&gt;`</span>）能够完整携带张量的高阶数学代数语义，使得切片融合、转置消除、分块 Tiling 等高层图优化极易进行；</span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>  若过早将 <span class="in">`tensor`</span> 降级为带物理步长的 <span class="in">`memref`</span> 或底层 <span class="in">`llvm.ptr`</span> 指针，指针别名（Aliasing）与扁平物理跨步会使编译器无法再恢复高维几何形状，造成严重的优化阻断。</span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Interface 虚表分发开销**：</span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>  Interface 底层通过类似 C++ Concept 或轻量级虚表分发实现。虽然有极轻微的寻址开销，但相比于硬编码匹配，它换来了整个编译器架构极高的可维护性与正交扩展性。</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a>以 <span class="in">`%c = arith.constant dense&lt;[1.0, 2.0]&gt; : tensor&lt;2xf32&gt;`</span> 为例：</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`arith`</span>：方言命名空间，避免与其它自定义方言的 <span class="in">`constant`</span> 命名冲突。</span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`dense&lt;[1.0, 2.0]&gt;`</span>：DenseElementsAttr 属性，在编译器内存中以紧凑字节数组高效存储常量数据。</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`tensor&lt;2xf32&gt;`</span>：RankedTensorType，静态声明该张量阶数为 1，长度为 2，元素为 32 位浮点数。</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>若将返回值错误声明为 <span class="in">`tensor&lt;3xf32&gt;`</span>，MLIR Verifier 在构建期会立即捕获类型与属性形状不匹配的断言，从编译前端杜绝非法张量。</span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a>补齐 tensor 常量的类型和 dense attribute。</span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson02.mlir</span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>constant() <span class="op">-&gt;</span> tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span> {</span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span>c <span class="op">=</span> arith.constant ______ : ______</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> <span class="op">%</span>c : tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span></span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
 <span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>用 <span class="in">`mlir-opt`</span> 解析；再把返回类型故意改为 <span class="in">`tensor&lt;3xf32&gt;`</span>，确认 verifier 拒绝。</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
 <span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson02.mlir</span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>constant() <span class="op">-&gt;</span> tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span> {</span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span>c <span class="op">=</span> arith.constant dense<span class="op">&lt;</span>[<span class="fl">1.0</span>, <span class="fl">2.0</span>]<span class="op">&gt;</span> : tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> <span class="op">%</span>c : tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>parser 根据 <span class="in">`dialect.op`</span> 找定义；operation verifier 检查 operand/result/type/attribute 约束，interfaces 让 pass 对一组 op 统一工作。</span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：不能把运行时 SSA 值塞进 attribute；未知 dialect 是否允许取决于工具注册与选项，验证通过也不代表语义已实现。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：高层专用 type 保留语义、利于优化；过早降成 memref/LLVM pointer 会丢失 shape 与别名信息。</span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Dialect、Type、Attribute 与接口”的工作机制。</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>为什么动态 shape 的实际数值不能只写成 attribute？</span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>设计新 dialect 时，何时复用 builtin type，何时创建自定义 type？</span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Language Reference</span><span class="co">](https://mlir.llvm.org/docs/LangRef/)</span></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Defining Dialects</span><span class="co">](https://mlir.llvm.org/docs/DefiningDialects/)</span></span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
 <span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson02.mlir</span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>constant() <span class="op">-&gt;</span> tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span> {</span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span>c <span class="op">=</span> arith.constant dense<span class="op">&lt;</span>[<span class="fl">1.0</span>, <span class="fl">2.0</span>]<span class="op">&gt;</span> : tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span></span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> <span class="op">%</span>c : tensor<span class="op">&lt;</span><span class="dv">2</span><span class="er">xf32</span><span class="op">&gt;</span></span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（方言命名空间解析与静态属性绑定）**：Parser 遇到以命名空间隔离的 Operation 字符串（如 <span class="in">`arith.constant`</span>），将其路由至已在 <span class="in">`MLIRContext`</span> 注册的方言模块。解析器解析挂载的编译期常量属性字典（如 <span class="in">`dense&lt;[1.0, 2.0]&gt;`</span>），验证属性语法并存入 Operation 内部。</span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（类型验证与接口多态判定）**：Operation 实例化后调用自身的 <span class="in">`verify()`</span> 逻辑，严格验证操作数类型、属性类型与结果类型三者间的静态约束契约（例如检查 DenseElementsAttr 的元素个数是否严格等于目标 RankedTensorType 的形状容量）。在此期间，Pass 框架可通过 <span class="in">`dyn_cast&lt;OpInterface&gt;`</span> 动态探测并调用该 Operation 实现的能力，完成类型推导或副作用标记。</span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（SSA 强类型赋值与 Def-Use 节点注入）**：Operation 生成绑定了严格 Type（如 <span class="in">`tensor&lt;2xf32&gt;`</span>）的全新 SSA 变量 <span class="in">`%c`</span>。该 SSA 变量被正式注册进编译器的 Def-Use 依赖链条中，作为强类型操作数供给下游 Operation 安全使用。</span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a>在编译原理与系统体系结构中，“编译期元数据（Attribute）”与“运行时数据（SSA Value）”具有本质不可逾越的边界：</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**执行时机的根本矛盾**：Attribute 的生命周期是在编译器运行阶段（Compile-Time），其值必须由编译器在编译生成二进制机器码时就完全知晓并固化在指令或只读数据段中。而动态 Shape（如变长 Prompt 的序列长度、动态 Batch 大小）的真实数值只有当程序部署在真实硬件上被具体数据触发执行时（Runtime）才会诞生。</span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**内存分配与参数依赖**：如果动态 Shape 的具体大小是基于前序算子的计算结果（例如 <span class="in">`torch.nonzero`</span> 或动态掩码过滤出的有效元素个数），该尺寸本身就是一个必须通过 GPU 寄存器或显存传递的 SSA Value。试图将运行时才能确定的值写成编译期静态 Attribute，在因果律上无法实现。因此在 MLIR 中，动态维度在 Type 中标注为 <span class="in">`?`</span>，而其具体的整数维度必须以 SSA Value 形式通过操作数动态传递。</span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a>在构建新领域 Dialect 时，复用 Builtin Type 还是创建 Custom Type 的决策矩阵如下：</span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**必须复用 Builtin Type（如 `f32`, `i32`, `tensor`, `memref`）的场景**：</span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当数据的底层物理语义、位宽或多维数组排布与标准体系完全兼容时；</span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当希望无缝复用 MLIR 上游已有的海量标准 Pass（如 <span class="in">`arith`</span> 基础代数优化、<span class="in">`tensor-bufferization`</span> 内存分配、<span class="in">`linalg`</span> 分块融合）时。如果自定义了私有 Tensor 类型，上游的所有标准化优化管道将全部失效。</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**必须创建自定义 Custom Type 的场景**：</span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**领域特定抽象（Domain Invariants）**：当类型携带现有 Builtin 无法表达的核心不变式时（例如量化模型中的非均匀量化标尺类型、通信拓扑中的分布式通信器句柄 <span class="in">`!mpi.comm`</span>、硬件专有的寄存器片段布局 <span class="in">`!nvgpu.warp_matrix`</span>）；</span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**语义隔离与类型安全**：防止类型混用导致的静默错误，通过自定义 Type 强制要求调用方使用专用的转换算子显式转换，在编译前端拦截非法数据流。</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Language Reference</span><span class="co">](https://mlir.llvm.org/docs/LangRef/)</span></span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Defining Dialects</span><span class="co">](https://mlir.llvm.org/docs/DefiningDialects/)</span></span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

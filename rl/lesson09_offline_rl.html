@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -598,19 +627,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>离线 RL 只能使用固定数据；策略若选择数据外动作，Q 网络可能给出无依据的乐观外推。</p>
+<p><strong>离线强化学习（Offline RL / Batch RL）</strong>是一种在零在线交互（No Active Exploration）前提下、纯粹利用预先收集好的固定静态转移数据集 <span class="math inline">\(\mathcal{D} = \{(s, a, r, s')\}\)</span> 来训练策略的强化学习范式。 在工业界落地（如自动驾驶、医疗诊疗、核电控制、大模型离线偏好对齐）中，在线环境交互要么极其危险、要么成本高昂不可行。然而，直接将标准在线 Off-Policy 算法（如 DQN、SAC）应用在静态数据集上会遭遇<strong>灾难性的外推误差（Extrapolation Error）与分布漂移（Distribution Shift）</strong>： - <strong>致命的开环恶性循环</strong>：如果价值网络 <span class="math inline">\(Q(s, a)\)</span> 对某个在数据集 <span class="math inline">\(\mathcal{D}\)</span> 中从未出现过的<strong>分布外动作（Out-of-Distribution, OOD）</strong>产生了随机过高估计； - 在线学习中，智能体会通过贪婪探索尝试该动作，环境立即给予真实惩罚并纠正 Q 值； - 但在离线场景下，环境交互通道被彻底阻断，智能体<strong>永远无法验证该动作的真实好坏</strong>。策略优化时会因 <span class="math inline">\(\arg\max_a Q(s, a)\)</span> 精准锁定这些虚假高峰，而在 Bellman 自举递推 <span class="math inline">\(y = r + \gamma Q(s', \pi(s'))\)</span> 作用下，虚高估计会像滚雪球一样自我递归正反馈，导致 Q 估值发散暴增数千倍，最终学出的策略在实机部署时彻底崩溃。</p>
+<p>离线强化学习解决的核心工程问题是：<strong>如何在没有环境验证的严苛约束下，引入悲观保守主义（Pessimism in the face of uncertainty），既有效抑制 OOD 动作的外推虚高，又能充分发挥离线数据的“拼图缝合能力”（Stitching Property）以学出显著超越历史行为策略的最优控制</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>保守方法让数据分布外动作的价值更低，或把策略约束在行为策略附近；本质是为不确定性付费。</p>
+<p>分布漂移与保守 Q 学习（CQL）约束流水线如图 9-1 与图 9-2 所示：</p>
+<ol type="1">
+<li><strong>分布漂移与保守压制机理（图 9-1）</strong>： 在静态数据集支持集（In-Distribution）内部，由于有真实样本覆盖，Q 估值高度精准；但在广袤的数据覆盖盲区（OOD），传统深度网络由于未受任何边界锚定约束，往往存在病态的虚假过估计波峰。 <strong>保守 Q 学习（Conservative Q-Learning, CQL, Kumar et al., 2020）</strong>的核心思想是对动作价值面施加非对称正则化：
+<ul>
+<li><strong>压低未知（Push Down）</strong>：对状态 <span class="math inline">\(s\)</span> 下所有可能动作的 Q 值实施整体抑制；</li>
+<li><strong>拉高已知（Push Up）</strong>：针对数据集中真实记录的行为动作 <span class="math inline">\((s, a \sim \mathcal{D})\)</span> 进行 Q 值补偿。</li>
+</ul></li>
+<li><strong>CQL 联合损失函数数学展开（图 9-2）</strong>： 定义保守目标函数： <span class="math display">\[ \min_Q \alpha \cdot \mathbb{E}_{s \sim \mathcal{D}} \left[ \log \sum_{a \in \mathcal{A}} \exp(Q(s, a)) - \mathbb{E}_{a \sim \pi_\beta(a \mid s)} [Q(s, a)] \right] + \frac{1}{2} \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left[ (Q(s, a) - \mathcal{B}^* Q(s, a))^2 \right] \]</span> 其中 <span class="math inline">\(\log \sum \exp(Q)\)</span> 是对动作空间的软最大化（LogSumExp），对所有动作施加惩罚；第二项则将数据集中行为策略 <span class="math inline">\(\pi_\beta\)</span> 的动作拉回。数学上严格保证：在适当的 <span class="math inline">\(\alpha\)</span> 下，CQL 估计的价值函数在策略期望下严格是真实最优价值的<strong>保守下界（Pessimistic Lower Bound: <span class="math inline">\(\hat{Q}^\pi(s, a) \le Q^\pi(s, a)\)</span>）</strong>，彻底免疫外推爆炸。</li>
+<li><strong>策略约束法（Policy Constraint, 如 TD3+BC）</strong>： 除了在价值层面对 Q 值做悲观惩罚，另一主流工程路线是在策略优化层直接约束 Actor 不能脱离行为策略分布。例如 TD3+BC 在标准策略梯度上直接挂载行为克隆（Behavior Cloning）均方差惩罚： <span class="math display">\[ \pi = \arg\max_\theta \mathbb{E}_{(s, a) \sim \mathcal{D}} \left[ \lambda Q(s, \pi(s)) - (\pi(s) - a)^2 \right] \]</span> 通过系数 <span class="math inline">\(\lambda\)</span> 灵活调节对 Q 导向探索与行为克隆保底之间的权重。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>验证集 TD error 小不代表新策略安全，因为验证数据仍来自行为分布；必须分析 coverage。</p>
+<ul>
+<li><strong>离线测试集 Hold-out 验证的虚假安全陷阱</strong>： 在经典监督学习中，若在静态数据集中随机划分 20% 作为测试集且均方差极小，通常代表泛化良好。<strong>但在离线 RL 中，随机 Hold-out 测试集具有完全相同的行为策略分布 <span class="math inline">\(\pi_\beta\)</span>！</strong>测试集 TD Error 极小只能证明模型在历史行为轨迹内拟合精确，完全无法反映当策略执行 <span class="math inline">\(\arg\max_a Q(s, a)\)</span> 选出它最喜欢的 OOD 动作时是否存在灾难性虚高。必须结合离线策略评估（OPE）与特征支持度（Support Coverage）综合诊断。</li>
+<li><strong>保守过度导致的“行为克隆退化”</strong>： 若惩罚系数 <span class="math inline">\(\alpha\)</span> 设置得过于激进，算法会把任何微弱的偏离都判定为极度危险，导致优化过程彻底退化为简单的行为克隆（BC）。此时策略永远无法通过组合不同轨迹中的优秀局部决策来超越原始数据集的表现。</li>
+<li><strong>与大模型离线偏好对齐（DPO）的边界界定</strong>： DPO（Direct Preference Optimization）虽然也是在静态离线数据 <span class="math inline">\((x, y_w, y_l)\)</span> 上运行，但其数学本质是通过 Bradley-Terry 模型的解析反解，将策略本身当做隐式奖励，完全消除了 Critic 价值网络与时序 Bellman 递归自举。因此 DPO 不存在 TD 外推自激爆炸的问题，其核心挑战在于自回归采样分布与静态偏好数据之间的模式漂移。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>约束太弱会利用 Q 误差，太强则退化为行为克隆，无法超过数据策略。</p>
+<ul>
+<li><strong>连续动作空间采样积分开销</strong>： 在连续控制中，CQL 中的 <span class="math inline">\(\log \int \exp(Q(s, a)) da\)</span> 无法解析求解，必须在每个状态上额外随机采样 10～20 个潜在动作进行数值积分，导致前向与反向时间成倍增加。IQL（Implicit Q-Learning）通过 Expectile 损失巧妙规避了显式采样 OOD 动作，成为极具推理吞吐优势的高性能替代方案。</li>
+<li><strong>不确定性量化（Model-based Offline RL / MOPO）</strong>： 另一种做法是在世界模型（World Model）上训练并利用模型预测方差作为保守惩罚项：<span class="math inline">\(r_{\text{penalized}} = r - \beta \sigma(s, a)\)</span>。若对某个状态动作的模型认知不确定性极高，直接给予沉重负奖励，有效迫使智能体留在高确定性支持域内。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示离线-q-学习与离线偏好优化不同" class="level2">
@@ -624,7 +670,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐保守动作分数。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="f8495e63" class="cell" data-course_role="exercise">
+<div id="ba90a158" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> conservative_score(q_value, uncertainty, beta):</span>
@@ -680,7 +726,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="1a7f1693" class="cell" data-course_role="solution">
+<div id="ee16bcae" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> conservative_score(q_value, uncertainty, beta):</span>
@@ -694,15 +740,23 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>保守方法让数据分布外动作的价值更低，或把策略约束在行为策略附近；本质是为不确定性付费。</p>
+<ol type="1">
+<li><strong>输入阶段（静态转移数据流与分布外采样）</strong>：算法从预先采集好的静态离线经验池 <span class="math inline">\(\mathcal{D}\)</span> 中载入转移批次 <span class="math inline">\((s, a_{\text{data}}, r, s')\)</span>，同时基于当前待优化策略 <span class="math inline">\(\pi_\theta\)</span> 或均匀分布在状态 <span class="math inline">\(s\)</span> 附近采样一批潜在的候选动作集（包含大量未见过的 OOD 动作）。</li>
+<li><strong>状态变化阶段（保守惩罚注入与双向下界约束）</strong>：
+<ul>
+<li><strong>非对称正则化压制</strong>：Q 网络在计算标准 Bellman 均方误差的同时，挂载 CQL 正则项 <span class="math inline">\(\log \sum \exp(Q) - \mathbb{E}_{\mathcal{D}}[Q(s, a)]\)</span>。该项全局惩罚所有采样动作的 Q 值，并重点拉高离线数据集内真实行为动作的 Q 估值；</li>
+<li><strong>阻断外推自激</strong>：通过惩罚使得 Q 函数在整个动作空间形成一个“悲观下界”（Pessimistic Lower Bound），即便网络对 OOD 动作有潜在的高估偏置，也会被强大的正则化项强行压扁在数据集动作之下，彻底阻断了策略通过欺骗 Q 网络锁定虚假极值的途径。</li>
+</ul></li>
+<li><strong>输出阶段（安全价值面与支持集内最优策略）</strong>：输出受保守约束的价值网络 <span class="math inline">\(Q(s, a)\)</span> 与策略 <span class="math inline">\(\pi(s)\)</span>。策略在严格坚守离线数据高密度覆盖区（In-Distribution Support）的前提下，通过智能组合不同历史经验片段实现了超越任意单条行为轨迹的控制表现。</li>
+</ol>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>随机切分通常保持行为策略的数据分布，验证集没有覆盖新策略偏好的 OOD 动作；小 TD error 只说明已见分布内拟合好。应分析行为支持、策略偏移和任务外推，并在有权限的真实环境中验证，而不是把随机 holdout 当作部署保证。</p>
+<p>在离线数据集上做 8:2 随机划分划分出的 Hold-out 验证集，<strong>在统计本质上完全属于“行为策略分布 <span class="math inline">\(\pi_\beta\)</span>”的同分布样本，根本无法测试新策略 <span class="math inline">\(\pi_\theta\)</span> 是否会面临分布外（OOD）崩溃</strong>： 1. <strong>测试集与新策略分布严重错配</strong>：离线测试集中的所有 <span class="math inline">\((s, a)\)</span> 对全部是由历史行为策略（可能是一个人类专家或随机探索器）生成的。在测试集上验证 TD Error，仅仅检验了“模型在历史行为策略走过的老路上拟合得好不好”； 2. <strong>策略诱导的状态-动作分布漂移（Induced Distribution Shift）</strong>：强化学习的目标是训练一个比历史数据更好的新策略 <span class="math inline">\(\pi_\theta\)</span>。一旦新策略开始偏好某个历史数据中很少出现或从未出现的动作 <span class="math inline">\(a_{\text{new}} = \pi_\theta(s)\)</span>，它就会将智能体带入离线数据集中完全不存在的全新状态 <span class="math inline">\(s_{\text{new}}\)</span>； 3. <strong>外推盲区的隐蔽性</strong>：Q 网络在这些未曾见过的 <span class="math inline">\(s_{\text{new}}\)</span> 和 <span class="math inline">\(a_{\text{new}}\)</span> 上的预测可能是极其离谱的虚高（例如把悬崖边缘预测为 1000 分）。然而在随机划分的测试集里根本没有这种样本，因此测试集指标看起来一片大好，但一经实机部署就会由于连续触发 OOD 决策而瞬间车毁人亡。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>可以给策略目标加入行为克隆/行为策略约束，并随覆盖和不确定性调节权重；约束强时更接近数据策略，弱时更易利用 Q 误差。根据新策略在支持区域内的验证结果逐步放松，不把本课的简单惩罚分数当成可直接部署的安全算法。</p>
+<p>当离线数据覆盖面有限但仍希望策略有所突破时，工程上最标准的解决方案是<strong>在行为克隆（BC）与强化学习（RL）之间构建可平滑调谐的 Pareto 连续过渡机制（如 TD3+BC 框架）</strong>： 1. <strong>显式混合损失构建</strong>：在 Actor 策略优化目标中将 Q 导向梯度与 BC 均方差监督损失进行凸组合： <span class="math display">\[ \mathcal{L}_{\pi}(\theta) = - \frac{\lambda}{\frac{1}{N}\sum |Q(s, a)|} \mathbb{E}_{(s, a) \sim \mathcal{D}} [Q(s, \pi_\theta(s))] + \mathbb{E}_{(s, a) \sim \mathcal{D}} [\|\pi_\theta(s) - a\|^2] \]</span> 其中分母项是对 Q 值的绝对均值进行在线归一化，使得策略梯度与克隆误差处于完全相同的无量纲尺度； 2. <strong>连续滑动调节策略（Continuum Trade-off）</strong>： - <strong>当数据覆盖极度贫瘠（狭窄专家数据）</strong>：令 <span class="math inline">\(\lambda \to 0\)</span>。算法主要表现为纯粹的行为克隆（BC），死死锚定在已有专家演示上，杜绝任何利用 Q 误差进行危险外推的可能； - <strong>当数据多样性提高（混合质量数据）</strong>：逐步增大致信系数 <span class="math inline">\(\lambda\)</span>（如 <span class="math inline">\(\lambda = 2.5\)</span>）。此时 BC 项作为“强引力弹性安全绳”，允许策略在数据周围的小邻域内自由滑动，优先去选择那些被 Q 网络验证为高质量的动作，在离线数据拼图优势（Stitching）与保守安全之间取得最佳工程平衡。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1248,115 +1302,156 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>离线 RL 只能使用固定数据；策略若选择数据外动作，Q 网络可能给出无依据的乐观外推。</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>保守方法让数据分布外动作的价值更低，或把策略约束在行为策略附近；本质是为不确定性付费。</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>**离线强化学习（Offline RL / Batch RL）**是一种在零在线交互（No Active Exploration）前提下、纯粹利用预先收集好的固定静态转移数据集 $\mathcal{D} = <span class="sc">\{</span>(s, a, r, s')<span class="sc">\}</span>$ 来训练策略的强化学习范式。</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>在工业界落地（如自动驾驶、医疗诊疗、核电控制、大模型离线偏好对齐）中，在线环境交互要么极其危险、要么成本高昂不可行。然而，直接将标准在线 Off-Policy 算法（如 DQN、SAC）应用在静态数据集上会遭遇**灾难性的外推误差（Extrapolation Error）与分布漂移（Distribution Shift）**：</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**致命的开环恶性循环**：如果价值网络 $Q(s, a)$ 对某个在数据集 $\mathcal{D}$ 中从未出现过的**分布外动作（Out-of-Distribution, OOD）**产生了随机过高估计；</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>在线学习中，智能体会通过贪婪探索尝试该动作，环境立即给予真实惩罚并纠正 Q 值；</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>但在离线场景下，环境交互通道被彻底阻断，智能体**永远无法验证该动作的真实好坏**。策略优化时会因 $\arg\max_a Q(s, a)$ 精准锁定这些虚假高峰，而在 Bellman 自举递推 $y = r + \gamma Q(s', \pi(s'))$ 作用下，虚高估计会像滚雪球一样自我递归正反馈，导致 Q 估值发散暴增数千倍，最终学出的策略在实机部署时彻底崩溃。</span>
 <span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>离线强化学习解决的核心工程问题是：**如何在没有环境验证的严苛约束下，引入悲观保守主义（Pessimism in the face of uncertainty），既有效抑制 OOD 动作的外推虚高，又能充分发挥离线数据的“拼图缝合能力”（Stitching Property）以学出显著超越历史行为策略的最优控制**。</span>
 <span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>验证集 TD error 小不代表新策略安全，因为验证数据仍来自行为分布；必须分析 coverage。</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
 <span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>分布漂移与保守 Q 学习（CQL）约束流水线如图 9-1 与图 9-2 所示：</span>
 <span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>约束太弱会利用 Q 误差，太强则退化为行为克隆，无法超过数据策略。</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：离线 Q 学习与离线偏好优化不同</span></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>动作 A 的 Q=10、支持度惩罚=8，动作 B 的 Q=7、惩罚=1；教学分数选 B。下方 q−β×uncertainty 只是说明保守选择，不是完整 CQL 训练目标。</span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>LLM 的 DPO 通常直接使用固定 (x,y+,y−) 偏好对，不拟合 Q，也不显式训练 RM/做在线 rollout：</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>L_DPO=−logσ(β<span class="co">[</span><span class="ot">(logπθ(y+|x)−logπref(y+|x))−(logπθ(y−|x)−logπref(y−|x))</span><span class="co">]</span>)。</span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>这里的 log-prob 都是回答序列的 token log-prob 之和。DPO 不能简单等同于本课的离线 Q 学习；共同问题是固定数据的覆盖范围，而不是共享同一个 TD 外推机制。在线 PPO/GRPO 则重新采样并打分，可探索新回答，但支付生成、奖励和版本管理成本。定期刷新偏好数据的迭代 DPO 又是另一种数据工作流；在线/离线不由算法名唯一决定。</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**分布漂移与保守压制机理（图 9-1）**：</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>   在静态数据集支持集（In-Distribution）内部，由于有真实样本覆盖，Q 估值高度精准；但在广袤的数据覆盖盲区（OOD），传统深度网络由于未受任何边界锚定约束，往往存在病态的虚假过估计波峰。</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>   **保守 Q 学习（Conservative Q-Learning, CQL, Kumar et al., 2020）**的核心思想是对动作价值面施加非对称正则化：</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**压低未知（Push Down）**：对状态 $s$ 下所有可能动作的 Q 值实施整体抑制；</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**拉高已知（Push Up）**：针对数据集中真实记录的行为动作 $(s, a \sim \mathcal{D})$ 进行 Q 值补偿。</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**CQL 联合损失函数数学展开（图 9-2）**：</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>   定义保守目标函数：</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>   $$ \min_Q \alpha \cdot \mathbb{E}_{s \sim \mathcal{D}} \left[ \log \sum_{a \in \mathcal{A}} \exp(Q(s, a)) - \mathbb{E}_{a \sim \pi_\beta(a \mid s)} [Q(s, a)] \right] + \frac{1}{2} \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left<span class="co">[</span><span class="ot"> (Q(s, a) - \mathcal{B}^* Q(s, a))^2 \right</span><span class="co">]</span> $$</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>   其中 $\log \sum \exp(Q)$ 是对动作空间的软最大化（LogSumExp），对所有动作施加惩罚；第二项则将数据集中行为策略 $\pi_\beta$ 的动作拉回。数学上严格保证：在适当的 $\alpha$ 下，CQL 估计的价值函数在策略期望下严格是真实最优价值的**保守下界（Pessimistic Lower Bound: $\hat{Q}^\pi(s, a) \le Q^\pi(s, a)$）**，彻底免疫外推爆炸。</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**策略约束法（Policy Constraint, 如 TD3+BC）**：</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>   除了在价值层面对 Q 值做悲观惩罚，另一主流工程路线是在策略优化层直接约束 Actor 不能脱离行为策略分布。例如 TD3+BC 在标准策略梯度上直接挂载行为克隆（Behavior Cloning）均方差惩罚：</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>   $$ \pi = \arg\max_\theta \mathbb{E}_{(s, a) \sim \mathcal{D}} \left<span class="co">[</span><span class="ot"> \lambda Q(s, \pi(s)) - (\pi(s) - a)^2 \right</span><span class="co">]</span> $$</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>   通过系数 $\lambda$ 灵活调节对 Q 导向探索与行为克隆保底之间的权重。</span>
 <span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>补齐保守动作分数。</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
 <span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> conservative_score(q_value, uncertainty, beta):</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""不确定性越高，分数越低。"""</span></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    <span class="co"># TODO：只补齐下面这个表达式。</span></span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> ______</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">10.</span>, <span class="fl">4.</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">2.</span></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">7.</span>, <span class="fl">.5</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">6.</span></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a>运行本单元格；所有 <span class="in">`assert`</span> 必须通过。另手工构造一个边界输入，解释预期结果。</span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“离线 RL 与分布外动作”的工作机制。</span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a>为什么在离线测试集上随机切分不能证明部署策略不会 OOD？</span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a>数据覆盖有限但需要一定改进时，如何在 BC 与 RL 之间做连续取舍？</span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**离线测试集 Hold-out 验证的虚假安全陷阱**：</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  在经典监督学习中，若在静态数据集中随机划分 20% 作为测试集且均方差极小，通常代表泛化良好。**但在离线 RL 中，随机 Hold-out 测试集具有完全相同的行为策略分布 $\pi_\beta$！**测试集 TD Error 极小只能证明模型在历史行为轨迹内拟合精确，完全无法反映当策略执行 $\arg\max_a Q(s, a)$ 选出它最喜欢的 OOD 动作时是否存在灾难性虚高。必须结合离线策略评估（OPE）与特征支持度（Support Coverage）综合诊断。</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**保守过度导致的“行为克隆退化”**：</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>  若惩罚系数 $\alpha$ 设置得过于激进，算法会把任何微弱的偏离都判定为极度危险，导致优化过程彻底退化为简单的行为克隆（BC）。此时策略永远无法通过组合不同轨迹中的优秀局部决策来超越原始数据集的表现。</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**与大模型离线偏好对齐（DPO）的边界界定**：</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>  DPO（Direct Preference Optimization）虽然也是在静态离线数据 $(x, y_w, y_l)$ 上运行，但其数学本质是通过 Bradley-Terry 模型的解析反解，将策略本身当做隐式奖励，完全消除了 Critic 价值网络与时序 Bellman 递归自举。因此 DPO 不存在 TD 外推自激爆炸的问题，其核心挑战在于自回归采样分布与静态偏好数据之间的模式漂移。</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**连续动作空间采样积分开销**：</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>  在连续控制中，CQL 中的 $\log \int \exp(Q(s, a)) da$ 无法解析求解，必须在每个状态上额外随机采样 10～20 个潜在动作进行数值积分，导致前向与反向时间成倍增加。IQL（Implicit Q-Learning）通过 Expectile 损失巧妙规避了显式采样 OOD 动作，成为极具推理吞吐优势的高性能替代方案。</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**不确定性量化（Model-based Offline RL / MOPO）**：</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>  另一种做法是在世界模型（World Model）上训练并利用模型预测方差作为保守惩罚项：$r_{\text{penalized}} = r - \beta \sigma(s, a)$。若对某个状态动作的模型认知不确定性极高，直接给予沉重负奖励，有效迫使智能体留在高确定性支持域内。</span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：离线 Q 学习与离线偏好优化不同</span></span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>动作 A 的 Q=10、支持度惩罚=8，动作 B 的 Q=7、惩罚=1；教学分数选 B。下方 q−β×uncertainty 只是说明保守选择，不是完整 CQL 训练目标。</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>LLM 的 DPO 通常直接使用固定 (x,y+,y−) 偏好对，不拟合 Q，也不显式训练 RM/做在线 rollout：</span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>L_DPO=−logσ(β<span class="co">[</span><span class="ot">(logπθ(y+|x)−logπref(y+|x))−(logπθ(y−|x)−logπref(y−|x))</span><span class="co">]</span>)。</span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>这里的 log-prob 都是回答序列的 token log-prob 之和。DPO 不能简单等同于本课的离线 Q 学习；共同问题是固定数据的覆盖范围，而不是共享同一个 TD 外推机制。在线 PPO/GRPO 则重新采样并打分，可探索新回答，但支付生成、奖励和版本管理成本。定期刷新偏好数据的迭代 DPO 又是另一种数据工作流；在线/离线不由算法名唯一决定。</span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>补齐保守动作分数。</span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> conservative_score(q_value, uncertainty, beta):</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""不确定性越高，分数越低。"""</span></span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>    <span class="co"># TODO：只补齐下面这个表达式。</span></span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> ______</span>
 <span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">10.</span>, <span class="fl">4.</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">2.</span></span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">7.</span>, <span class="fl">.5</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">6.</span></span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
 <span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>运行本单元格；所有 <span class="in">`assert`</span> 必须通过。另手工构造一个边界输入，解释预期结果。</span>
 <span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“离线 RL 与分布外动作”的工作机制。</span>
 <span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> conservative_score(q_value, uncertainty, beta):</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""不确定性越高，分数越低。"""</span></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 参考实现：表达式直接对应上文不变量。</span></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> q_value <span class="op">-</span> beta <span class="op">*</span> uncertainty</span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">10.</span>, <span class="fl">4.</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">2.</span></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">7.</span>, <span class="fl">.5</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">6.</span></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>保守方法让数据分布外动作的价值更低，或把策略约束在行为策略附近；本质是为不确定性付费。</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>随机切分通常保持行为策略的数据分布，验证集没有覆盖新策略偏好的 OOD 动作；小 TD error 只说明已见分布内拟合好。应分析行为支持、策略偏移和任务外推，并在有权限的真实环境中验证，而不是把随机 holdout 当作部署保证。</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>为什么在离线测试集上随机切分不能证明部署策略不会 OOD？</span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>数据覆盖有限但需要一定改进时，如何在 BC 与 RL 之间做连续取舍？</span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>可以给策略目标加入行为克隆/行为策略约束，并随覆盖和不确定性调节权重；约束强时更接近数据策略，弱时更易利用 Q 误差。根据新策略在支持区域内的验证结果逐步放松，不把本课的简单惩罚分数当成可直接部署的安全算法。</span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CQL</span><span class="co">](https://arxiv.org/abs/2006.04779)</span></span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">DPO（§4）</span><span class="co">](https://arxiv.org/html/2305.18290v2)</span></span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>区分数据采样方式、优化目标与部署覆盖，避免把不同离线方法混为一谈。</span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> conservative_score(q_value, uncertainty, beta):</span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""不确定性越高，分数越低。"""</span></span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 参考实现：表达式直接对应上文不变量。</span></span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> q_value <span class="op">-</span> beta <span class="op">*</span> uncertainty</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">10.</span>, <span class="fl">4.</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">2.</span></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> conservative_score(<span class="fl">7.</span>, <span class="fl">.5</span>, <span class="fl">2.</span>) <span class="op">==</span> <span class="fl">6.</span></span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（静态转移数据流与分布外采样）**：算法从预先采集好的静态离线经验池 $\mathcal{D}$ 中载入转移批次 $(s, a_{\text{data}}, r, s')$，同时基于当前待优化策略 $\pi_\theta$ 或均匀分布在状态 $s$ 附近采样一批潜在的候选动作集（包含大量未见过的 OOD 动作）。</span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（保守惩罚注入与双向下界约束）**：</span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**非对称正则化压制**：Q 网络在计算标准 Bellman 均方误差的同时，挂载 CQL 正则项 $\log \sum \exp(Q) - \mathbb{E}_{\mathcal{D}}<span class="co">[</span><span class="ot">Q(s, a)</span><span class="co">]</span>$。该项全局惩罚所有采样动作的 Q 值，并重点拉高离线数据集内真实行为动作的 Q 估值；</span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**阻断外推自激**：通过惩罚使得 Q 函数在整个动作空间形成一个“悲观下界”（Pessimistic Lower Bound），即便网络对 OOD 动作有潜在的高估偏置，也会被强大的正则化项强行压扁在数据集动作之下，彻底阻断了策略通过欺骗 Q 网络锁定虚假极值的途径。</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（安全价值面与支持集内最优策略）**：输出受保守约束的价值网络 $Q(s, a)$ 与策略 $\pi(s)$。策略在严格坚守离线数据高密度覆盖区（In-Distribution Support）的前提下，通过智能组合不同历史经验片段实现了超越任意单条行为轨迹的控制表现。</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>在离线数据集上做 8:2 随机划分划分出的 Hold-out 验证集，**在统计本质上完全属于“行为策略分布 $\pi_\beta$”的同分布样本，根本无法测试新策略 $\pi_\theta$ 是否会面临分布外（OOD）崩溃**：</span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**测试集与新策略分布严重错配**：离线测试集中的所有 $(s, a)$ 对全部是由历史行为策略（可能是一个人类专家或随机探索器）生成的。在测试集上验证 TD Error，仅仅检验了“模型在历史行为策略走过的老路上拟合得好不好”；</span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**策略诱导的状态-动作分布漂移（Induced Distribution Shift）**：强化学习的目标是训练一个比历史数据更好的新策略 $\pi_\theta$。一旦新策略开始偏好某个历史数据中很少出现或从未出现的动作 $a_{\text{new}} = \pi_\theta(s)$，它就会将智能体带入离线数据集中完全不存在的全新状态 $s_{\text{new}}$；</span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**外推盲区的隐蔽性**：Q 网络在这些未曾见过的 $s_{\text{new}}$ 和 $a_{\text{new}}$ 上的预测可能是极其离谱的虚高（例如把悬崖边缘预测为 1000 分）。然而在随机划分的测试集里根本没有这种样本，因此测试集指标看起来一片大好，但一经实机部署就会由于连续触发 OOD 决策而瞬间车毁人亡。</span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a>当离线数据覆盖面有限但仍希望策略有所突破时，工程上最标准的解决方案是**在行为克隆（BC）与强化学习（RL）之间构建可平滑调谐的 Pareto 连续过渡机制（如 TD3+BC 框架）**：</span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**显式混合损失构建**：在 Actor 策略优化目标中将 Q 导向梯度与 BC 均方差监督损失进行凸组合：</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a>   $$ \mathcal{L}_{\pi}(\theta) = - \frac{\lambda}{\frac{1}{N}\sum |Q(s, a)|} \mathbb{E}_{(s, a) \sim \mathcal{D}} [Q(s, \pi_\theta(s))] + \mathbb{E}_{(s, a) \sim \mathcal{D}} [\|\pi_\theta(s) - a<span class="sc">\|</span>^2] $$</span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a>   其中分母项是对 Q 值的绝对均值进行在线归一化，使得策略梯度与克隆误差处于完全相同的无量纲尺度；</span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**连续滑动调节策略（Continuum Trade-off）**：</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**当数据覆盖极度贫瘠（狭窄专家数据）**：令 $\lambda \to 0$。算法主要表现为纯粹的行为克隆（BC），死死锚定在已有专家演示上，杜绝任何利用 Q 误差进行危险外推的可能；</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**当数据多样性提高（混合质量数据）**：逐步增大致信系数 $\lambda$（如 $\lambda = 2.5$）。此时 BC 项作为“强引力弹性安全绳”，允许策略在数据周围的小邻域内自由滑动，优先去选择那些被 Q 网络验证为高质量的动作，在离线数据拼图优势（Stitching）与保守安全之间取得最佳工程平衡。</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CQL</span><span class="co">](https://arxiv.org/abs/2006.04779)</span></span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">DPO（§4）</span><span class="co">](https://arxiv.org/html/2305.18290v2)</span></span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a>区分数据采样方式、优化目标与部署覆盖，避免把不同离线方法混为一谈。</span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

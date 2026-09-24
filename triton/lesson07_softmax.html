@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -588,31 +617,50 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>softmax 需要行 max、指数和 sum 三步归约；Triton 将整行保留在片上，避免物化中间 tensor。</p>
+<p>Softmax 是 Transformer 注意力机制（Attention Score Normalization）与多分类输出层的绝对核心。数学公式为： <span class="math display">\[ \text{Softmax}(x)_i = \frac{e^{x_i}}{\sum_{j=0}^{N-1} e^{x_j}} \]</span> 在浮点计算机体系结构中，直接计算 <span class="math inline">\(e^{x_i}\)</span> 极其危险：当 <span class="math inline">\(x_i &gt; 88.7\)</span>（对于 FP32）时，<span class="math inline">\(e^{x_i}\)</span> 会直接上溢出（Overflow）为 <code>+Inf</code>，导致除法产生 <span class="math inline">\(\text{Inf} / \text{Inf} = \text{NaN}\)</span>。 因此，业界普遍采用<strong>数值稳定版 Softmax（Safe Softmax）</strong>： <span class="math display">\[ m = \max_{j} x_j, \quad \text{Softmax}(x)_i = \frac{e^{x_i - m}}{\sum_{j=0}^{N-1} e^{x_j - m}} \]</span> 由于 <span class="math inline">\(x_i - m \le 0\)</span>，分子最大仅为 <span class="math inline">\(e^0 = 1.0\)</span>，彻底消除了上溢出风险。 在传统 PyTorch 执行流中，Safe Softmax 需要连续启动 4 个独立的 GPU 内核（Max 规约 <span class="math inline">\(\to\)</span> Sub 广播 <span class="math inline">\(\to\)</span> Exp 逐元素 <span class="math inline">\(\to\)</span> Sum 规约 <span class="math inline">\(\to\)</span> Div 归一化），中间张量多次在 HBM 显存与计算单元之间来回读写（如图 7-1 与图 7-2 所示）。 本课解决的核心工程问题是：<strong>在 Triton 中实现单 Program 容纳整行的全融合 Safe Softmax，利用负无穷大 <span class="math inline">\(-\infty\)</span> 作为 Padding 单位元实现双重数学保护（既不污染 Max，又使指数项自然归零），获得超越原生 PyTorch 数倍的极速性能</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>padding load 用 -inf，使其不影响 max 且 exp 后自然为 0；减 max 后再指数。</p>
+<p>融合 Softmax 的片上数据流与执行时序如图 7-1 与图 7-2 所示：</p>
+<ol type="1">
+<li><strong>带 <span class="math inline">\(-\infty\)</span> 的向量化加载</strong>： 以行优先划分网格 <code>grid = (M,)</code>，每行分配一个 Program 块，<code>BLOCK = triton.next_power_of_2(N)</code>。 执行 <code>values = tl.load(x + row * stride_m + cols, mask=mask, other=-float("inf"))</code>。 有效位置装载真实的 Logits；超出 <span class="math inline">\(N\)</span> 的 Padding 位置填充最大值代数单位元 <span class="math inline">\(-\infty\)</span>。</li>
+<li><strong>片上防溢出局部最大值（Local Max Reduction）</strong>： 调用 <code>m = tl.max(values, axis=0)</code>。由于任何实数与 <span class="math inline">\(-\infty\)</span> 取最大值均保持实数不变（<span class="math inline">\(\max(x, -\infty) = x\)</span>），Padding 的 <span class="math inline">\(-\infty\)</span> 完全不会干扰真实最大值的判定。</li>
+<li><strong>中心化与指数计算（Exp Transformation）</strong>： 执行广播减法：<code>shifted = values - m</code>。
+<ul>
+<li>对有效元素 <span class="math inline">\(i &lt; N\)</span>：<span class="math inline">\(x_i - m \le 0\)</span>，数值稳定；</li>
+<li>对 Padding 元素 <span class="math inline">\(i \ge N\)</span>：<span class="math inline">\(-\infty - m = -\infty\)</span>。 随后执行指数运算：<code>numer = tl.exp(shifted)</code>。</li>
+<li>对有效元素：<span class="math inline">\(e^{x_i - m} \in (0, 1]\)</span>；</li>
+<li>对 Padding 元素：<span class="math inline">\(e^{-\infty} = 0.0\)</span>！ 这一代数性质极为优美：Padding 位置在经过指数变换后，<strong>自动且自然地转化为了加法的绝对零元 <span class="math inline">\(0.0\)</span></strong>，无需调用额外的 <code>tl.where</code> 掩码！</li>
+</ul></li>
+<li><strong>分母求和与除法归一化（Sum &amp; Normalization）</strong>： 调用 <code>tl.sum(numer, axis=0)</code>。由于 Padding 位置上的指数项恰好是 <span class="math inline">\(0.0\)</span>，树状折半累加所得的分母 <span class="math inline">\(\sum e^{x_j - m}\)</span> 严格精准，不含任何虚假能量。 最终执行 <code>probs = numer / denom</code>，并在 <code>tl.store</code> 施加 <code>mask=mask</code> 仅将前 <span class="math inline">\(N\)</span> 个有效概率写回全局显存。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>全 mask 行会产生 -inf-(-inf)=NaN；普通 dense 行要求 N&gt;0，attention mask 需专门处理。</p>
+<ul>
+<li><strong>Padding 误填 0.0 的灾难性后果</strong>： 若在 <code>tl.load</code> 中将 <code>other</code> 误写为 0.0： 如果一整行 Logits 全为负数（例如在语言模型尾部或带惩罚项的打分中，所有数值在 <span class="math inline">\([-15.0, -10.0]\)</span> 之间），则 Padding 的 0.0 会反客为主被判定为整行的最大值 <span class="math inline">\(m = 0.0\)</span>。 更严重的是，在后续求指数时，<span class="math inline">\(e^0 = 1.0\)</span>。每个 Padding lane 都会贡献数值为 1.0 的虚假概率分母，导致真实分子的概率被严重稀释，产生完全错误的概率分布。</li>
+<li><strong>全 Mask 行产生的 NaN 奇点</strong>： 若在 Transformer Attention 中某一整行全部被 Mask 掉（全为 <span class="math inline">\(-\infty\)</span>），则行最大值也是 <span class="math inline">\(-\infty\)</span>。此时执行 <code>values - max</code> 会引发 <span class="math inline">\(-\infty - (-\infty) = \text{NaN}\)</span>。因此对于可能出现全 Mask 行的因果注意核，必须加入条件保护或重置分支。</li>
+<li><strong>Underflow 与极小值裁剪</strong>： 虽然减去最大值防止了上溢（Overflow），但若某元素远小于最大值（例如 <span class="math inline">\(x_i - m &lt; -88.0\)</span>），<span class="math inline">\(e^{x_i - m}\)</span> 会下溢（Underflow）为 0.0。在概率语义中，极小分量下溢为 0.0 是安全且符合预期的。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>单 program 一行适合中等 N；超宽 softmax 需分块或专用算法。</p>
+<ul>
+<li><strong>片上寄存器全融合的极致带宽收益</strong>： 如图 7-1 的实测基准所示，原生 PyTorch 执行 Softmax 需要启动 Max、Sub、Exp、Sum、Div 多个内核，反复向显存读写多次中间张量，访存总量高达 <span class="math inline">\(O(5MN)\)</span>。 而在 Triton 中，整个计算流完全在 SM 片上寄存器内部以流水线形式闭环，输入数据仅读取 1 次，输出概率仅写回 1 次，全局访存量骤降为 <span class="math inline">\(2MN\)</span>，在 Memory-bound 场景下通常能取得 2~4 倍的加速比。</li>
+<li><strong>单 Program 一行 vs FlashAttention 循环 Online Softmax</strong>： 本课的实现要求单 Program 的 <code>BLOCK</code> 能容纳一整行。当序列长度 <span class="math inline">\(N\)</span> 极大（如 LLM 长文本 <span class="math inline">\(N = 32k, 128k\)</span>）时，单 Program 无法分配这么大的静态向量，必须转向类似 FlashAttention 的 Online Softmax 算法（外层分块迭代并维护动态归一化系数 <span class="math inline">\((m_{new}, d_{new})\)</span>）。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>[1000,1001] 减 max 后 [-1,0]；直接 exp 会溢出。</p>
+<p>以输入行 <span class="math inline">\(x = [-10.0, -20.0]\)</span>、<span class="math inline">\(N = 2, \text{BLOCK} = 4\)</span> 为例： 1. <strong>加载状态</strong>：<code>values = [-10.0, -20.0, -inf, -inf]</code>。 2. <strong>求最大值</strong>：<span class="math inline">\(m = \max(-10, -20, -\infty, -\infty) = -10.0\)</span>。 3. <strong>中心化与指数</strong>： - <code>shifted = [-10 - (-10), -20 - (-10), -inf - (-10), -inf - (-10)] = [0.0, -10.0, -inf, -inf]</code> - <code>numer = exp(shifted) = [1.0, 0.0000454, 0.0, 0.0]</code>。注意后两位自动变为精确的 0.0！ 4. <strong>分母与归一化</strong>： - 分母求和：<span class="math inline">\(1.0 + 0.0000454 + 0.0 + 0.0 \approx 1.0000454\)</span>。 - <code>probs = [0.99995, 0.000045, 0.0, 0.0]</code>。 5. <strong>写回</strong>：<code>mask</code> 截断后 2 位，仅写回前两项概率，与数学真实解分毫不差。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 padding 值。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="d390f9a9" class="cell" data-course_role="exercise">
+<div id="4861b94e" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -687,7 +735,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="611b42b0" class="cell" data-course_role="solution">
+<div id="df9c5e23" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -720,15 +768,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>padding load 用 -inf，使其不影响 max 且 exp 后自然为 0；减 max 后再指数。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（网格绑定与 <span class="math inline">\(-\infty\)</span> 代数保护）</strong>：Python 层按矩阵行数发射一维网格，每个 Program 块负责独立的一行，列尺寸扩展至 2 的幂次。在 <code>mask = cols &lt; N</code> 保护下，通过带 <code>other=-float("inf")</code> 的 <code>tl.load</code> 加载输入，超出 <span class="math inline">\(N\)</span> 的 Padding 位置在寄存器中赋予负无穷大 <span class="math inline">\(-\infty\)</span>。 2. <strong>状态变化阶段（行内三步规约与指数归零）</strong>： - 步骤一（最大值规约）：调用 <code>tl.max</code> 抓取有效特征的真实最大值 <span class="math inline">\(m\)</span>。由于 <span class="math inline">\(-\infty\)</span> 是最大值运算的单位元，Padding 元素完全隐形。 - 步骤二（数值稳定中心化与指数）：寄存器广播执行 <code>values - m</code>，有效值被平移至 <span class="math inline">\((-\infty, 0]\)</span> 区间杜绝指数上溢，而 Padding 位置仍保持为 <span class="math inline">\(-\infty\)</span>。随后调用 <code>tl.exp</code>，有效项映射为 <span class="math inline">\((0, 1]\)</span>，Padding 项由于 <span class="math inline">\(e^{-\infty} = 0.0\)</span> 自动蜕变为加法零元。 - 步骤三（分母求和与归一化）：调用 <code>tl.sum</code> 对指数项求和得到准确分母，随后向量除法计算出真实概率分布。 3. <strong>输出阶段（带掩码安全写回）</strong>：通过 <code>tl.store</code> 配合 <code>mask</code> 仅将有效的前 <span class="math inline">\(N\)</span> 个归一化概率写回目标显存，Padding 位置不触发任何显存写事务。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：全 mask 行会产生 -inf-(-inf)=NaN；普通 dense 行要求 N&gt;0，attention mask 需专门处理。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>若在 <code>tl.load</code> 时将 Padding 的默认填充值错误设为 <code>0.0</code>： 当输入的 Logits 行向量全部为负数时（例如在分类网络低概率类别或大语言模型惩罚打分中，有效 Logits 全为负值，如 <span class="math inline">\([-5.0, -8.0, -3.0]\)</span>）： 1. <strong>最大值被错误篡改</strong>：由于所有真实元素都小于 0，而 Padding 元素为 0.0，在执行 <code>tl.max</code> 时，虚构的 0.0 会被强行误判为整行的最大值（即 <span class="math inline">\(m = 0.0\)</span> 而非真实的 <span class="math inline">\(-3.0\)</span>）。 2. <strong>指数项虚假爆发</strong>：在计算 <span class="math inline">\(e^{x_i - m}\)</span> 时，Padding 处的计算为 <span class="math inline">\(e^{0.0 - 0.0} = e^0 = 1.0\)</span>。每个 Padding lane 都会产生数值为 1.0 的巨大虚假概率分子。 3. <strong>真实概率被严重稀释崩溃</strong>：在分母求和时，累加器不仅加进了真实分子的微小指数值（<span class="math inline">\(e^{-5} \approx 0.0067\)</span>），还累加进了 <span class="math inline">\((\text{BLOCK} - N)\)</span> 个高达 1.0 的虚假数值。最终真实有效项的 Softmax 概率被大幅摊薄数百倍，输出完全错误的预测结果。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：单 program 一行适合中等 N；超宽 softmax 需分块或专用算法。</p>
+<p>在 Transformer 的自注意力计算（Self-Attention）中，因果掩码（Causal Mask）要求当前 Query 位置 <span class="math inline">\(i\)</span> 只能看到小于等于自身位置的 Key 位置 <span class="math inline">\(j\)</span>（即 <span class="math inline">\(j \le i\)</span>），未来位置（<span class="math inline">\(j &gt; i\)</span>）必须被强行屏蔽。 将其融入同一个 Softmax Kernel 的工程方法为： 1. <strong>获取行内逻辑位置</strong>： 在 Kernel 中，当前 Program 处理的行索引 <code>row</code> 对应 Query 的序列位置 <span class="math inline">\(i\)</span>，列索引 <code>cols = tl.arange(0, BLOCK)</code> 对应 Key 的序列位置 <span class="math inline">\(j\)</span>。 2. <strong>构造因果组合谓词</strong>： 将张量尺寸边界与因果未来位置结合为复合掩码： <code>causal_mask = (cols &lt; N) &amp; (cols &lt;= row)</code> 3. <strong>统一注入 <span class="math inline">\(-\infty\)</span></strong>： 在 <code>tl.load</code> 加载输入 Attention 权重时直接施加此复合掩码： <code>values = tl.load(q_k_ptr + row * stride_m + cols, mask=causal_mask, other=-float("inf"))</code> 被屏蔽的未来位置（<span class="math inline">\(j &gt; i\)</span>）与越界的 Padding 位置（<span class="math inline">\(j \ge N\)</span>）均被赋为 <span class="math inline">\(-\infty\)</span>。在后续执行 Safe Softmax 的减 Max 与 Exp 计算时，<span class="math inline">\(e^{-\infty}\)</span> 自动变为 0.0，从而在同一个 Kernel 内以零显存读写代价同时完成了因果掩码与 Softmax 归一化。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1262,149 +1310,214 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>softmax 需要行 max、指数和 sum 三步归约；Triton 将整行保留在片上，避免物化中间 tensor。</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>padding load 用 -inf，使其不影响 max 且 exp 后自然为 0；减 max 后再指数。</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>全 mask 行会产生 -inf-(-inf)=NaN；普通 dense 行要求 N&gt;0，attention mask 需专门处理。</span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>单 program 一行适合中等 N；超宽 softmax 需分块或专用算法。</span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="co">[</span><span class="ot">1000,1001</span><span class="co">]</span> 减 max 后 <span class="co">[</span><span class="ot">-1,0</span><span class="co">]</span>；直接 exp 会溢出。</span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>补齐 padding 值。</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span>______)  <span class="co"># </span><span class="al">TODO</span><span class="co">: max 的单位元</span></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> values <span class="op">-</span> tl.<span class="bu">max</span>(values, axis<span class="op">=</span><span class="dv">0</span>)</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>    numer <span class="op">=</span> tl.exp(values)</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    probs <span class="op">=</span> numer <span class="op">/</span> tl.<span class="bu">sum</span>(numer, axis<span class="op">=</span><span class="dv">0</span>)</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row <span class="op">*</span> N <span class="op">+</span> cols, probs, mask<span class="op">=</span>mask)</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax(x):</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    softmax_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">2</span>, <span class="dv">7</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">8</span>, <span class="dv">256</span>)):</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>) <span class="op">*</span> <span class="dv">20</span></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(softmax(x), torch.softmax(x, <span class="dv">1</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“稳定 Softmax 与融合”的工作机制。</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a>padding 用 0 在 logits 全负时会造成什么错误？</span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>如何把 causal mask 融入同一个 kernel？</span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>Softmax 是 Transformer 注意力机制（Attention Score Normalization）与多分类输出层的绝对核心。数学公式为：</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>$$ \text{Softmax}(x)_i = \frac{e^{x_i}}{\sum_{j=0}^{N-1} e^{x_j}} $$</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>在浮点计算机体系结构中，直接计算 $e^{x_i}$ 极其危险：当 $x_i &gt; 88.7$（对于 FP32）时，$e^{x_i}$ 会直接上溢出（Overflow）为 <span class="in">`+Inf`</span>，导致除法产生 $\text{Inf} / \text{Inf} = \text{NaN}$。</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>因此，业界普遍采用**数值稳定版 Softmax（Safe Softmax）**：</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>$$ m = \max_{j} x_j, \quad \text{Softmax}(x)_i = \frac{e^{x_i - m}}{\sum_{j=0}^{N-1} e^{x_j - m}} $$</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>由于 $x_i - m \le 0$，分子最大仅为 $e^0 = 1.0$，彻底消除了上溢出风险。</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>在传统 PyTorch 执行流中，Safe Softmax 需要连续启动 4 个独立的 GPU 内核（Max 规约 $\to$ Sub 广播 $\to$ Exp 逐元素 $\to$ Sum 规约 $\to$ Div 归一化），中间张量多次在 HBM 显存与计算单元之间来回读写（如图 7-1 与图 7-2 所示）。</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**在 Triton 中实现单 Program 容纳整行的全融合 Safe Softmax，利用负无穷大 $-\infty$ 作为 Padding 单位元实现双重数学保护（既不污染 Max，又使指数项自然归零），获得超越原生 PyTorch 数倍的极速性能**。</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>融合 Softmax 的片上数据流与执行时序如图 7-1 与图 7-2 所示：</span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**带 $-\infty$ 的向量化加载**：</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>   以行优先划分网格 <span class="in">`grid = (M,)`</span>，每行分配一个 Program 块，<span class="in">`BLOCK = triton.next_power_of_2(N)`</span>。</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>   执行 <span class="in">`values = tl.load(x + row * stride_m + cols, mask=mask, other=-float("inf"))`</span>。</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>   有效位置装载真实的 Logits；超出 $N$ 的 Padding 位置填充最大值代数单位元 $-\infty$。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**片上防溢出局部最大值（Local Max Reduction）**：</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>   调用 <span class="in">`m = tl.max(values, axis=0)`</span>。由于任何实数与 $-\infty$ 取最大值均保持实数不变（$\max(x, -\infty) = x$），Padding 的 $-\infty$ 完全不会干扰真实最大值的判定。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**中心化与指数计算（Exp Transformation）**：</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>   执行广播减法：<span class="in">`shifted = values - m`</span>。</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对有效元素 $i &lt; N$：$x_i - m \le 0$，数值稳定；</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对 Padding 元素 $i \ge N$：$-\infty - m = -\infty$。</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>   随后执行指数运算：<span class="in">`numer = tl.exp(shifted)`</span>。</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对有效元素：$e^{x_i - m} \in (0, 1]$；</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对 Padding 元素：$e^{-\infty} = 0.0$！</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>   这一代数性质极为优美：Padding 位置在经过指数变换后，**自动且自然地转化为了加法的绝对零元 $0.0$**，无需调用额外的 <span class="in">`tl.where`</span> 掩码！</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>**分母求和与除法归一化（Sum &amp; Normalization）**：</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>   调用 <span class="in">`tl.sum(numer, axis=0)`</span>。由于 Padding 位置上的指数项恰好是 $0.0$，树状折半累加所得的分母 $\sum e^{x_j - m}$ 严格精准，不含任何虚假能量。</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>   最终执行 <span class="in">`probs = numer / denom`</span>，并在 <span class="in">`tl.store`</span> 施加 <span class="in">`mask=mask`</span> 仅将前 $N$ 个有效概率写回全局显存。</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Padding 误填 0.0 的灾难性后果**：</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>  若在 <span class="in">`tl.load`</span> 中将 <span class="in">`other`</span> 误写为 0.0：</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>  如果一整行 Logits 全为负数（例如在语言模型尾部或带惩罚项的打分中，所有数值在 $<span class="co">[</span><span class="ot">-15.0, -10.0</span><span class="co">]</span>$ 之间），则 Padding 的 0.0 会反客为主被判定为整行的最大值 $m = 0.0$。</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>  更严重的是，在后续求指数时，$e^0 = 1.0$。每个 Padding lane 都会贡献数值为 1.0 的虚假概率分母，导致真实分子的概率被严重稀释，产生完全错误的概率分布。</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**全 Mask 行产生的 NaN 奇点**：</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>  若在 Transformer Attention 中某一整行全部被 Mask 掉（全为 $-\infty$），则行最大值也是 $-\infty$。此时执行 <span class="in">`values - max`</span> 会引发 $-\infty - (-\infty) = \text{NaN}$。因此对于可能出现全 Mask 行的因果注意核，必须加入条件保护或重置分支。</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Underflow 与极小值裁剪**：</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>  虽然减去最大值防止了上溢（Overflow），但若某元素远小于最大值（例如 $x_i - m &lt; -88.0$），$e^{x_i - m}$ 会下溢（Underflow）为 0.0。在概率语义中，极小分量下溢为 0.0 是安全且符合预期的。</span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**片上寄存器全融合的极致带宽收益**：</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>  如图 7-1 的实测基准所示，原生 PyTorch 执行 Softmax 需要启动 Max、Sub、Exp、Sum、Div 多个内核，反复向显存读写多次中间张量，访存总量高达 $O(5MN)$。</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>  而在 Triton 中，整个计算流完全在 SM 片上寄存器内部以流水线形式闭环，输入数据仅读取 1 次，输出概率仅写回 1 次，全局访存量骤降为 $2MN$，在 Memory-bound 场景下通常能取得 2~4 倍的加速比。</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**单 Program 一行 vs FlashAttention 循环 Online Softmax**：</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>  本课的实现要求单 Program 的 <span class="in">`BLOCK`</span> 能容纳一整行。当序列长度 $N$ 极大（如 LLM 长文本 $N = 32k, 128k$）时，单 Program 无法分配这么大的静态向量，必须转向类似 FlashAttention 的 Online Softmax 算法（外层分块迭代并维护动态归一化系数 $(m_{new}, d_{new})$）。</span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>以输入行 $x = <span class="co">[</span><span class="ot">-10.0, -20.0</span><span class="co">]</span>$、$N = 2, \text{BLOCK} = 4$ 为例：</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**加载状态**：<span class="in">`values = [-10.0, -20.0, -inf, -inf]`</span>。</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**求最大值**：$m = \max(-10, -20, -\infty, -\infty) = -10.0$。</span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**中心化与指数**：</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`shifted = [-10 - (-10), -20 - (-10), -inf - (-10), -inf - (-10)] = [0.0, -10.0, -inf, -inf]`</span></span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`numer = exp(shifted) = [1.0, 0.0000454, 0.0, 0.0]`</span>。注意后两位自动变为精确的 0.0！</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>**分母与归一化**：</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>分母求和：$1.0 + 0.0000454 + 0.0 + 0.0 \approx 1.0000454$。</span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`probs = [0.99995, 0.000045, 0.0, 0.0]`</span>。</span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a><span class="ss">5. </span>**写回**：<span class="in">`mask`</span> 截断后 2 位，仅写回前两项概率，与数学真实解分毫不差。</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>补齐 padding 值。</span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span>______)  <span class="co"># </span><span class="al">TODO</span><span class="co">: max 的单位元</span></span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> values <span class="op">-</span> tl.<span class="bu">max</span>(values, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>    numer <span class="op">=</span> tl.exp(values)</span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>    probs <span class="op">=</span> numer <span class="op">/</span> tl.<span class="bu">sum</span>(numer, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row <span class="op">*</span> N <span class="op">+</span> cols, probs, mask<span class="op">=</span>mask)</span>
 <span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=-</span><span class="bu">float</span>(<span class="st">"inf"</span>))</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> values <span class="op">-</span> tl.<span class="bu">max</span>(values, axis<span class="op">=</span><span class="dv">0</span>)</span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>    numer <span class="op">=</span> tl.exp(values)</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>    probs <span class="op">=</span> numer <span class="op">/</span> tl.<span class="bu">sum</span>(numer, axis<span class="op">=</span><span class="dv">0</span>)</span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row <span class="op">*</span> N <span class="op">+</span> cols, probs, mask<span class="op">=</span>mask)</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax(x):</span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>    softmax_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax(x):</span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>    softmax_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">2</span>, <span class="dv">7</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">8</span>, <span class="dv">256</span>)):</span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>) <span class="op">*</span> <span class="dv">20</span></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(softmax(x), torch.softmax(x, <span class="dv">1</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“稳定 Softmax 与融合”的工作机制。</span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>padding 用 0 在 logits 全负时会造成什么错误？</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
 <span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">2</span>, <span class="dv">7</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">8</span>, <span class="dv">256</span>)):</span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>) <span class="op">*</span> <span class="dv">20</span></span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(softmax(x), torch.softmax(x, <span class="dv">1</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>padding load 用 -inf，使其不影响 max 且 exp 后自然为 0；减 max 后再指数。</span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：全 mask 行会产生 -inf-(-inf)=NaN；普通 dense 行要求 N&gt;0，attention mask 需专门处理。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>如何把 causal mask 融入同一个 kernel？</span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：单 program 一行适合中等 N；超宽 softmax 需分块或专用算法。</span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
-<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=-</span><span class="bu">float</span>(<span class="st">"inf"</span>))</span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> values <span class="op">-</span> tl.<span class="bu">max</span>(values, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a>    numer <span class="op">=</span> tl.exp(values)</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a>    probs <span class="op">=</span> numer <span class="op">/</span> tl.<span class="bu">sum</span>(numer, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row <span class="op">*</span> N <span class="op">+</span> cols, probs, mask<span class="op">=</span>mask)</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> softmax(x):</span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a>    softmax_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">2</span>, <span class="dv">7</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">8</span>, <span class="dv">256</span>)):</span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>) <span class="op">*</span> <span class="dv">20</span></span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(softmax(x), torch.softmax(x, <span class="dv">1</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（网格绑定与 $-\infty$ 代数保护）**：Python 层按矩阵行数发射一维网格，每个 Program 块负责独立的一行，列尺寸扩展至 2 的幂次。在 <span class="in">`mask = cols &lt; N`</span> 保护下，通过带 <span class="in">`other=-float("inf")`</span> 的 <span class="in">`tl.load`</span> 加载输入，超出 $N$ 的 Padding 位置在寄存器中赋予负无穷大 $-\infty$。</span>
+<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（行内三步规约与指数归零）**：</span>
+<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>步骤一（最大值规约）：调用 <span class="in">`tl.max`</span> 抓取有效特征的真实最大值 $m$。由于 $-\infty$ 是最大值运算的单位元，Padding 元素完全隐形。</span>
+<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>步骤二（数值稳定中心化与指数）：寄存器广播执行 <span class="in">`values - m`</span>，有效值被平移至 $(-\infty, 0]$ 区间杜绝指数上溢，而 Padding 位置仍保持为 $-\infty$。随后调用 <span class="in">`tl.exp`</span>，有效项映射为 $(0, 1]$，Padding 项由于 $e^{-\infty} = 0.0$ 自动蜕变为加法零元。</span>
+<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>步骤三（分母求和与归一化）：调用 <span class="in">`tl.sum`</span> 对指数项求和得到准确分母，随后向量除法计算出真实概率分布。</span>
+<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（带掩码安全写回）**：通过 <span class="in">`tl.store`</span> 配合 <span class="in">`mask`</span> 仅将有效的前 $N$ 个归一化概率写回目标显存，Padding 位置不触发任何显存写事务。</span>
+<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a>若在 <span class="in">`tl.load`</span> 时将 Padding 的默认填充值错误设为 <span class="in">`0.0`</span>：</span>
+<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a>当输入的 Logits 行向量全部为负数时（例如在分类网络低概率类别或大语言模型惩罚打分中，有效 Logits 全为负值，如 $<span class="co">[</span><span class="ot">-5.0, -8.0, -3.0</span><span class="co">]</span>$）：</span>
+<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**最大值被错误篡改**：由于所有真实元素都小于 0，而 Padding 元素为 0.0，在执行 <span class="in">`tl.max`</span> 时，虚构的 0.0 会被强行误判为整行的最大值（即 $m = 0.0$ 而非真实的 $-3.0$）。</span>
+<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**指数项虚假爆发**：在计算 $e^{x_i - m}$ 时，Padding 处的计算为 $e^{0.0 - 0.0} = e^0 = 1.0$。每个 Padding lane 都会产生数值为 1.0 的巨大虚假概率分子。</span>
+<span id="cb3-241"><a href="#cb3-241" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**真实概率被严重稀释崩溃**：在分母求和时，累加器不仅加进了真实分子的微小指数值（$e^{-5} \approx 0.0067$），还累加进了 $(\text{BLOCK} - N)$ 个高达 1.0 的虚假数值。最终真实有效项的 Softmax 概率被大幅摊薄数百倍，输出完全错误的预测结果。</span>
+<span id="cb3-242"><a href="#cb3-242" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-243"><a href="#cb3-243" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-244"><a href="#cb3-244" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-245"><a href="#cb3-245" aria-hidden="true" tabindex="-1"></a>在 Transformer 的自注意力计算（Self-Attention）中，因果掩码（Causal Mask）要求当前 Query 位置 $i$ 只能看到小于等于自身位置的 Key 位置 $j$（即 $j \le i$），未来位置（$j &gt; i$）必须被强行屏蔽。</span>
+<span id="cb3-246"><a href="#cb3-246" aria-hidden="true" tabindex="-1"></a>将其融入同一个 Softmax Kernel 的工程方法为：</span>
+<span id="cb3-247"><a href="#cb3-247" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**获取行内逻辑位置**：</span>
+<span id="cb3-248"><a href="#cb3-248" aria-hidden="true" tabindex="-1"></a>   在 Kernel 中，当前 Program 处理的行索引 <span class="in">`row`</span> 对应 Query 的序列位置 $i$，列索引 <span class="in">`cols = tl.arange(0, BLOCK)`</span> 对应 Key 的序列位置 $j$。</span>
+<span id="cb3-249"><a href="#cb3-249" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**构造因果组合谓词**：</span>
+<span id="cb3-250"><a href="#cb3-250" aria-hidden="true" tabindex="-1"></a>   将张量尺寸边界与因果未来位置结合为复合掩码：</span>
+<span id="cb3-251"><a href="#cb3-251" aria-hidden="true" tabindex="-1"></a>   <span class="in">`causal_mask = (cols &lt; N) &amp; (cols &lt;= row)`</span></span>
+<span id="cb3-252"><a href="#cb3-252" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**统一注入 $-\infty$**：</span>
+<span id="cb3-253"><a href="#cb3-253" aria-hidden="true" tabindex="-1"></a>   在 <span class="in">`tl.load`</span> 加载输入 Attention 权重时直接施加此复合掩码：</span>
+<span id="cb3-254"><a href="#cb3-254" aria-hidden="true" tabindex="-1"></a>   <span class="in">`values = tl.load(q_k_ptr + row * stride_m + cols, mask=causal_mask, other=-float("inf"))`</span></span>
+<span id="cb3-255"><a href="#cb3-255" aria-hidden="true" tabindex="-1"></a>   被屏蔽的未来位置（$j &gt; i$）与越界的 Padding 位置（$j \ge N$）均被赋为 $-\infty$。在后续执行 Safe Softmax 的减 Max 与 Exp 计算时，$e^{-\infty}$ 自动变为 0.0，从而在同一个 Kernel 内以零显存读写代价同时完成了因果掩码与 Softmax 归一化。</span>
+<span id="cb3-256"><a href="#cb3-256" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-257"><a href="#cb3-257" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-258"><a href="#cb3-258" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-259"><a href="#cb3-259" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
+<span id="cb3-260"><a href="#cb3-260" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
+<span id="cb3-261"><a href="#cb3-261" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-262"><a href="#cb3-262" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-263"><a href="#cb3-263" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

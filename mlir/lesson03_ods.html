@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -570,39 +570,77 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>ODS 用 TableGen 描述 dialect/op 的结构约束并生成 C++ 声明、parser/printer 框架和文档，减少重复样板。</p>
+<p>在 C++ 中手动编写一个工业级 MLIR Operation 需要耗费数以百行的样板代码（Boilerplate）：手写类定义、构造函数、访问器（Accessors）、Operand/Result 数量校验、Parser/Printer 文本解析序列化、类型检查 Verifier 以及文档。这极其冗长且极易出错。 为了消除样板代码并实现单一事实来源（Single Source of Truth），MLIR 提供了基于 LLVM TableGen 语言的领域特定元编程框架——<strong>ODS（Operation Definition Specification）</strong>。 开发者在声明式的 <code>.td</code> 文件中定义算子的输入、输出、属性、Traits 与文本语法格式，由专用代码生成工具 <code>mlir-tblgen</code> 在编译期全自动生成强类型的 C++ 声明与实现。 本课解决的核心工程问题是：<strong>掌握基于 ODS 的声明式算子建模生命周期，理解 Trait 的物理语义承诺，以及划分编译期代码生成（ODS）与手动 C++ 语义钩子（Verifier / Fold / Canonicalize）的清晰职责边界</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p><code>arguments</code>/<code>results</code> 定义签名，traits/interfaces 声明通用性质；复杂跨字段约束在 verifier，折叠在 fold，规范化在 canonicalization patterns。</p>
+<p>ODS 声明规范与全自动构建生命周期如图 3-1 与图 3-2 所示：</p>
+<ol type="1">
+<li><strong>元模型定义（<code>.td</code> 描述）</strong>： 在 TableGen 脚本中，继承基础模板定义算子：
+<ul>
+<li><code>arguments</code>：使用 <code>(ins ...)</code> 声明输入操作数与属性；</li>
+<li><code>results</code>：使用 <code>(outs ...)</code> 声明返回值；</li>
+<li><code>traits</code>：挂载编译期语义特征（如 <code>Pure</code> 表示无副作用、<code>Commutative</code> 表示可交换、<code>SameOperandsAndResultType</code> 表示输入输出类型同构）；</li>
+<li><code>assemblyFormat</code>：声明声明式自定义打印与解析规则，免写手写 Parser。</li>
+</ul></li>
+<li><strong>代码生成（<code>mlir-tblgen</code> 驱动）</strong>： 如图 3-2 所示，在项目 CMake 构建阶段：
+<ul>
+<li>运行 <code>mlir-tblgen -gen-op-decls</code> 生成 <code>*.h.inc</code>（包含强类型 C++ 包装类、<code>getLhs()</code> / <code>getRhs()</code> 访问器、Trait 继承声明）；</li>
+<li>运行 <code>mlir-tblgen -gen-op-defs</code> 生成 <code>*.cpp.inc</code>（包含操作数偏移行内解析、自动类型校验骨架、<code>build()</code> 工厂方法与 Parser/Printer 逻辑）。</li>
+</ul></li>
+<li><strong>C++ 语义钩子接入</strong>： 对于超越声明式表达能力的复杂业务逻辑（如多维张量沿某一轴求和的形状推导、常量折叠），开发者在自定义 C++ 文件中实现声明的语义钩子函数：
+<ul>
+<li><code>verify()</code>：执行复杂的深层跨字段数值校验；</li>
+<li><code>fold()</code>：执行编译期常量计算（Constant Folding）；</li>
+<li><code>getCanonicalizationPatterns()</code>：注册代数化简等价重写规则。</li>
+</ul></li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>trait 是可验证承诺，不是注释；错误声明 commutative 或 pure 会让优化做出不合法变换。</p>
+<ul>
+<li><strong>Trait 是严肃的语义承诺，而非非绑定的注释</strong>： Trait（如 <code>Pure</code>、<code>Commutative</code>、<code>SameOperandsAndResultType</code>）会直接被下游优化 Pass（如 DCE、CSE、规范化重写）作为无条件成立的前提公理使用。若给实际向显存写入数据或改变全局状态的 Op（如 <code>memref.store</code>）错误标记了 <code>Pure</code>，下游 DCE Pass 会在发现其返回值未被使用时直接将其整条物理消除，导致严重的状态静默损坏。</li>
+<li><strong>类型系统与 ODS Constraint 匹配</strong>： 若在 <code>arguments</code> 声明了 <code>AnyTensor:$lhs</code>，但未在 Trait 中约束类型相等，则 <code>$lhs</code> 可以是 <code>tensor&lt;4xf32&gt;</code> 而 <code>$rhs</code> 可以是 <code>tensor&lt;8xi32&gt;</code>。若要确保逐元素相加合法，必须同时施加 <code>SameOperandsAndResultType</code> 或显式的 <code>AllTypesMatch</code> 约束。</li>
+<li><strong>生成头文件与手写代码的循环依赖</strong>： 包含生成的 <code>*.h.inc</code> 时必须置于正确的命名空间内，否则会导致编译期类名未定名错误。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>声明式约束维护成本低；过度塞进自定义 C++ verifier 会让诊断和生成文档变差。</p>
+<ul>
+<li><strong>声明式约束 vs 手写 C++ Verifier</strong>： 能用 ODS 声明式表达的约束（如 <code>SameTypeOperands</code>、<code>TypeConstraint</code>）尽量在 <code>.td</code> 中声明。ODS 能自动生成直观易读的报错提示，并能自动导出至 Markdown 语法手册；过度依赖手写 C++ <code>verify()</code> 会降低算子文档的自解释性。</li>
+<li><strong>自动 AssemblyFormat vs 手写 Parser</strong>： 声明式 <code>assemblyFormat</code> 覆盖了 95% 的自定义语法格式，并能自动保证 Parser 与 Printer 的完全对称可逆（Round-trip Safety）；仅当涉及极特殊的复杂动态语法解析时才需要开启 <code>let hasCustomAssemblyFormat = 1;</code>。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>二元同类型 AddOp 可声明两个 operand 和一个 result，再用 <code>SameOperandsAndResultType</code> 约束类型一致。</p>
+<p>以二元加法算子 <code>My_AddOp</code> 为例：</p>
+<pre class="tablegen"><code>def My_AddOp : My_Op&lt;"add", [Pure, SameOperandsAndResultType]&gt; {
+  let summary = "elementwise add";
+  let arguments = (ins AnyTensor:$lhs, AnyTensor:$rhs);
+  let results = (outs AnyTensor:$result);
+}</code></pre>
+<ul>
+<li><code>arguments</code> 指定必须输入两个张量 <code>$lhs</code> 与 <code>$rhs</code>；</li>
+<li><code>results</code> 指定输出张量 <code>$result</code>；</li>
+<li><code>[Pure]</code> 承诺无任何内存副作用，供 DCE 安全消除；</li>
+<li><code>[SameOperandsAndResultType]</code> 自动生成校验代码，若用户传入 <code>%a: tensor&lt;2xf32&gt;</code> 与 <code>%b: tensor&lt;3xf32&gt;</code>，Verifier 在解析阶段会直接报错中断。</li>
+</ul>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 ODS 中两个输入和一个输出。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="082020f5" class="cell" data-course_role="exercise">
+<div id="d7dc697b" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, ______:$rhs)<span class="op">;</span></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs ______:$result)<span class="op">;</span></span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, ______:$rhs)<span class="op">;</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs ______:$result)<span class="op">;</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
 <section id="检查方法" class="level3">
@@ -649,28 +687,28 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="25e68dff" class="cell" data-course_role="solution">
+<div id="5b79a4ee" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
-<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, AnyTensor:$rhs)<span class="op">;</span></span>
-<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs AnyTensor:$result)<span class="op">;</span></span>
-<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, AnyTensor:$rhs)<span class="op">;</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs AnyTensor:$result)<span class="op">;</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p><code>arguments</code>/<code>results</code> 定义签名，traits/interfaces 声明通用性质；复杂跨字段约束在 verifier，折叠在 fold，规范化在 canonicalization patterns。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（声明式元模型定义）</strong>：开发者在 TableGen 脚本（<code>.td</code> 文件）中以极简 DSL 声明 Operation 的核心规格，包括输入操作数类型（<code>arguments</code>）、返回值类型（<code>results</code>）、编译期语义公理（<code>traits</code>，如 <code>Pure</code>）以及文本汇编语法（<code>assemblyFormat</code>）。 2. <strong>状态变化阶段（编译期代码生成与 C++ 虚实结合）</strong>：构建系统调用 <code>mlir-tblgen</code> 驱动前端解析 TableGen AST，自动生成包含静态类型安全访问器、<code>build()</code> 工厂重载、结构化校验逻辑和语法反序列化器的 C++ 源码片段（<code>*.h.inc</code> 与 <code>*.cpp.inc</code>）。开发者补充手写高级语义钩子（如 <code>verify()</code> 边界判断与 <code>fold()</code> 常量折叠），共同编译为本地二进制。 3. <strong>输出阶段（方言模块装配与动态注册）</strong>：在编译器启动或测试驱动初始化时，调用方言的 <code>registerOperations()</code> 将生成的 Operation 实例完整注册至 <code>MLIRContext</code> 核心环境，为整个编译器优化管线提供强类型、可被验证的语法树节点。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：trait 是可验证承诺，不是注释；错误声明 commutative 或 pure 会让优化做出不合法变换。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在 MLIR 优化体系中，<code>Pure</code> Trait（对应内部的 <code>MemoryEffectOpInterface</code> 且没有任何内存副作用）是编译器用于判定死代码消除（DCE: Dead Code Elimination）的核心公理： 若错误地将一个实际上具有物理副作用的操作（例如向全局显存写数据的 <code>store</code> 操作、打印日志的 <code>print</code> 操作、或引发硬件同步的 <code>barrier</code> 操作）标记为 <code>Pure</code>： 当该 Operation 的返回值没有被下游任何其它 Operation 消费（或者该 Operation 本身没有返回值，如单向写回）时： DCE Pass（如 <code>-canonicalize</code> 或 <code>-symbol-dce</code>）会基于“没有结果被使用且无副作用的操作等价于无用计算”的强假设，<strong>直接将该 Operation 从控制流图中彻底斩除删除</strong>！ 这会导致预期的显存写入或设备交互完全没有被发射，产生极端隐蔽的静默逻辑丢失。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：声明式约束维护成本低；过度塞进自定义 C++ verifier 会让诊断和生成文档变差。</p>
+<p>在设计算子约束时，三者的选型与架构分层原则如下： 1. <strong>优先选择 Trait（如 <code>SameOperandsShape</code> / <code>SameOperandsAndResultShape</code>）</strong>： - <strong>适用场景</strong>：当形状约束是编译器中广泛通用的公理模式时。 - <strong>优势</strong>：Trait 不仅在解析时自动生成校验逻辑，更重要的是为下游 Pass 提供了可查询的 C++ Trait 概念，能被优化算法批量识别（例如代数重写 Pass 可直接针对所有 <code>SameOperandsShape</code> 的算子执行跨节点广播下推）。 2. <strong>次选 ODS 声明式 Constraint（如在 arguments/results 中使用 Predicate 谓词）</strong>： - <strong>适用场景</strong>：当约束模式较为特殊（例如输入维度必须与输出属性满足算术倍数），但仍能用纯逻辑公式表达时。 - <strong>优势</strong>：保持在 <code>.td</code> 中声明式维护，能自动生成到导出的算子文档中，维护成本低。 3. <strong>最后选择自定义 C++ <code>verify()</code> 钩子</strong>： - <strong>适用场景</strong>：涉及动态上下文、高阶张量广播（Broadcasting）兼容性检查、或依赖外部硬件属性的极复杂条件逻辑。 - <strong>优势</strong>：拥有 C++ 图遍历的全部图灵完备能力，能构造极度精准详尽的局部诊断错误信息（<code>op-&gt;emitOpError(...)</code>）。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1154,165 +1192,219 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
     }
   });
   </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 3 课：ODS/TableGen 与自定义 Operation"</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
-<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：用 ODS 声明 op 的 operands/results/traits，并解释生成代码与手写语义钩子的边界。</span>
-<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
-<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
-<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
-<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
-<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
-<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：编译原理基础、C++ 阅读能力</span>
-<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：ODS 用 TableGen 描述 dialect/op 的结构约束并生成 C++ 声明、parser/printer 框架和文档，减少重复样板。</span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    subgraph ODS[<span class="ot">"</span><span class="st">TableGen 定义 (.td 文件)</span><span class="ot">"</span>]</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>        Def[<span class="ot">"</span><span class="st">def My_MatmulOp : My_Op&lt;'matmul', [Pure, SameOperandsAndResultType]&gt;</span><span class="ot">"</span>]</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>        Args[<span class="ot">"</span><span class="st">arguments = (ins AnyTensor:</span><span class="dt">$lhs</span><span class="st">, AnyTensor:</span><span class="dt">$rhs</span><span class="st">)</span><span class="ot">"</span>]</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>        Res[<span class="ot">"</span><span class="st">results = (outs AnyTensor:</span><span class="dt">$output</span><span class="st">)</span><span class="ot">"</span>]</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>        Asm[<span class="ot">"</span><span class="st">assemblyFormat = '</span><span class="dt">$lhs</span><span class="st"> `,` </span><span class="dt">$rhs</span><span class="st"> attr-dict `:` type(</span><span class="dt">$output</span><span class="st">)'</span><span class="ot">"</span>]</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    ODS --&gt; GenCode[<span class="ot">"</span><span class="st">mlir-tblgen 驱动代码生成器</span><span class="ot">"</span>]</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：ODS 声明式算子规范 (Operation Definition Specification) 元模型<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    TD[<span class="ot">"</span><span class="st">算子定义规范 (*.td)</span><span class="ot">"</span>] --&gt;|mlir-tblgen -gen-op-decls| IncH[<span class="ot">"</span><span class="st">算子头文件声明 (*.h.inc)</span><span class="ot">"</span>]</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    TD --&gt;|mlir-tblgen -gen-op-defs| IncCpp[<span class="ot">"</span><span class="st">算子实现代码 (*.cpp.inc)</span><span class="ot">"</span>]</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    IncH &amp; IncCpp --&gt; CxxCompile[<span class="ot">"</span><span class="st">C++ 编译期集成</span><span class="ot">"</span>]</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    CxxCompile --&gt; DialectReg[<span class="ot">"</span><span class="st">MLIRContext 注册并供编译器调用</span><span class="ot">"</span>]</span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：基于 mlir-tblgen 的自定义算子全自动构建与接入生命周期<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>ODS 用 TableGen 描述 dialect/op 的结构约束并生成 C++ 声明、parser/printer 框架和文档，减少重复样板。</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="in">`arguments`</span>/<span class="in">`results`</span> 定义签名，traits/interfaces 声明通用性质；复杂跨字段约束在 verifier，折叠在 fold，规范化在 canonicalization patterns。</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>trait 是可验证承诺，不是注释；错误声明 commutative 或 pure 会让优化做出不合法变换。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>声明式约束维护成本低；过度塞进自定义 C++ verifier 会让诊断和生成文档变差。</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>二元同类型 AddOp 可声明两个 operand 和一个 result，再用 <span class="in">`SameOperandsAndResultType`</span> 约束类型一致。</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>补齐 ODS 中两个输入和一个输出。</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, ______:$rhs)<span class="op">;</span></span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs ______:$result)<span class="op">;</span></span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>有源码构建环境时交给 <span class="in">`mlir-tblgen`</span>；否则检查约束是否足以拒绝标量和不同类型 operands。</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“ODS/TableGen 与自定义 Operation”的工作机制。</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>错误地给有副作用 op 标 <span class="in">`Pure`</span>，DCE 可能做出什么错误？</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>shape 相等这种跨 operand 约束应写 trait、ODS constraint 还是 verifier？</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, AnyTensor:$rhs)<span class="op">;</span></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs AnyTensor:$result)<span class="op">;</span></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="in">`arguments`</span>/<span class="in">`results`</span> 定义签名，traits/interfaces 声明通用性质；复杂跨字段约束在 verifier，折叠在 fold，规范化在 canonicalization patterns。</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：trait 是可验证承诺，不是注释；错误声明 commutative 或 pure 会让优化做出不合法变换。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：声明式约束维护成本低；过度塞进自定义 C++ verifier 会让诊断和生成文档变差。</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Defining Dialects</span><span class="co">](https://mlir.llvm.org/docs/DefiningDialects/)</span></span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>:::</span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 3 课：ODS/TableGen 与自定义 Operation"</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：用 ODS 声明 op 的 operands/results/traits，并解释生成代码与手写语义钩子的边界。</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：编译原理基础、C++ 阅读能力</span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：ODS 用 TableGen 描述 dialect/op 的结构约束并生成 C++ 声明、parser/printer 框架和文档，减少重复样板。</span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>    subgraph ODS[<span class="ot">"</span><span class="st">TableGen 定义 (.td 文件)</span><span class="ot">"</span>]</span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>        Def[<span class="ot">"</span><span class="st">def My_MatmulOp : My_Op&lt;'matmul', [Pure, SameOperandsAndResultType]&gt;</span><span class="ot">"</span>]</span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>        Args[<span class="ot">"</span><span class="st">arguments = (ins AnyTensor:</span><span class="dt">$lhs</span><span class="st">, AnyTensor:</span><span class="dt">$rhs</span><span class="st">)</span><span class="ot">"</span>]</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>        Res[<span class="ot">"</span><span class="st">results = (outs AnyTensor:</span><span class="dt">$output</span><span class="st">)</span><span class="ot">"</span>]</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>        Asm[<span class="ot">"</span><span class="st">assemblyFormat = '</span><span class="dt">$lhs</span><span class="st"> `,` </span><span class="dt">$rhs</span><span class="st"> attr-dict `:` type(</span><span class="dt">$output</span><span class="st">)'</span><span class="ot">"</span>]</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>    ODS --&gt; GenCode[<span class="ot">"</span><span class="st">mlir-tblgen 驱动代码生成器</span><span class="ot">"</span>]</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：ODS 声明式算子规范 (Operation Definition Specification) 元模型<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>    TD[<span class="ot">"</span><span class="st">算子定义规范 (*.td)</span><span class="ot">"</span>] --&gt;|mlir-tblgen -gen-op-decls| IncH[<span class="ot">"</span><span class="st">算子头文件声明 (*.h.inc)</span><span class="ot">"</span>]</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>    TD --&gt;|mlir-tblgen -gen-op-defs| IncCpp[<span class="ot">"</span><span class="st">算子实现代码 (*.cpp.inc)</span><span class="ot">"</span>]</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>    IncH &amp; IncCpp --&gt; CxxCompile[<span class="ot">"</span><span class="st">C++ 编译期集成</span><span class="ot">"</span>]</span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a>    CxxCompile --&gt; DialectReg[<span class="ot">"</span><span class="st">MLIRContext 注册并供编译器调用</span><span class="ot">"</span>]</span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：基于 mlir-tblgen 的自定义算子全自动构建与接入生命周期<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>在 C++ 中手动编写一个工业级 MLIR Operation 需要耗费数以百行的样板代码（Boilerplate）：手写类定义、构造函数、访问器（Accessors）、Operand/Result 数量校验、Parser/Printer 文本解析序列化、类型检查 Verifier 以及文档。这极其冗长且极易出错。</span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a>为了消除样板代码并实现单一事实来源（Single Source of Truth），MLIR 提供了基于 LLVM TableGen 语言的领域特定元编程框架——**ODS（Operation Definition Specification）**。</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a>开发者在声明式的 <span class="in">`.td`</span> 文件中定义算子的输入、输出、属性、Traits 与文本语法格式，由专用代码生成工具 <span class="in">`mlir-tblgen`</span> 在编译期全自动生成强类型的 C++ 声明与实现。</span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**掌握基于 ODS 的声明式算子建模生命周期，理解 Trait 的物理语义承诺，以及划分编译期代码生成（ODS）与手动 C++ 语义钩子（Verifier / Fold / Canonicalize）的清晰职责边界**。</span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a>ODS 声明规范与全自动构建生命周期如图 3-1 与图 3-2 所示：</span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**元模型定义（`.td` 描述）**：</span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a>   在 TableGen 脚本中，继承基础模板定义算子：</span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`arguments`</span>：使用 <span class="in">`(ins ...)`</span> 声明输入操作数与属性；</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`results`</span>：使用 <span class="in">`(outs ...)`</span> 声明返回值；</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`traits`</span>：挂载编译期语义特征（如 <span class="in">`Pure`</span> 表示无副作用、<span class="in">`Commutative`</span> 表示可交换、<span class="in">`SameOperandsAndResultType`</span> 表示输入输出类型同构）；</span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`assemblyFormat`</span>：声明声明式自定义打印与解析规则，免写手写 Parser。</span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**代码生成（`mlir-tblgen` 驱动）**：</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>   如图 3-2 所示，在项目 CMake 构建阶段：</span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>运行 <span class="in">`mlir-tblgen -gen-op-decls`</span> 生成 <span class="in">`*.h.inc`</span>（包含强类型 C++ 包装类、<span class="in">`getLhs()`</span> / <span class="in">`getRhs()`</span> 访问器、Trait 继承声明）；</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>运行 <span class="in">`mlir-tblgen -gen-op-defs`</span> 生成 <span class="in">`*.cpp.inc`</span>（包含操作数偏移行内解析、自动类型校验骨架、<span class="in">`build()`</span> 工厂方法与 Parser/Printer 逻辑）。</span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**C++ 语义钩子接入**：</span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>   对于超越声明式表达能力的复杂业务逻辑（如多维张量沿某一轴求和的形状推导、常量折叠），开发者在自定义 C++ 文件中实现声明的语义钩子函数：</span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`verify()`</span>：执行复杂的深层跨字段数值校验；</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`fold()`</span>：执行编译期常量计算（Constant Folding）；</span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`getCanonicalizationPatterns()`</span>：注册代数化简等价重写规则。</span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Trait 是严肃的语义承诺，而非非绑定的注释**：</span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a>  Trait（如 <span class="in">`Pure`</span>、<span class="in">`Commutative`</span>、<span class="in">`SameOperandsAndResultType`</span>）会直接被下游优化 Pass（如 DCE、CSE、规范化重写）作为无条件成立的前提公理使用。若给实际向显存写入数据或改变全局状态的 Op（如 <span class="in">`memref.store`</span>）错误标记了 <span class="in">`Pure`</span>，下游 DCE Pass 会在发现其返回值未被使用时直接将其整条物理消除，导致严重的状态静默损坏。</span>
+<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**类型系统与 ODS Constraint 匹配**：</span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a>  若在 <span class="in">`arguments`</span> 声明了 <span class="in">`AnyTensor:$lhs`</span>，但未在 Trait 中约束类型相等，则 <span class="in">`$lhs`</span> 可以是 <span class="in">`tensor&lt;4xf32&gt;`</span> 而 <span class="in">`$rhs`</span> 可以是 <span class="in">`tensor&lt;8xi32&gt;`</span>。若要确保逐元素相加合法，必须同时施加 <span class="in">`SameOperandsAndResultType`</span> 或显式的 <span class="in">`AllTypesMatch`</span> 约束。</span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**生成头文件与手写代码的循环依赖**：</span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a>  包含生成的 <span class="in">`*.h.inc`</span> 时必须置于正确的命名空间内，否则会导致编译期类名未定名错误。</span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**声明式约束 vs 手写 C++ Verifier**：</span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a>  能用 ODS 声明式表达的约束（如 <span class="in">`SameTypeOperands`</span>、<span class="in">`TypeConstraint`</span>）尽量在 <span class="in">`.td`</span> 中声明。ODS 能自动生成直观易读的报错提示，并能自动导出至 Markdown 语法手册；过度依赖手写 C++ <span class="in">`verify()`</span> 会降低算子文档的自解释性。</span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**自动 AssemblyFormat vs 手写 Parser**：</span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a>  声明式 <span class="in">`assemblyFormat`</span> 覆盖了 95% 的自定义语法格式，并能自动保证 Parser 与 Printer 的完全对称可逆（Round-trip Safety）；仅当涉及极特殊的复杂动态语法解析时才需要开启 <span class="in">`let hasCustomAssemblyFormat = 1;`</span>。</span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a>以二元加法算子 <span class="in">`My_AddOp`</span> 为例：</span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a><span class="in">```tablegen</span></span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a><span class="in">def My_AddOp : My_Op&lt;"add", [Pure, SameOperandsAndResultType]&gt; {</span></span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a><span class="in">  let summary = "elementwise add";</span></span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a><span class="in">  let arguments = (ins AnyTensor:$lhs, AnyTensor:$rhs);</span></span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a><span class="in">  let results = (outs AnyTensor:$result);</span></span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a><span class="in">}</span></span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`arguments`</span> 指定必须输入两个张量 <span class="in">`$lhs`</span> 与 <span class="in">`$rhs`</span>；</span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`results`</span> 指定输出张量 <span class="in">`$result`</span>；</span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`[Pure]`</span> 承诺无任何内存副作用，供 DCE 安全消除；</span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`[SameOperandsAndResultType]`</span> 自动生成校验代码，若用户传入 <span class="in">`%a: tensor&lt;2xf32&gt;`</span> 与 <span class="in">`%b: tensor&lt;3xf32&gt;`</span>，Verifier 在解析阶段会直接报错中断。</span>
+<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a>补齐 ODS 中两个输入和一个输出。</span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
+<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, ______:$rhs)<span class="op">;</span></span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs ______:$result)<span class="op">;</span></span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a>有源码构建环境时交给 <span class="in">`mlir-tblgen`</span>；否则检查约束是否足以拒绝标量和不同类型 operands。</span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“ODS/TableGen 与自定义 Operation”的工作机制。</span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a>错误地给有副作用 op 标 <span class="in">`Pure`</span>，DCE 可能做出什么错误？</span>
+<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a>shape 相等这种跨 operand 约束应写 trait、ODS constraint 还是 verifier？</span>
+<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>MyOps.td</span>
+<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> My_AddOp : My_Op<span class="op">&lt;</span><span class="st">"add"</span>, [Pure, SameOperandsAndResultType]<span class="op">&gt;</span> {</span>
+<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a>  let summary <span class="op">=</span> <span class="st">"elementwise add"</span><span class="op">;</span></span>
+<span id="cb4-183"><a href="#cb4-183" aria-hidden="true" tabindex="-1"></a>  let arguments <span class="op">=</span> (ins AnyTensor:$lhs, AnyTensor:$rhs)<span class="op">;</span></span>
+<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a>  let results <span class="op">=</span> (outs AnyTensor:$result)<span class="op">;</span></span>
+<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（声明式元模型定义）**：开发者在 TableGen 脚本（<span class="in">`.td`</span> 文件）中以极简 DSL 声明 Operation 的核心规格，包括输入操作数类型（<span class="in">`arguments`</span>）、返回值类型（<span class="in">`results`</span>）、编译期语义公理（<span class="in">`traits`</span>，如 <span class="in">`Pure`</span>）以及文本汇编语法（<span class="in">`assemblyFormat`</span>）。</span>
+<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（编译期代码生成与 C++ 虚实结合）**：构建系统调用 <span class="in">`mlir-tblgen`</span> 驱动前端解析 TableGen AST，自动生成包含静态类型安全访问器、<span class="in">`build()`</span> 工厂重载、结构化校验逻辑和语法反序列化器的 C++ 源码片段（<span class="in">`*.h.inc`</span> 与 <span class="in">`*.cpp.inc`</span>）。开发者补充手写高级语义钩子（如 <span class="in">`verify()`</span> 边界判断与 <span class="in">`fold()`</span> 常量折叠），共同编译为本地二进制。</span>
+<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（方言模块装配与动态注册）**：在编译器启动或测试驱动初始化时，调用方言的 <span class="in">`registerOperations()`</span> 将生成的 Operation 实例完整注册至 <span class="in">`MLIRContext`</span> 核心环境，为整个编译器优化管线提供强类型、可被验证的语法树节点。</span>
+<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a>在 MLIR 优化体系中，<span class="in">`Pure`</span> Trait（对应内部的 <span class="in">`MemoryEffectOpInterface`</span> 且没有任何内存副作用）是编译器用于判定死代码消除（DCE: Dead Code Elimination）的核心公理：</span>
+<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a>若错误地将一个实际上具有物理副作用的操作（例如向全局显存写数据的 <span class="in">`store`</span> 操作、打印日志的 <span class="in">`print`</span> 操作、或引发硬件同步的 <span class="in">`barrier`</span> 操作）标记为 <span class="in">`Pure`</span>：</span>
+<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a>当该 Operation 的返回值没有被下游任何其它 Operation 消费（或者该 Operation 本身没有返回值，如单向写回）时：</span>
+<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a>DCE Pass（如 <span class="in">`-canonicalize`</span> 或 <span class="in">`-symbol-dce`</span>）会基于“没有结果被使用且无副作用的操作等价于无用计算”的强假设，**直接将该 Operation 从控制流图中彻底斩除删除**！</span>
+<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a>这会导致预期的显存写入或设备交互完全没有被发射，产生极端隐蔽的静默逻辑丢失。</span>
+<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a>在设计算子约束时，三者的选型与架构分层原则如下：</span>
+<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**优先选择 Trait（如 `SameOperandsShape` / `SameOperandsAndResultShape`）**：</span>
+<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**适用场景**：当形状约束是编译器中广泛通用的公理模式时。</span>
+<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**优势**：Trait 不仅在解析时自动生成校验逻辑，更重要的是为下游 Pass 提供了可查询的 C++ Trait 概念，能被优化算法批量识别（例如代数重写 Pass 可直接针对所有 <span class="in">`SameOperandsShape`</span> 的算子执行跨节点广播下推）。</span>
+<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**次选 ODS 声明式 Constraint（如在 arguments/results 中使用 Predicate 谓词）**：</span>
+<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**适用场景**：当约束模式较为特殊（例如输入维度必须与输出属性满足算术倍数），但仍能用纯逻辑公式表达时。</span>
+<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**优势**：保持在 <span class="in">`.td`</span> 中声明式维护，能自动生成到导出的算子文档中，维护成本低。</span>
+<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**最后选择自定义 C++ `verify()` 钩子**：</span>
+<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**适用场景**：涉及动态上下文、高阶张量广播（Broadcasting）兼容性检查、或依赖外部硬件属性的极复杂条件逻辑。</span>
+<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**优势**：拥有 C++ 图遍历的全部图灵完备能力，能构造极度精准详尽的局部诊断错误信息（<span class="in">`op-&gt;emitOpError(...)`</span>）。</span>
+<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Defining Dialects</span><span class="co">](https://mlir.llvm.org/docs/DefiningDialects/)</span></span>
+<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

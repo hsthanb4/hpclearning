@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -575,31 +604,53 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>Pass 决定遍历/阶段，RewritePattern 匹配局部 IR；PatternRewriter 记录替换，维护 def-use 与监听器不变量。</p>
+<p>在编译器优化与方言转换中，代码变换绝大多数可以形式化为“树/图局部重写（DAG Pattern Matching &amp; Rewriting）”：识别一个局部的子图模式（如代数恒等式 <span class="math inline">\(x + 0 \to x\)</span>、乘 0 折叠 <span class="math inline">\(x \times 0 \to 0\)</span>、算子融合与降级），并将其原子化替换为一个更简明或更底层的子图。 若采用传统手写嵌套循环遍历 AST，不仅代码极度臃肿，且在边遍历边修改 IR 时极易引发迭代器失效（Iterator Invalidation）与悬空指针。 MLIR 提供了极其工业级、自动维护图拓扑不变式的核心引擎——<strong>GreedyPatternRewriteDriver 与 PatternRewriter</strong>。 本课解决的核心工程问题是：<strong>理解基于工作队列（Worklist）的不动点迭代（Fixed-Point Iteration）机制，掌握严格通过 <code>PatternRewriter</code> 纪律修改 IR 的防崩溃契约，以及设计严格单调递减度量消除重写死循环（振荡）</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>pattern 检查根 op 与额外条件，创建新 op 后 <code>replaceOp</code>；greedy driver 反复应用直到固定点或达到限制。</p>
+<p>贪心模式驱动器状态机与不动点收敛流程如图 4-1 与图 4-2 所示：</p>
+<ol type="1">
+<li><strong>工作队列初始化与拓扑遍历</strong>： Pass 收集一组已注册的 <code>RewritePattern</code>，创建 <code>GreedyPatternRewriteDriver</code> 并将目标 Region 内的所有 Operation 压入工作队列（Worklist）。</li>
+<li><strong>模式匹配与原子重写（<code>matchAndRewrite</code>）</strong>：
+<ul>
+<li>驱动器从 Worklist 中 Pop 出一个候选根节点 <code>op</code>；</li>
+<li>按照预设的优先级（Benefit）从高到低依次尝试匹配注册的 Pattern；</li>
+<li>若匹配成功，进入 <code>rewrite</code> 阶段。必须通过传入的 <code>PatternRewriter &amp;rewriter</code> 执行修改，如： <code>rewriter.replaceOp(op, newValues);</code> <code>rewriter.eraseOp(op);</code></li>
+</ul></li>
+<li><strong>监听器通知与连锁反应（Listener Notification &amp; Re-queuing）</strong>： 如图 4-1 所示，<code>PatternRewriter</code> 内部挂载了监听器（<code>RewriterListener</code>）。当执行 <code>replaceOp</code> 时：
+<ul>
+<li>驱动器自动将旧 <code>op</code> 的所有使用方（Users）、操作数的生产者以及新创建的 Operation 重新压回 Worklist；</li>
+<li>因为替换旧节点可能使下游节点的某些代数化简条件瞬间满足（例如下游原本是 <code>y = addi(%0, 0)</code>，当 <code>%0</code> 被消除后，下游可能进一步化简）。</li>
+</ul></li>
+<li><strong>不动点收敛（Fixed-Point Convergence）</strong>： 循环往复推进，直到 Worklist 彻底清空（达到 IR 不动点），或者达到预设的最大迭代次数上限（避免死循环），整个 Pass 顺利收敛退役。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>不能绕过 rewriter 直接 erase/replace 被管理的 op；A→B 与 B→A 会振荡，pattern 必须有单调度量。</p>
+<ul>
+<li><strong>严禁绕过 Rewriter 直接调用底层指针 API（Direct Mutation Violation）</strong>： 在 Pattern 内部<strong>绝对严禁直接调用 <code>op-&gt;erase()</code> 或 <code>op-&gt;replaceAllUsesWith()</code></strong>！ 因为底层指针被强行释放后，<code>GreedyPatternRewriteDriver</code> 的 Worklist 并不知道该节点已死。当驱动器后续尝试从 Worklist 访问该指针时，会直接触发野指针访问段错误（Use-After-Free Crash）。必须全部通过 <code>rewriter.eraseOp()</code> 或 <code>rewriter.replaceOp()</code> 通知监听器同步更新队列。</li>
+<li><strong>重写振荡与死循环（Rewriting Oscillation）</strong>： 若 Pattern A 将 <span class="math inline">\(X\)</span> 变换为 <span class="math inline">\(Y\)</span>（例如将除法变为乘倒数：<span class="math inline">\(a / b \to a \times (1/b)\)</span>），而 Pattern B 又将 <span class="math inline">\(Y\)</span> 变换回 <span class="math inline">\(X\)</span>（将乘倒数合并为除法：<span class="math inline">\(a \times (1/b) \to a / b\)</span>），两个 Pattern 会在同一个节点上反复交替命中并互相重排，导致 Worklist 永远无法清空，编译器彻底卡死在死循环中。</li>
+<li><strong>单调性度量（Monotonicity Metric）</strong>： 每个规范化 Pattern 必须具备明确的“单调性度量”（例如 Operation 总数严格减少、常量向右折叠排序、或类型层级单向降低），杜绝等价互换。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>小 pattern 易组合，但贪心结果受 benefit 与可匹配顺序影响；复杂全局优化可能需要专用算法。</p>
+<ul>
+<li><strong>Benefit 优先级调优</strong>： 每个 Pattern 具备一个 <code>PatternBenefit</code>（无符号整数）。Benefit 越高的 Pattern 会被优先尝试匹配。将计算代价小、收益明确的简单折叠（如常量消除）赋予高 Benefit，能大幅减少复杂大子图 Pattern 的无效匹配计算。</li>
+<li><strong>局部贪心 vs 全局最佳（Greedy vs Global Dynamic Programming）</strong>： 贪心驱动器寻找的是局部不动点，执行速度极快；但局部贪心替换可能会错失需要跨作用域全局收益评估的最优代码生成方案。对于复杂的内存布局选择或张量降级，往往结合专用图搜索或 Transform 方言控制。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p><code>x+0→x</code> 减少 operation 数，是明显单调的 canonicalization；<code>x→x+0</code> 则破坏终止。</p>
+<p>以恒等式代数化简 <code>x + 0 -&gt; x</code> 为例： - 输入 IR：<code>%1 = arith.addi %x, %c0 : i32</code>（其中 <code>%c0</code> 是常量 0）。 - Pattern 命中：<code>op.getLhs()</code> 获取到 <code>%x</code>。 - 执行重写：<code>rewriter.replaceOp(op, x);</code>。 - 状态转移：所有原本消费 <code>%1</code> 的下游指令，其操作数指针被原子化无缝重定向（RAUW: Replace All Uses With）至 <code>%x</code>。 - 清理与重入：旧的 <code>arith.addi</code> 指令被安全移出 AST 并析构；<code>%x</code> 的所有新旧使用者被重新压入 Worklist 触发连锁化简。 - 单调性：Operation 节点总数净减 1，严格单调收敛，绝无反向膨胀可能。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 <code>x + 0 -&gt; x</code> 的替换动作。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="4835eacb" class="cell" data-course_role="exercise">
+<div id="80ad1dbf" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> C<span class="op">++</span> 片段：假设已确认 rhs 是整数 <span class="dv">0</span>。</span>
@@ -655,7 +706,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="3beecce0" class="cell" data-course_role="solution">
+<div id="b9eb3445" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>LogicalResult matchAndRewrite(arith::AddIOp op,</span>
@@ -668,15 +719,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>pattern 检查根 op 与额外条件，创建新 op 后 <code>replaceOp</code>；greedy driver 反复应用直到固定点或达到限制。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（工作队列装载与模式优先级排序）</strong>：Pass 将目标 Region 下的全部 Operation 压入 <code>GreedyPatternRewriteDriver</code> 的工作队列（Worklist），并将已注册的 RewritePattern 按照 <code>PatternBenefit</code> 严格从大到小建立决策树。驱动器以拓扑或逆序弹出待处理的候选 Operation。 2. <strong>状态变化阶段（受控匹配与监听器级联感知）</strong>：对候选 Op 依次执行 Pattern 的 <code>matchAndRewrite</code>。一旦命中，所有 IR 拓扑修改严格通过 <code>PatternRewriter</code> 代理执行（如 <code>replaceOp</code>、<code>eraseOp</code>）。Rewriter 自动将旧结果的所有使用边重定向到新值，并在后台通知 Driver 监听器，将受影响的上游生产者与下游使用者重新加回工作队列。 3. <strong>输出阶段（不动点收敛与无缝移交）</strong>：驱动器持续循环消化工作队列中的连锁反应。当队列完全清空且没有任何 Pattern 能够再次触发时，IR 状态达到数学意义上的“不动点（Fixed Point）”，驱动器验证无悬空引用后退出，将纯净、紧凑的高质量 IR 交付给后续编译阶段。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：不能绕过 rewriter 直接 erase/replace 被管理的 op；A→B 与 B→A 会振荡，pattern 必须有单调度量。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在 <code>GreedyPatternRewriteDriver</code> 框架下，直接绕过 Rewriter 调用 <code>op.erase()</code> 会引发极其致命的内存与数据流不一致问题： 1. <strong>野指针悬空与内存段错误（Use-After-Free）</strong>： 驱动器内部维护着包含待处理 Op 指针的工作队列（Worklist）与活跃节点哈希集合。若直接调用 <code>op.erase()</code>，C++ 底层堆内存被立即释放或回收；但驱动器完全未被通知，其队列中依然残留着该指针。在后续轮次驱动器从队列中取出该指针并调用虚函数时，会立即发生非法内存解引用，导致编译器崩溃。 2. <strong>破坏 Def-Use 链与图拓扑完整性</strong>： <code>rewriter.replaceOp()</code> 会负责把旧节点产生的所有 SSA Result 安全重定向给替代变量，然后再安排销毁。若直接 <code>op.erase()</code>，所有依赖该节点的下游操作数指针将直接悬空，破坏 SSA 形式的不变式。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：小 pattern 易组合，但贪心结果受 benefit 与可匹配顺序影响；复杂全局优化可能需要专用算法。</p>
+<p>消除两个逆向规范化规则振荡（Oscillation）的标准编译工程方法是<strong>建立严格的全序单调性度量（Strictly Monotonic Order）</strong>： 1. <strong>确立规范化单一黄金标准（Canonical Form）</strong>： 编译器架构设计必须强制约定唯一的标准规范形式。例如，若规定乘加操作必须融合成 <code>fma(a, b, c)</code>，就绝对不能在同一个重写集合中注册将 <code>fma</code> 拆解回 <code>add(mul(a, b), c)</code> 的反向 Pattern。 2. <strong>设计不可逆的单调递减势函数（Potential Function）</strong>： 若两个形式在不同场景下各有优势，必须引入严格的守卫条件（Guard Condition）。例如： - 规则 A 仅当操作数可立即被常量折叠时才展开； - 规则 B 仅当能消除重复子表达式时才合并； 保证 IR 在度量指标（如 Operation 总数、嵌套深度、或常量操作数按字典序严格向右放置）上沿着单向不可逆的有向无环图（DAG）演进，从而在数学上证明不动点必定在有限步内收敛。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1223,110 +1274,157 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>Pass 决定遍历/阶段，RewritePattern 匹配局部 IR；PatternRewriter 记录替换，维护 def-use 与监听器不变量。</span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>pattern 检查根 op 与额外条件，创建新 op 后 <span class="in">`replaceOp`</span>；greedy driver 反复应用直到固定点或达到限制。</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>不能绕过 rewriter 直接 erase/replace 被管理的 op；A→B 与 B→A 会振荡，pattern 必须有单调度量。</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>小 pattern 易组合，但贪心结果受 benefit 与可匹配顺序影响；复杂全局优化可能需要专用算法。</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="in">`x+0→x`</span> 减少 operation 数，是明显单调的 canonicalization；<span class="in">`x→x+0`</span> 则破坏终止。</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>补齐 <span class="in">`x + 0 -&gt; x`</span> 的替换动作。</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>在编译器优化与方言转换中，代码变换绝大多数可以形式化为“树/图局部重写（DAG Pattern Matching &amp; Rewriting）”：识别一个局部的子图模式（如代数恒等式 $x + 0 \to x$、乘 0 折叠 $x \times 0 \to 0$、算子融合与降级），并将其原子化替换为一个更简明或更底层的子图。</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>若采用传统手写嵌套循环遍历 AST，不仅代码极度臃肿，且在边遍历边修改 IR 时极易引发迭代器失效（Iterator Invalidation）与悬空指针。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>MLIR 提供了极其工业级、自动维护图拓扑不变式的核心引擎——**GreedyPatternRewriteDriver 与 PatternRewriter**。</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解基于工作队列（Worklist）的不动点迭代（Fixed-Point Iteration）机制，掌握严格通过 `PatternRewriter` 纪律修改 IR 的防崩溃契约，以及设计严格单调递减度量消除重写死循环（振荡）**。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>贪心模式驱动器状态机与不动点收敛流程如图 4-1 与图 4-2 所示：</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**工作队列初始化与拓扑遍历**：</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>   Pass 收集一组已注册的 <span class="in">`RewritePattern`</span>，创建 <span class="in">`GreedyPatternRewriteDriver`</span> 并将目标 Region 内的所有 Operation 压入工作队列（Worklist）。</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**模式匹配与原子重写（`matchAndRewrite`）**：</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>驱动器从 Worklist 中 Pop 出一个候选根节点 <span class="in">`op`</span>；</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>按照预设的优先级（Benefit）从高到低依次尝试匹配注册的 Pattern；</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若匹配成功，进入 <span class="in">`rewrite`</span> 阶段。必须通过传入的 <span class="in">`PatternRewriter &amp;rewriter`</span> 执行修改，如：</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>     <span class="in">`rewriter.replaceOp(op, newValues);`</span></span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>     <span class="in">`rewriter.eraseOp(op);`</span></span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**监听器通知与连锁反应（Listener Notification &amp; Re-queuing）**：</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>   如图 4-1 所示，<span class="in">`PatternRewriter`</span> 内部挂载了监听器（<span class="in">`RewriterListener`</span>）。当执行 <span class="in">`replaceOp`</span> 时：</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>驱动器自动将旧 <span class="in">`op`</span> 的所有使用方（Users）、操作数的生产者以及新创建的 Operation 重新压回 Worklist；</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>因为替换旧节点可能使下游节点的某些代数化简条件瞬间满足（例如下游原本是 <span class="in">`y = addi(%0, 0)`</span>，当 <span class="in">`%0`</span> 被消除后，下游可能进一步化简）。</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>**不动点收敛（Fixed-Point Convergence）**：</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>   循环往复推进，直到 Worklist 彻底清空（达到 IR 不动点），或者达到预设的最大迭代次数上限（避免死循环），整个 Pass 顺利收敛退役。</span>
 <span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
 <span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> C<span class="op">++</span> 片段：假设已确认 rhs 是整数 <span class="dv">0</span>。</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>LogicalResult matchAndRewrite(arith::AddIOp op,</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>                              PatternRewriter <span class="op">&amp;</span>rewriter) const override {</span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>  Value x <span class="op">=</span> op.getLhs()<span class="op">;</span></span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>  rewriter.______(op, ______)<span class="op">;</span></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> success()<span class="op">;</span></span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**严禁绕过 Rewriter 直接调用底层指针 API（Direct Mutation Violation）**：</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>  在 Pattern 内部**绝对严禁直接调用 `op-&gt;erase()` 或 `op-&gt;replaceAllUsesWith()`**！</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  因为底层指针被强行释放后，<span class="in">`GreedyPatternRewriteDriver`</span> 的 Worklist 并不知道该节点已死。当驱动器后续尝试从 Worklist 访问该指针时，会直接触发野指针访问段错误（Use-After-Free Crash）。必须全部通过 <span class="in">`rewriter.eraseOp()`</span> 或 <span class="in">`rewriter.replaceOp()`</span> 通知监听器同步更新队列。</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**重写振荡与死循环（Rewriting Oscillation）**：</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>  若 Pattern A 将 $X$ 变换为 $Y$（例如将除法变为乘倒数：$a / b \to a \times (1/b)$），而 Pattern B 又将 $Y$ 变换回 $X$（将乘倒数合并为除法：$a \times (1/b) \to a / b$），两个 Pattern 会在同一个节点上反复交替命中并互相重排，导致 Worklist 永远无法清空，编译器彻底卡死在死循环中。</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**单调性度量（Monotonicity Metric）**：</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>  每个规范化 Pattern 必须具备明确的“单调性度量”（例如 Operation 总数严格减少、常量向右折叠排序、或类型层级单向降低），杜绝等价互换。</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Benefit 优先级调优**：</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>  每个 Pattern 具备一个 <span class="in">`PatternBenefit`</span>（无符号整数）。Benefit 越高的 Pattern 会被优先尝试匹配。将计算代价小、收益明确的简单折叠（如常量消除）赋予高 Benefit，能大幅减少复杂大子图 Pattern 的无效匹配计算。</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**局部贪心 vs 全局最佳（Greedy vs Global Dynamic Programming）**：</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>  贪心驱动器寻找的是局部不动点，执行速度极快；但局部贪心替换可能会错失需要跨作用域全局收益评估的最优代码生成方案。对于复杂的内存布局选择或张量降级，往往结合专用图搜索或 Transform 方言控制。</span>
 <span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>在完整插件环境运行 pass 两次，第二次 IR 应不再变化；当前无构建环境时做 API/def-use 静态审查。</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
 <span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Pass、PatternRewriter 与贪心重写”的工作机制。</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>以恒等式代数化简 <span class="in">`x + 0 -&gt; x`</span> 为例：</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>输入 IR：<span class="in">`%1 = arith.addi %x, %c0 : i32`</span>（其中 <span class="in">`%c0`</span> 是常量 0）。</span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Pattern 命中：<span class="in">`op.getLhs()`</span> 获取到 <span class="in">`%x`</span>。</span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>执行重写：<span class="in">`rewriter.replaceOp(op, x);`</span>。</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>状态转移：所有原本消费 <span class="in">`%1`</span> 的下游指令，其操作数指针被原子化无缝重定向（RAUW: Replace All Uses With）至 <span class="in">`%x`</span>。</span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>清理与重入：旧的 <span class="in">`arith.addi`</span> 指令被安全移出 AST 并析构；<span class="in">`%x`</span> 的所有新旧使用者被重新压入 Worklist 触发连锁化简。</span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>单调性：Operation 节点总数净减 1，严格单调收敛，绝无反向膨胀可能。</span>
 <span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
 <span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>直接调用 <span class="in">`op.erase()`</span> 为什么可能破坏 rewrite driver？</span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
 <span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>补齐 <span class="in">`x + 0 -&gt; x`</span> 的替换动作。</span>
 <span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
 <span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>两个都正确但互相逆向的 canonicalization 如何避免振荡？</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> C<span class="op">++</span> 片段：假设已确认 rhs 是整数 <span class="dv">0</span>。</span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>LogicalResult matchAndRewrite(arith::AddIOp op,</span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>                              PatternRewriter <span class="op">&amp;</span>rewriter) const override {</span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>  Value x <span class="op">=</span> op.getLhs()<span class="op">;</span></span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>  rewriter.______(op, ______)<span class="op">;</span></span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> success()<span class="op">;</span></span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>LogicalResult matchAndRewrite(arith::AddIOp op,</span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>                              PatternRewriter <span class="op">&amp;</span>rewriter) const override {</span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>  Value x <span class="op">=</span> op.getLhs()<span class="op">;</span></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>  rewriter.replaceOp(op, x)<span class="op">;</span></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> success()<span class="op">;</span></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>pattern 检查根 op 与额外条件，创建新 op 后 <span class="in">`replaceOp`</span>；greedy driver 反复应用直到固定点或达到限制。</span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：不能绕过 rewriter 直接 erase/replace 被管理的 op；A→B 与 B→A 会振荡，pattern 必须有单调度量。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：小 pattern 易组合，但贪心结果受 benefit 与可匹配顺序影响；复杂全局优化可能需要专用算法。</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Pattern Rewriter</span><span class="co">](https://mlir.llvm.org/docs/PatternRewriter/)</span></span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Toy Tutorial</span><span class="co">](https://mlir.llvm.org/docs/Tutorials/Toy/)</span></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>在完整插件环境运行 pass 两次，第二次 IR 应不再变化；当前无构建环境时做 API/def-use 静态审查。</span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Pass、PatternRewriter 与贪心重写”的工作机制。</span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>直接调用 <span class="in">`op.erase()`</span> 为什么可能破坏 rewrite driver？</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>两个都正确但互相逆向的 canonicalization 如何避免振荡？</span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>LogicalResult matchAndRewrite(arith::AddIOp op,</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>                              PatternRewriter <span class="op">&amp;</span>rewriter) const override {</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a>  Value x <span class="op">=</span> op.getLhs()<span class="op">;</span></span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a>  rewriter.replaceOp(op, x)<span class="op">;</span></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> success()<span class="op">;</span></span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（工作队列装载与模式优先级排序）**：Pass 将目标 Region 下的全部 Operation 压入 <span class="in">`GreedyPatternRewriteDriver`</span> 的工作队列（Worklist），并将已注册的 RewritePattern 按照 <span class="in">`PatternBenefit`</span> 严格从大到小建立决策树。驱动器以拓扑或逆序弹出待处理的候选 Operation。</span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（受控匹配与监听器级联感知）**：对候选 Op 依次执行 Pattern 的 <span class="in">`matchAndRewrite`</span>。一旦命中，所有 IR 拓扑修改严格通过 <span class="in">`PatternRewriter`</span> 代理执行（如 <span class="in">`replaceOp`</span>、<span class="in">`eraseOp`</span>）。Rewriter 自动将旧结果的所有使用边重定向到新值，并在后台通知 Driver 监听器，将受影响的上游生产者与下游使用者重新加回工作队列。</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（不动点收敛与无缝移交）**：驱动器持续循环消化工作队列中的连锁反应。当队列完全清空且没有任何 Pattern 能够再次触发时，IR 状态达到数学意义上的“不动点（Fixed Point）”，驱动器验证无悬空引用后退出，将纯净、紧凑的高质量 IR 交付给后续编译阶段。</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>在 <span class="in">`GreedyPatternRewriteDriver`</span> 框架下，直接绕过 Rewriter 调用 <span class="in">`op.erase()`</span> 会引发极其致命的内存与数据流不一致问题：</span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**野指针悬空与内存段错误（Use-After-Free）**：</span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a>   驱动器内部维护着包含待处理 Op 指针的工作队列（Worklist）与活跃节点哈希集合。若直接调用 <span class="in">`op.erase()`</span>，C++ 底层堆内存被立即释放或回收；但驱动器完全未被通知，其队列中依然残留着该指针。在后续轮次驱动器从队列中取出该指针并调用虚函数时，会立即发生非法内存解引用，导致编译器崩溃。</span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**破坏 Def-Use 链与图拓扑完整性**：</span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a>   <span class="in">`rewriter.replaceOp()`</span> 会负责把旧节点产生的所有 SSA Result 安全重定向给替代变量，然后再安排销毁。若直接 <span class="in">`op.erase()`</span>，所有依赖该节点的下游操作数指针将直接悬空，破坏 SSA 形式的不变式。</span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a>消除两个逆向规范化规则振荡（Oscillation）的标准编译工程方法是**建立严格的全序单调性度量（Strictly Monotonic Order）**：</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**确立规范化单一黄金标准（Canonical Form）**：</span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a>   编译器架构设计必须强制约定唯一的标准规范形式。例如，若规定乘加操作必须融合成 <span class="in">`fma(a, b, c)`</span>，就绝对不能在同一个重写集合中注册将 <span class="in">`fma`</span> 拆解回 <span class="in">`add(mul(a, b), c)`</span> 的反向 Pattern。</span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**设计不可逆的单调递减势函数（Potential Function）**：</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a>   若两个形式在不同场景下各有优势，必须引入严格的守卫条件（Guard Condition）。例如：</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>规则 A 仅当操作数可立即被常量折叠时才展开；</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>规则 B 仅当能消除重复子表达式时才合并；</span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a>   保证 IR 在度量指标（如 Operation 总数、嵌套深度、或常量操作数按字典序严格向右放置）上沿着单向不可逆的有向无环图（DAG）演进，从而在数学上证明不动点必定在有限步内收敛。</span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Pattern Rewriter</span><span class="co">](https://mlir.llvm.org/docs/PatternRewriter/)</span></span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Toy Tutorial</span><span class="co">](https://mlir.llvm.org/docs/Tutorials/Toy/)</span></span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

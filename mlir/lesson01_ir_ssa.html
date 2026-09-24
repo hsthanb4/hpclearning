@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -577,31 +606,48 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>MLIR 的统一节点是 Operation；Module、函数、循环都通过 operation 嵌套 region/block 表达，多结果 SSA 连接数据流。</p>
+<p>在现代异构编译基础设施中，传统编译器的中间表示（如 LLVM IR）以一维指令流与基本块（Basic Block）CFG 为中心，虽然极其适合底层标量优化与机器码生成，但丢失了高层张量算子结构、循环多面体多维嵌套以及硬件特定语义。 为了统一从高层图计算（PyTorch / TensorFlow / JAX）到底层 GPU / NPU 汇编的全栈表示，<strong>MLIR（Multi-Level Intermediate Representation）</strong>提出了彻底递归正交的层次化抽象： 整个编译世界由一个统一的核心原语构成——<strong>Operation（操作）</strong>。 顶层模块（<code>builtin.module</code>）、函数（<code>func.func</code>）、仿射循环（<code>affine.for</code>）、结构化条件控制（<code>scf.if</code>）以及基本算术计算（<code>arith.addi</code>），在 MLIR 统一对象模型中全部是 Operation！ 本课解决的核心工程问题是：<strong>理解 Operation、Region、Block 与 SSA（静态单赋值）的递归嵌套树状结构，掌握基于 Block Argument 的现代无 <span class="math inline">\(\phi\)</span> 节点控制流，以及手写符合 MLIR 验证器（Verifier）严密契约的语法树</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>operation 消费 operands，产生 SSA results；region 含 blocks，block arguments 表达控制流入口值，terminator 结束 region。</p>
+<p>MLIR 递归嵌套层次与内存验证流程如图 1-1 与图 1-2 所示：</p>
+<ol type="1">
+<li><strong>统一递归包含层次（Operation Tree）</strong>： <span class="math display">\[ \text{Operation} \longrightarrow \text{Region} \longrightarrow \text{Block} \longrightarrow \text{Operation} \]</span>
+<ul>
+<li><strong>Operation</strong>：语义执行单元。它可以拥有 0 或多个操作数（Operands）、产生 0 或多个静态单赋值返回值（SSA Results）、绑定一组编译期属性（Attributes）、拥有特定类型（Types），并嵌套 0 或多个 Region。</li>
+<li><strong>Region</strong>：封装一个局部的控制流与局部作用域容器。例如 <code>func.func</code> 的函数体是一个 Region，<code>scf.if</code> 的 then/else 分支各是一个 Region。</li>
+<li><strong>Block</strong>：Region 内部的基本块（如 <code>^bb0</code>）。Block 包含线性排列的 Operation 列表，并强制以终止操作（Terminator Operation，如 <code>func.return</code>、<code>scf.yield</code> 或 <code>cf.br</code>）结尾。</li>
+</ul></li>
+<li><strong>消灭 <span class="math inline">\(\phi\)</span> 节点的 Block Arguments（块参数控制流）</strong>： 在传统 LLVM IR 中，基本块汇聚控制流必须依赖 <span class="math inline">\(\phi\)</span> 节点（Phi Node），这极易在优化 Pass 移动指令时产生隐蔽的悬空引用 Bug。 MLIR 革命性地废弃了 <span class="math inline">\(\phi\)</span> 节点，转而采用类似函数调用的<strong>块参数（Block Arguments）</strong>：每个 Block 可以声明参数列表（如 <code>^bb1(%x: i32):</code>），上游块通过跳转指令 <code>cf.br ^bb1(%val)</code> 显式传参。</li>
+<li><strong>文本解析与语义验证（Verifier Pipeline）</strong>： 如图 1-2 所示，文本源码经过 <code>AsmParser</code> 词法/语法解析生成内存中的 Operation AST。随后进入 <code>verify()</code> 阶段：验证所有操作数的类型、属性的合法性、支配关系（Dominance）、以及终止操作与外层 Region 的类型签名匹配。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>SSA 值必须先定义后使用且类型精确匹配；每个 region 的 terminator 和 symbol 可见性规则必须满足。</p>
+<ul>
+<li><strong>SSA 值的严格支配约束（Dominance Invariant）</strong>： 在同一个 Block 或存在嵌套关系的 Region 中，SSA 值必须<strong>先定值（Definition），后使用（Use）</strong>。这不仅是文本的书写顺序，更是支配树（Dominance Tree）的物理拓扑约束。未定义的 SSA 值无法通过符号绑定，会直接触发 <code>use of undeclared SSA value</code> 诊断错误。</li>
+<li><strong>孤儿块与终止指令缺失（Missing Terminator）</strong>： 每个基本块（Block）的最后一条操作必须是具备 <code>IsTerminator</code> Trait 的终止操作。若遗漏 <code>func.return</code> 或 <code>scf.yield</code>，Verifier 会抛出 <code>block must end with a terminator</code> 语法校验失败。</li>
+<li><strong>Region 隔离与符号可见性（IsolatedFromAbove Trait）</strong>： 拥有 <code>IsolatedFromAbove</code> 特征的操作（如 <code>func.func</code>、<code>builtin.module</code>）其内部 Region 是完全封闭的，<strong>绝对不能直接捕获外层作用域的 SSA 变量</strong>。任何外部数据必须显式通过参数传递进入。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>结构化 region 便于高层变换，但比线性三地址码多一层嵌套；打印 generic form 有助于消除语法糖误解。</p>
+<ul>
+<li><strong>结构化控制流（Structured Control Flow）的分析优势</strong>： MLIR 倡导在前端阶段保留结构化控制流（如 <code>scf.if</code>、<code>scf.for</code>、<code>affine.for</code>），其循环边界和条件分支作为 Operation 的属性或操作数显式存在。这使得循环展开、仿射多面体变换、并行化分析极为简明，避免了过早将循环打散成 CFG 跳转图后导致难以逆向分析控制流拓扑。</li>
+<li><strong>内存树开销 vs 表达力</strong>： 相比于扁平线性的传统三地址码，MLIR 在内存中维护的是一颗深度嵌套的 C++ 指针树（每个 Operation 包含 Operand 链表、Result 数组与 Region 向量）。这带来了一定的内存常数开销，但为多层级 Dialect 逐步降级（Lowering）提供了无可替代的灵活性。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p><code>%0 = arith.addi %a,%b : i32</code> 中 <code>%0</code> 是 result，<code>%a/%b</code> 是 operands，<code>arith.addi</code> 无 region。</p>
+<p>以文本指令 <code>%sum = arith.addi %a, %b : i32</code> 为例： - <strong>Operation 标识</strong>：<code>arith.addi</code>（隶属于算术方言 <code>arith</code> 的整数加法操作）。 - <strong>Operands</strong>：<code>%a</code> 与 <code>%b</code>，必须为合法的 SSA 值且类型均为 <code>i32</code>。 - <strong>Result</strong>：产生唯一的 SSA 变量 <code>%sum</code>，类型为 <code>i32</code>。 - <strong>Generic 展开形式</strong>： 该语句的语法糖底层完全等价于通用规范形式： <code>"arith.addi"(%a, %b) : (i32, i32) -&gt; i32</code> 通用格式暴露了 MLIR 一切皆 Operation 的统一内存模型本质。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐整数加法 operation 和返回值。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="3802ffb2" class="cell" data-course_role="exercise">
+<div id="69c038fe" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson01.mlir</span>
@@ -657,7 +703,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="8b1d463e" class="cell" data-course_role="solution">
+<div id="dc76e87b" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson01.mlir</span>
@@ -671,15 +717,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>operation 消费 operands，产生 SSA results；region 含 blocks，block arguments 表达控制流入口值，terminator 结束 region。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（操作数解析与局部作用域绑定）</strong>：调用方将输入张量/标量绑定到函数或基本块参数（Block Arguments，如 <code>%a: i32, %b: i32</code>）。外层 Operation（如 <code>func.func</code>）开辟包含入口 Block <code>^bb0</code> 的 Region 局部作用域，建立局部 SSA 符号表。 2. <strong>状态变化阶段（Operation 序列求值与 SSA 链条传递）</strong>：顺序执行 Block 内的 Operation 序列。每个 Operation 消费上游的 SSA 操作数（Operands），根据自身语义规则（如 <code>arith.addi</code> 执行补码加法）计算并产生全新的强类型 SSA 结果变量（Results，如 <code>%sum</code>）。数据流严格沿着由 Def-Use 边构成的有向无环图流动，中间状态不可变。 3. <strong>输出阶段（终止操作截断与 Region 结果向上回传）</strong>：Block 的最后一条指令必须是 Terminator 操作（如 <code>func.return %sum : i32</code>）。终止操作捕获当前的 SSA 状态，验证返回类型与函数外层签名的严格一致性，随后将控制流和计算结果移交给调用方，退出当前 Region。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：SSA 值必须先定义后使用且类型精确匹配；每个 region 的 terminator 和 symbol 可见性规则必须满足。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在 SSA（静态单赋值）语义和编译器数据流分析中，在定值之前使用变量绝对不只是简单的代码文本行数先后问题，而是触碰了编译器的核心代数不变式： 1. <strong>支配性（Dominance）与因果链崩溃</strong>：SSA 的核心形式化基础是<strong>支配性（Dominance）</strong>——定义点必须在控制流图（CFG）中严格支配（Dominate）所有的使用点。如果在使用点之前该变量尚未被定义，意味着存在一条控制流路径使得该变量未经初始化就被读取，在物理机器上对应读取未初始化的悬空寄存器或脏内存。 2. <strong>数据流依赖（Def-Use Chain）的不可构造性</strong>：MLIR 在构建内存 IR 树时，每个 SSA Value 维护着一条引用它的 User 双向链表。若在使用时尚无定义实体，编译器无法绑定操作数的来源指针，无法进行常量折叠、活性分析（Liveness Analysis）以及寄存器生命周期分配，直接破坏编译器的数据结构完整性。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：结构化 region 便于高层变换，但比线性三地址码多一层嵌套；打印 generic form 有助于消除语法糖误解。</p>
+<p>在 MLIR 中，表达 <code>if-else</code> 双分支均产生返回值有两种标准范式，其中现代高层 MLIR 最推崇<strong>结构化控制流（SCF: Structured Control Flow）</strong>： 1. <strong>结构化控制流范式（<code>scf.if</code>）</strong>： <code>scf.if</code> 操作自身直接产生 SSA 返回值，then 和 else 分支 Region 各自以 <code>scf.yield</code> 将分支内计算的值传出： <code>mlir    %res = scf.if %cond -&gt; (i32) {      %val1 = arith.constant 1 : i32      scf.yield %val1 : i32    } else {      %val2 = arith.constant 2 : i32      scf.yield %val2 : i32    }</code> 此种结构下完全不需要 <span class="math inline">\(\phi\)</span> 节点，数据流与控制流高度结构化闭环。 2. <strong>底层 CFG 块参数范式（<code>cf.cond_br</code> + Block Arguments）</strong>： 在降级到底层控制流方言时，通过条件跳转进入两个分支 Block，两个分支在汇合块 <code>^merge(%phi_val: i32)</code> 处通过显式 Block Argument 传参： <code>cf.br ^merge(%val1 : i32)</code> 与 <code>cf.br ^merge(%val2 : i32)</code>。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1228,111 +1274,161 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>MLIR 的统一节点是 Operation；Module、函数、循环都通过 operation 嵌套 region/block 表达，多结果 SSA 连接数据流。</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>operation 消费 operands，产生 SSA results；region 含 blocks，block arguments 表达控制流入口值，terminator 结束 region。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>在现代异构编译基础设施中，传统编译器的中间表示（如 LLVM IR）以一维指令流与基本块（Basic Block）CFG 为中心，虽然极其适合底层标量优化与机器码生成，但丢失了高层张量算子结构、循环多面体多维嵌套以及硬件特定语义。</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>为了统一从高层图计算（PyTorch / TensorFlow / JAX）到底层 GPU / NPU 汇编的全栈表示，**MLIR（Multi-Level Intermediate Representation）**提出了彻底递归正交的层次化抽象：</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>整个编译世界由一个统一的核心原语构成——**Operation（操作）**。</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>顶层模块（<span class="in">`builtin.module`</span>）、函数（<span class="in">`func.func`</span>）、仿射循环（<span class="in">`affine.for`</span>）、结构化条件控制（<span class="in">`scf.if`</span>）以及基本算术计算（<span class="in">`arith.addi`</span>），在 MLIR 统一对象模型中全部是 Operation！</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解 Operation、Region、Block 与 SSA（静态单赋值）的递归嵌套树状结构，掌握基于 Block Argument 的现代无 $\phi$ 节点控制流，以及手写符合 MLIR 验证器（Verifier）严密契约的语法树**。</span>
 <span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
 <span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>SSA 值必须先定义后使用且类型精确匹配；每个 region 的 terminator 和 symbol 可见性规则必须满足。</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>MLIR 递归嵌套层次与内存验证流程如图 1-1 与图 1-2 所示：</span>
 <span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>结构化 region 便于高层变换，但比线性三地址码多一层嵌套；打印 generic form 有助于消除语法糖误解。</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="in">`%0 = arith.addi %a,%b : i32`</span> 中 <span class="in">`%0`</span> 是 result，<span class="in">`%a/%b`</span> 是 operands，<span class="in">`arith.addi`</span> 无 region。</span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>补齐整数加法 operation 和返回值。</span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson01.mlir</span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> ______ <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> ______ : i32</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**统一递归包含层次（Operation Tree）**：</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>   $$ \text{Operation} \longrightarrow \text{Region} \longrightarrow \text{Block} \longrightarrow \text{Operation} $$</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Operation**：语义执行单元。它可以拥有 0 或多个操作数（Operands）、产生 0 或多个静态单赋值返回值（SSA Results）、绑定一组编译期属性（Attributes）、拥有特定类型（Types），并嵌套 0 或多个 Region。</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Region**：封装一个局部的控制流与局部作用域容器。例如 <span class="in">`func.func`</span> 的函数体是一个 Region，<span class="in">`scf.if`</span> 的 then/else 分支各是一个 Region。</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Block**：Region 内部的基本块（如 <span class="in">`^bb0`</span>）。Block 包含线性排列的 Operation 列表，并强制以终止操作（Terminator Operation，如 <span class="in">`func.return`</span>、<span class="in">`scf.yield`</span> 或 <span class="in">`cf.br`</span>）结尾。</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**消灭 $\phi$ 节点的 Block Arguments（块参数控制流）**：</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>   在传统 LLVM IR 中，基本块汇聚控制流必须依赖 $\phi$ 节点（Phi Node），这极易在优化 Pass 移动指令时产生隐蔽的悬空引用 Bug。</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>   MLIR 革命性地废弃了 $\phi$ 节点，转而采用类似函数调用的**块参数（Block Arguments）**：每个 Block 可以声明参数列表（如 <span class="in">`^bb1(%x: i32):`</span>），上游块通过跳转指令 <span class="in">`cf.br ^bb1(%val)`</span> 显式传参。</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**文本解析与语义验证（Verifier Pipeline）**：</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>   如图 1-2 所示，文本源码经过 <span class="in">`AsmParser`</span> 词法/语法解析生成内存中的 Operation AST。随后进入 <span class="in">`verify()`</span> 阶段：验证所有操作数的类型、属性的合法性、支配关系（Dominance）、以及终止操作与外层 Region 的类型签名匹配。</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**SSA 值的严格支配约束（Dominance Invariant）**：</span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>  在同一个 Block 或存在嵌套关系的 Region 中，SSA 值必须**先定值（Definition），后使用（Use）**。这不仅是文本的书写顺序，更是支配树（Dominance Tree）的物理拓扑约束。未定义的 SSA 值无法通过符号绑定，会直接触发 <span class="in">`use of undeclared SSA value`</span> 诊断错误。</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**孤儿块与终止指令缺失（Missing Terminator）**：</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  每个基本块（Block）的最后一条操作必须是具备 <span class="in">`IsTerminator`</span> Trait 的终止操作。若遗漏 <span class="in">`func.return`</span> 或 <span class="in">`scf.yield`</span>，Verifier 会抛出 <span class="in">`block must end with a terminator`</span> 语法校验失败。</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Region 隔离与符号可见性（IsolatedFromAbove Trait）**：</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>  拥有 <span class="in">`IsolatedFromAbove`</span> 特征的操作（如 <span class="in">`func.func`</span>、<span class="in">`builtin.module`</span>）其内部 Region 是完全封闭的，**绝对不能直接捕获外层作用域的 SSA 变量**。任何外部数据必须显式通过参数传递进入。</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**结构化控制流（Structured Control Flow）的分析优势**：</span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>  MLIR 倡导在前端阶段保留结构化控制流（如 <span class="in">`scf.if`</span>、<span class="in">`scf.for`</span>、<span class="in">`affine.for`</span>），其循环边界和条件分支作为 Operation 的属性或操作数显式存在。这使得循环展开、仿射多面体变换、并行化分析极为简明，避免了过早将循环打散成 CFG 跳转图后导致难以逆向分析控制流拓扑。</span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**内存树开销 vs 表达力**：</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>  相比于扁平线性的传统三地址码，MLIR 在内存中维护的是一颗深度嵌套的 C++ 指针树（每个 Operation 包含 Operand 链表、Result 数组与 Region 向量）。这带来了一定的内存常数开销，但为多层级 Dialect 逐步降级（Lowering）提供了无可替代的灵活性。</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
 <span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>有 MLIR 工具链时运行 <span class="in">`mlir-opt /tmp/lesson01.mlir -verify-diagnostics`</span>；否则逐项检查 def-use 和类型。</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“IR 层级、SSA 与 Region”的工作机制。</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>把 <span class="in">`%sum`</span> 在定义之前使用，为什么不仅是文本顺序问题？</span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>如何在 IR 中表达 if 的两个分支都产生一个值？</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>以文本指令 <span class="in">`%sum = arith.addi %a, %b : i32`</span> 为例：</span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Operation 标识**：<span class="in">`arith.addi`</span>（隶属于算术方言 <span class="in">`arith`</span> 的整数加法操作）。</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Operands**：<span class="in">`%a`</span> 与 <span class="in">`%b`</span>，必须为合法的 SSA 值且类型均为 <span class="in">`i32`</span>。</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Result**：产生唯一的 SSA 变量 <span class="in">`%sum`</span>，类型为 <span class="in">`i32`</span>。</span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Generic 展开形式**：</span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>  该语句的语法糖底层完全等价于通用规范形式：</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>  <span class="in">`"arith.addi"(%a, %b) : (i32, i32) -&gt; i32`</span></span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a>  通用格式暴露了 MLIR 一切皆 Operation 的统一内存模型本质。</span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>补齐整数加法 operation 和返回值。</span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson01.mlir</span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> ______ <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> ______ : i32</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
 <span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>有 MLIR 工具链时运行 <span class="in">`mlir-opt /tmp/lesson01.mlir -verify-diagnostics`</span>；否则逐项检查 def-use 和类型。</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
 <span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson01.mlir</span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> arith.addi <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> <span class="op">%</span><span class="bu">sum</span> : i32</span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>operation 消费 operands，产生 SSA results；region 含 blocks，block arguments 表达控制流入口值，terminator 结束 region。</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：SSA 值必须先定义后使用且类型精确匹配；每个 region 的 terminator 和 symbol 可见性规则必须满足。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：结构化 region 便于高层变换，但比线性三地址码多一层嵌套；打印 generic form 有助于消除语法糖误解。</span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“IR 层级、SSA 与 Region”的工作机制。</span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>把 <span class="in">`%sum`</span> 在定义之前使用，为什么不仅是文本顺序问题？</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>如何在 IR 中表达 if 的两个分支都产生一个值？</span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Language Reference</span><span class="co">](https://mlir.llvm.org/docs/LangRef/)</span></span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Toy Tutorial</span><span class="co">](https://mlir.llvm.org/docs/Tutorials/Toy/)</span></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
 <span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson01.mlir</span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>  func.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> arith.addi <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a>    func.<span class="cf">return</span> <span class="op">%</span><span class="bu">sum</span> : i32</span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（操作数解析与局部作用域绑定）**：调用方将输入张量/标量绑定到函数或基本块参数（Block Arguments，如 <span class="in">`%a: i32, %b: i32`</span>）。外层 Operation（如 <span class="in">`func.func`</span>）开辟包含入口 Block <span class="in">`^bb0`</span> 的 Region 局部作用域，建立局部 SSA 符号表。</span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（Operation 序列求值与 SSA 链条传递）**：顺序执行 Block 内的 Operation 序列。每个 Operation 消费上游的 SSA 操作数（Operands），根据自身语义规则（如 <span class="in">`arith.addi`</span> 执行补码加法）计算并产生全新的强类型 SSA 结果变量（Results，如 <span class="in">`%sum`</span>）。数据流严格沿着由 Def-Use 边构成的有向无环图流动，中间状态不可变。</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（终止操作截断与 Region 结果向上回传）**：Block 的最后一条指令必须是 Terminator 操作（如 <span class="in">`func.return %sum : i32`</span>）。终止操作捕获当前的 SSA 状态，验证返回类型与函数外层签名的严格一致性，随后将控制流和计算结果移交给调用方，退出当前 Region。</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>在 SSA（静态单赋值）语义和编译器数据流分析中，在定值之前使用变量绝对不只是简单的代码文本行数先后问题，而是触碰了编译器的核心代数不变式：</span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**支配性（Dominance）与因果链崩溃**：SSA 的核心形式化基础是**支配性（Dominance）**——定义点必须在控制流图（CFG）中严格支配（Dominate）所有的使用点。如果在使用点之前该变量尚未被定义，意味着存在一条控制流路径使得该变量未经初始化就被读取，在物理机器上对应读取未初始化的悬空寄存器或脏内存。</span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**数据流依赖（Def-Use Chain）的不可构造性**：MLIR 在构建内存 IR 树时，每个 SSA Value 维护着一条引用它的 User 双向链表。若在使用时尚无定义实体，编译器无法绑定操作数的来源指针，无法进行常量折叠、活性分析（Liveness Analysis）以及寄存器生命周期分配，直接破坏编译器的数据结构完整性。</span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a>在 MLIR 中，表达 <span class="in">`if-else`</span> 双分支均产生返回值有两种标准范式，其中现代高层 MLIR 最推崇**结构化控制流（SCF: Structured Control Flow）**：</span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**结构化控制流范式（`scf.if`）**：</span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a>   <span class="in">`scf.if`</span> 操作自身直接产生 SSA 返回值，then 和 else 分支 Region 各自以 <span class="in">`scf.yield`</span> 将分支内计算的值传出：</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a>   <span class="in">```mlir</span></span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="in">   %res = scf.if %cond -&gt; (i32) {</span></span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a><span class="in">     %val1 = arith.constant 1 : i32</span></span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="in">     scf.yield %val1 : i32</span></span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="in">   } else {</span></span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a><span class="in">     %val2 = arith.constant 2 : i32</span></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="in">     scf.yield %val2 : i32</span></span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a><span class="in">   }</span></span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="in">   ```</span></span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a>   此种结构下完全不需要 $\phi$ 节点，数据流与控制流高度结构化闭环。</span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**底层 CFG 块参数范式（`cf.cond_br` + Block Arguments）**：</span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a>   在降级到底层控制流方言时，通过条件跳转进入两个分支 Block，两个分支在汇合块 <span class="in">`^merge(%phi_val: i32)`</span> 处通过显式 Block Argument 传参：</span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a>   <span class="in">`cf.br ^merge(%val1 : i32)`</span> 与 <span class="in">`cf.br ^merge(%val2 : i32)`</span>。</span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Language Reference</span><span class="co">](https://mlir.llvm.org/docs/LangRef/)</span></span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Toy Tutorial</span><span class="co">](https://mlir.llvm.org/docs/Tutorials/Toy/)</span></span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

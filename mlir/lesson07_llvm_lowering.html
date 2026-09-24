@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -554,40 +583,74 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>MLIR 通常保留多层 IR：高层语义先变为结构化计算，再降控制流/内存，最后到 LLVM dialect 并翻译成 LLVM IR。</p>
+<p>在现代编译器体系中，“一步到位”将高层神经网络算子直接编译为底层硬件汇编已被证明是一场灾难：复杂性剧烈耦合，优化 Pass 无法复用。 MLIR 确立了工业界最具代表性的编译范式——<strong>渐进式多级降低（Progressive Multi-Level Lowering）</strong>： <span class="math display">\[ \text{High-Level Graph (Torch/TOSA)} \xrightarrow{\text{图融合}} \text{Linalg on Tensors} \xrightarrow{\text{分块缓冲}} \text{SCF / MemRef} \xrightarrow{\text{控制流扁平化}} \text{CF / LLVM Dialect} \xrightarrow{\text{翻译}} \text{LLVM IR} \xrightarrow{\text{机器码}} \text{ELF / PTX} \]</span> 每一个编译阶段仅剥离一层抽象，消灭一个维度的语义（例如：先消除多维张量代数，再消除结构化循环，再消除结构化控制流，最后消除高级内存描述符）。 本课解决的核心工程问题是：<strong>理解渐进降级流水线的强前置依赖图，深刻辨析 MLIR 中的 <code>llvm</code> Dialect 与底层独立 <code>llvm::Module</code>（LLVM IR）的本质分水岭，掌握从 LLVM 方言经过 <code>mlir-translate</code> 导出为机器码的端到端完整链路</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>每阶段只消除一类抽象并保留可验证接口；<code>convert-func-to-llvm</code>、<code>convert-arith-to-llvm</code> 等需要类型和依赖 dialect 已准备好。</p>
+<p>渐进降级拓扑与最终代码生成时序如图 7-1 与图 7-2 所示：</p>
+<ol type="1">
+<li><strong>中端逐步降解（Middle-end Lowering Pipeline）</strong>：
+<ul>
+<li>阶段 1：<code>linalg</code> 算子通过 Tiling 和 Bufferization 降解为 <code>scf.for</code>（结构化循环）和 <code>memref</code>（物理内存读写）；</li>
+<li>阶段 2：<code>scf.for</code> / <code>scf.if</code> 通过 <code>-convert-scf-to-cf</code> 展开为带条件跳转的基本块控制流（<code>cf.br</code> / <code>cf.cond_br</code>）；</li>
+<li>阶段 3：<code>memref</code> 通过 <code>-finalize-memref-to-llvm</code> 展开为包含物理基指针、对齐指针、偏移量与多维步长的一维扁平 LLVM 结构体描述符（MemRef Descriptor Struct）；</li>
+<li>阶段 4：<code>arith</code> 算术指令与 <code>func</code> 函数通过 <code>-convert-arith-to-llvm</code> 和 <code>-convert-func-to-llvm</code> 最终降解为纯粹的 <code>llvm</code> Dialect。</li>
+</ul></li>
+<li><strong>LLVM Dialect 的本质</strong>： 此时虽然所有操作的前缀都变成了 <code>llvm.</code>（如 <code>llvm.func</code>、<code>llvm.add</code>、<code>llvm.load</code>、<code>llvm.return</code>），但它们在内存中<strong>仍然完完全全是 MLIR 的 Operation 实例</strong>！它们仍然遵循 MLIR 的 C++ 内存对象树，并驻留在 <code>mlir::MLIRContext</code> 之中。</li>
+<li><strong>离开 MLIR 世界的物理翻译（<code>mlir-translate</code>）</strong>： 如图 7-2 所示，只有调用 <code>mlir-translate --mlir-to-llvmir</code> 时，程序才会启动 1:1 的树遍历，在内存中正式构建出真正的 LLVM 原生数据结构 <code>llvm::Module</code> 和 <code>llvm::Instruction</code>。随后移交给标准 LLVM 后端优化器（<code>opt -O3</code>），经过指令选择（ISel）、寄存器分配（RegAlloc）最终编译为目标平台的机器码（x86/ARM ELF 或 NVIDIA PTX/CUBIN）。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>pass 顺序是前置条件图，不是随意列表；LLVM dialect 仍是 MLIR operation，尚未等于 <code>.ll</code> 文本或机器码。</p>
+<ul>
+<li><strong>Pass 管道的严格拓扑偏序（Pass Order Invariant）</strong>： Pass 列表绝对不是任意堆砌的无序集合。<code>-convert-func-to-llvm</code> 必须在所有函数参数中引用的高层类型（如 <code>memref</code>）已经被完全转换为 LLVM 合法类型之后才能执行；若过早执行 <code>-convert-func-to-llvm</code>，由于函数签名中还残留未知的 <code>memref</code>，Pass 会立即报错拒绝降级。</li>
+<li><strong>混淆 LLVM Dialect 与 LLVM IR</strong>： 最常见的新手认知误区是以为打印出 <code>llvm.add</code> 就等于生成了汇编或 LLVM IR。<code>llvm.add</code> 只是 MLIR 世界里对方言操作的一个镜像抽象，尚未逃离 MLIR 运行时的作用域，无法直接送入汇编器或链接器。</li>
+<li><strong>Index 类型的目标机器位宽依赖（DataLayout Constraint）</strong>： MLIR 的 <code>index</code> 类型表示平台指针大小。在降级到 LLVM 方言时，必须在 Module 上显式配置目标机器的数据布局属性（<code>DataLayout</code>，如 64 位下 <code>index -&gt; i64</code>），否则指针偏移计算会因位宽未决而报错。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>早降 LLVM 兼容性强但失去 tensor/loop 语义；晚降保留优化机会却需要更多 dialect 支持。</p>
+<ul>
+<li><strong>多层降级的收益倍增</strong>： 如图 7-1 所示，高层 Pass 负责做全局性、大粒度的算子融合与并行瓦片切分（耗时几十毫秒，带来数倍吞吐提升）；中层 Pass 负责消除冗余循环；底层 LLVM 负责精细的指令调度、SIMD 向量展开和寄存器染色分配。各层 Pass 各司其职，避免了底层编译器在杂乱无章的扁平代码中尝试逆向工程高阶意图。</li>
+<li><strong>异构目标（GPU/CPU）的分叉时机（Lowering Forking Point）</strong>： 在异构计算编译中，Host（CPU）与 Device（GPU）的代码必须在降级流水线中找准分叉点。过早分叉会导致公共优化逻辑无法复用；过晚分叉则无法充分利用 GPU 独有的硬件层次（如 Warp/Block 与 Shared Memory）。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p><code>arith.addi</code> 可降成 <code>llvm.add</code>；若 operand 还是未转换的 index/tensor，转换会失败或需 materialization。</p>
+<p>以一个极简整数加法函数的降级终端形态为例：</p>
+<pre class="mlir"><code>module {
+  llvm.func @add(%a: i32, %b: i32) -&gt; i32 {
+    %sum = llvm.add %a, %b : i32
+    llvm.return %sum : i32
+  }
+}</code></pre>
+<ul>
+<li><p>输入：经由 <code>arith.addi</code> 与 <code>func.func</code> 降级而来的终极 MLIR 形式。</p></li>
+<li><p>操作：<code>llvm.add</code> 与 <code>llvm.return</code> 严格映射到 LLVM 标量指令集。</p></li>
+<li><p>终检验证：运行 <code>mlir-translate --mlir-to-llvmir</code>，该 MLIR 会被无缝翻译成纯正的 LLVM IR：</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode llvm code-with-copy"><code class="sourceCode llvm"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">define</span> <span class="dt">i32</span> <span class="fu">@add</span>(<span class="dt">i32</span> <span class="fu">%0</span>, <span class="dt">i32</span> <span class="fu">%1</span>) {</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">%3</span> = <span class="kw">add</span> <span class="dt">i32</span> <span class="fu">%0</span>, <span class="fu">%1</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">ret</span> <span class="dt">i32</span> <span class="fu">%3</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>此时方可移交 <code>clang</code> 或 <code>llc</code> 编译为 <code>.o</code> 目标二进制机器码。</p></li>
+</ul>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 LLVM dialect 的整数加法与返回。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="e7222307" class="cell" data-course_role="exercise">
+<div id="de9a9010" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> ______ <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    ______ <span class="op">%</span><span class="bu">sum</span> : i32</span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> ______ <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    ______ <span class="op">%</span><span class="bu">sum</span> : i32</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
 <section id="检查方法" class="level3">
@@ -634,29 +697,29 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="af638c5b" class="cell" data-course_role="solution">
+<div id="850739c3" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
-<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> llvm.add <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
-<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    llvm.<span class="cf">return</span> <span class="op">%</span><span class="bu">sum</span> : i32</span>
-<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> llvm.add <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    llvm.<span class="cf">return</span> <span class="op">%</span><span class="bu">sum</span> : i32</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>每阶段只消除一类抽象并保留可验证接口；<code>convert-func-to-llvm</code>、<code>convert-arith-to-llvm</code> 等需要类型和依赖 dialect 已准备好。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（高阶结构化张量准备）</strong>：以已完成内存分析的结构化计算 IR（如 <code>linalg</code> + <code>scf</code> + <code>memref</code>）为起点，确保所有高阶数据流已经确定性降级为带物理布局和循环边界的中间形态。 2. <strong>状态变化阶段（洋葱式逐级抽象剥离与拓扑降级）</strong>： - 第一级（控制流降级）：运行 <code>-convert-scf-to-cf</code> 将高层 <code>scf.for/if</code> 剥离为基础分支控制流 <code>cf.br/cond_br</code>； - 第二级（内存描述符展开）：运行 <code>-finalize-memref-to-llvm</code> 将抽象多维 <code>memref</code> 展开为包含基地址指针、对齐指针与动态维度的 LLVM 扁平 Struct 描述符； - 第三级（算术与函数降级）：运行 <code>-convert-arith-to-llvm</code> 和 <code>-convert-func-to-llvm</code>，将所有算术操作与函数符号整体替换为 <code>llvm.</code> 前缀的镜像算子，此时全模块达到 100% 的 LLVM Dialect 合法纯净态。 3. <strong>输出阶段（跨框架物理翻译与机器码生成）</strong>：调用 <code>mlir-translate --mlir-to-llvmir</code> 走出 MLIR 上下文，在内存中正式具象化原生的 <code>llvm::Module</code> C++ 对象树。随后调用 LLVM 原生 TargetMachine 发射本地机器汇编或二进制可执行文件（ELF / PTX）。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：pass 顺序是前置条件图，不是随意列表；LLVM dialect 仍是 MLIR operation，尚未等于 <code>.ll</code> 文本或机器码。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在 MLIR 文本中看到 <code>llvm.*</code> 操作（如 <code>llvm.add</code>、<code>llvm.load</code>），<strong>绝对不能声称已经生成了物理机器码</strong>，原因在于： 1. <strong>依然属于 MLIR 内存树节点</strong>：<code>llvm.*</code> 仅仅是 MLIR 官方提供的众多 Dialect 之一（<code>LLVMDialect</code>）。它本质上与 <code>arith</code>、<code>linalg</code> 没有高下之分，依然是由 <code>mlir::Operation</code> 构成的抽象语法树，驻留在 <code>MLIRContext</code> 堆内存中，其数据结构并不是物理机器指令，甚至还不是原生的 <code>llvm::Instruction</code>。 2. <strong>距离机器码还有巨大的物理跨度</strong>： - 必须通过 <code>mlir-translate</code> 序列化并转换成原生的 <code>llvm::Module</code>（LLVM IR）； - 真正的机器码生成（如 x86 汇编或 PTX 汇编）是由 LLVM 后端（Target-specific Code Generator）完成的。这期间必须经历指令选择（Instruction Selection: SelectionDAG 或 GlobalISel）、机器指令调度（Machine Instruction Scheduling）、物理寄存器分配（Register Allocation）、栈帧布局（Prologue/Epilogue Insertion）等极其沉重复杂的硬件映射过程。当前代码甚至尚未脱离纯文本 IR 阶段。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：早降 LLVM 兼容性强但失去 tensor/loop 语义；晚降保留优化机会却需要更多 dialect 支持。</p>
+<p>在编译异构计算程序（如包含 CPU 宿主代码与 GPU 内核的神经网络）时，Pipeline 分叉的最佳架构时机是<strong>在 <code>gpu.launch_kernel</code> 或 Bufferize 之后的硬件并行抽象层分叉</strong>： 1. <strong>分叉点位置（<code>gpu</code> / <code>nvvm</code> 方言分界线）</strong>： 流水线在高层图优化、Linalg 算子融合和 Bufferization 阶段保持统一。当张量被分块并映射到 GPU 的 Grid / Block 并行层次后（即通过 <code>-convert-linalg-to-parallel-loops</code> 或生成 <code>gpu.launch_kernel</code>），流水线正式分叉： - <strong>Device（GPU）分支</strong>：将 <code>gpu.launch_kernel</code> 内部的 GPU Kernel 代码提取为嵌套的独立 <code>gpu.module</code>，在 GPU 侧进一步降低为 <code>nvvm</code> / <code>rocdl</code> 方言，随后由 <code>mlir-translate</code> 编译为 PTX/CUBIN 二进制字面量。 - <strong>Host（CPU）分支</strong>：将外层的调度控制流、内存分配（如 <code>gpu.alloc</code> 变为 CUDA Driver/Runtime API 调用 <code>cudaMalloc</code>）以及 Kernel 启动指令降级为 CPU 端的 <code>func</code> / <code>llvm</code> 方言，链接 CUDA Driver API 库。 2. <strong>过早与过晚分叉的工程坏味道</strong>：过早分叉（如在 Tensor 层）会导致 Host 和 Device 无法共享图优化和常量折叠；过晚分叉（如降到底层标量 LLVM 后）会导致 GPU 的多维网格、Warp 洗牌和共享内存语义被不可逆地打散，再也无法生成高性能的 GPU 汇编。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1142,162 +1205,217 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
     }
   });
   </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 7 课：逐级 Lowering 到 LLVM Dialect"</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
-<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：设计高层→linalg/scf→cf/memref→LLVM 的 lowering pipeline，并区分 LLVM dialect 与 LLVM IR。</span>
-<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
-<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
-<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
-<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
-<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
-<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：编译原理基础、C++ 阅读能力</span>
-<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：MLIR 通常保留多层 IR：高层语义先变为结构化计算，再降控制流/内存，最后到 LLVM dialect 并翻译成 LLVM IR。</span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/mlir_lowering_latency.png)</span>{width="85%"}</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 7-1：MLIR 渐进式多级降低与代码生成阶段性能加速比（基于 scientific-figure-making 绘制）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    MLIR[<span class="ot">"</span><span class="st">MLIR (LLVM Dialect)</span><span class="ot">"</span>] --&gt; MLIRTrans[<span class="ot">"</span><span class="st">mlir-translate --mlir-to-llvmir</span><span class="ot">"</span>]</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    MLIRTrans --&gt; LLVMIR[<span class="ot">"</span><span class="st">标准 LLVM IR 模块 (llvm::Module)</span><span class="ot">"</span>]</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    LLVMIR --&gt; Opt[<span class="ot">"</span><span class="st">LLVM 优化管线 (llc -O3 / 向量化 / 寄存器分配)</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Opt --&gt; Target[<span class="ot">"</span><span class="st">编译为平台原生目标码: x86/ARM ELF 或 NVIDIA PTX/CUBIN</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 7-2：从 LLVM Dialect 到底层硬件二进制目标代码的翻译运行流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>MLIR 通常保留多层 IR：高层语义先变为结构化计算，再降控制流/内存，最后到 LLVM dialect 并翻译成 LLVM IR。</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>每阶段只消除一类抽象并保留可验证接口；<span class="in">`convert-func-to-llvm`</span>、<span class="in">`convert-arith-to-llvm`</span> 等需要类型和依赖 dialect 已准备好。</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>pass 顺序是前置条件图，不是随意列表；LLVM dialect 仍是 MLIR operation，尚未等于 <span class="in">`.ll`</span> 文本或机器码。</span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>早降 LLVM 兼容性强但失去 tensor/loop 语义；晚降保留优化机会却需要更多 dialect 支持。</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="in">`arith.addi`</span> 可降成 <span class="in">`llvm.add`</span>；若 operand 还是未转换的 index/tensor，转换会失败或需 materialization。</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>补齐 LLVM dialect 的整数加法与返回。</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> ______ <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>    ______ <span class="op">%</span><span class="bu">sum</span> : i32</span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>用 <span class="in">`mlir-opt`</span> 验证，再用 <span class="in">`mlir-translate --mlir-to-llvmir`</span> 检查得到 LLVM IR；无工具时标记待验证。</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“逐级 Lowering 到 LLVM Dialect”的工作机制。</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>为什么看到 <span class="in">`llvm.*`</span> op 还不能声称已经生成机器码？</span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>若目标是 GPU/NVVM，应在哪一层分叉 pipeline？</span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>module {</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> llvm.add <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>    llvm.<span class="cf">return</span> <span class="op">%</span><span class="bu">sum</span> : i32</span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>  }</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>每阶段只消除一类抽象并保留可验证接口；<span class="in">`convert-func-to-llvm`</span>、<span class="in">`convert-arith-to-llvm`</span> 等需要类型和依赖 dialect 已准备好。</span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：pass 顺序是前置条件图，不是随意列表；LLVM dialect 仍是 MLIR operation，尚未等于 <span class="in">`.ll`</span> 文本或机器码。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：早降 LLVM 兼容性强但失去 tensor/loop 语义；晚降保留优化机会却需要更多 dialect 支持。</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Toy Tutorial</span><span class="co">](https://mlir.llvm.org/docs/Tutorials/Toy/)</span></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Dialect Conversion</span><span class="co">](https://mlir.llvm.org/docs/DialectConversion/)</span></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">LLVM Dialect</span><span class="co">](https://mlir.llvm.org/docs/Dialects/LLVM/)</span></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>:::</span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 7 课：逐级 Lowering 到 LLVM Dialect"</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：设计高层→linalg/scf→cf/memref→LLVM 的 lowering pipeline，并区分 LLVM dialect 与 LLVM IR。</span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-26"><a href="#cb5-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：编译原理基础、C++ 阅读能力</span>
+<span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：MLIR 通常保留多层 IR：高层语义先变为结构化计算，再降控制流/内存，最后到 LLVM dialect 并翻译成 LLVM IR。</span>
+<span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/mlir_lowering_latency.png)</span>{width="85%"}</span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 7-1：MLIR 渐进式多级降低与代码生成阶段性能加速比（基于 scientific-figure-making 绘制）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>    MLIR[<span class="ot">"</span><span class="st">MLIR (LLVM Dialect)</span><span class="ot">"</span>] --&gt; MLIRTrans[<span class="ot">"</span><span class="st">mlir-translate --mlir-to-llvmir</span><span class="ot">"</span>]</span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a>    MLIRTrans --&gt; LLVMIR[<span class="ot">"</span><span class="st">标准 LLVM IR 模块 (llvm::Module)</span><span class="ot">"</span>]</span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>    LLVMIR --&gt; Opt[<span class="ot">"</span><span class="st">LLVM 优化管线 (llc -O3 / 向量化 / 寄存器分配)</span><span class="ot">"</span>]</span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>    Opt --&gt; Target[<span class="ot">"</span><span class="st">编译为平台原生目标码: x86/ARM ELF 或 NVIDIA PTX/CUBIN</span><span class="ot">"</span>]</span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 7-2：从 LLVM Dialect 到底层硬件二进制目标代码的翻译运行流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>在现代编译器体系中，“一步到位”将高层神经网络算子直接编译为底层硬件汇编已被证明是一场灾难：复杂性剧烈耦合，优化 Pass 无法复用。</span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a>MLIR 确立了工业界最具代表性的编译范式——**渐进式多级降低（Progressive Multi-Level Lowering）**：</span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a>$$ \text{High-Level Graph (Torch/TOSA)} \xrightarrow{\text{图融合}} \text{Linalg on Tensors} \xrightarrow{\text{分块缓冲}} \text{SCF / MemRef} \xrightarrow{\text{控制流扁平化}} \text{CF / LLVM Dialect} \xrightarrow{\text{翻译}} \text{LLVM IR} \xrightarrow{\text{机器码}} \text{ELF / PTX} $$</span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a>每一个编译阶段仅剥离一层抽象，消灭一个维度的语义（例如：先消除多维张量代数，再消除结构化循环，再消除结构化控制流，最后消除高级内存描述符）。</span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解渐进降级流水线的强前置依赖图，深刻辨析 MLIR 中的 `llvm` Dialect 与底层独立 `llvm::Module`（LLVM IR）的本质分水岭，掌握从 LLVM 方言经过 `mlir-translate` 导出为机器码的端到端完整链路**。</span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>渐进降级拓扑与最终代码生成时序如图 7-1 与图 7-2 所示：</span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**中端逐步降解（Middle-end Lowering Pipeline）**：</span>
+<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 1：<span class="in">`linalg`</span> 算子通过 Tiling 和 Bufferization 降解为 <span class="in">`scf.for`</span>（结构化循环）和 <span class="in">`memref`</span>（物理内存读写）；</span>
+<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 2：<span class="in">`scf.for`</span> / <span class="in">`scf.if`</span> 通过 <span class="in">`-convert-scf-to-cf`</span> 展开为带条件跳转的基本块控制流（<span class="in">`cf.br`</span> / <span class="in">`cf.cond_br`</span>）；</span>
+<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 3：<span class="in">`memref`</span> 通过 <span class="in">`-finalize-memref-to-llvm`</span> 展开为包含物理基指针、对齐指针、偏移量与多维步长的一维扁平 LLVM 结构体描述符（MemRef Descriptor Struct）；</span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 4：<span class="in">`arith`</span> 算术指令与 <span class="in">`func`</span> 函数通过 <span class="in">`-convert-arith-to-llvm`</span> 和 <span class="in">`-convert-func-to-llvm`</span> 最终降解为纯粹的 <span class="in">`llvm`</span> Dialect。</span>
+<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**LLVM Dialect 的本质**：</span>
+<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a>   此时虽然所有操作的前缀都变成了 <span class="in">`llvm.`</span>（如 <span class="in">`llvm.func`</span>、<span class="in">`llvm.add`</span>、<span class="in">`llvm.load`</span>、<span class="in">`llvm.return`</span>），但它们在内存中**仍然完完全全是 MLIR 的 Operation 实例**！它们仍然遵循 MLIR 的 C++ 内存对象树，并驻留在 <span class="in">`mlir::MLIRContext`</span> 之中。</span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**离开 MLIR 世界的物理翻译（`mlir-translate`）**：</span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>   如图 7-2 所示，只有调用 <span class="in">`mlir-translate --mlir-to-llvmir`</span> 时，程序才会启动 1:1 的树遍历，在内存中正式构建出真正的 LLVM 原生数据结构 <span class="in">`llvm::Module`</span> 和 <span class="in">`llvm::Instruction`</span>。随后移交给标准 LLVM 后端优化器（<span class="in">`opt -O3`</span>），经过指令选择（ISel）、寄存器分配（RegAlloc）最终编译为目标平台的机器码（x86/ARM ELF 或 NVIDIA PTX/CUBIN）。</span>
+<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Pass 管道的严格拓扑偏序（Pass Order Invariant）**：</span>
+<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a>  Pass 列表绝对不是任意堆砌的无序集合。<span class="in">`-convert-func-to-llvm`</span> 必须在所有函数参数中引用的高层类型（如 <span class="in">`memref`</span>）已经被完全转换为 LLVM 合法类型之后才能执行；若过早执行 <span class="in">`-convert-func-to-llvm`</span>，由于函数签名中还残留未知的 <span class="in">`memref`</span>，Pass 会立即报错拒绝降级。</span>
+<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**混淆 LLVM Dialect 与 LLVM IR**：</span>
+<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a>  最常见的新手认知误区是以为打印出 <span class="in">`llvm.add`</span> 就等于生成了汇编或 LLVM IR。<span class="in">`llvm.add`</span> 只是 MLIR 世界里对方言操作的一个镜像抽象，尚未逃离 MLIR 运行时的作用域，无法直接送入汇编器或链接器。</span>
+<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Index 类型的目标机器位宽依赖（DataLayout Constraint）**：</span>
+<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a>  MLIR 的 <span class="in">`index`</span> 类型表示平台指针大小。在降级到 LLVM 方言时，必须在 Module 上显式配置目标机器的数据布局属性（<span class="in">`DataLayout`</span>，如 64 位下 <span class="in">`index -&gt; i64`</span>），否则指针偏移计算会因位宽未决而报错。</span>
+<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**多层降级的收益倍增**：</span>
+<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a>  如图 7-1 所示，高层 Pass 负责做全局性、大粒度的算子融合与并行瓦片切分（耗时几十毫秒，带来数倍吞吐提升）；中层 Pass 负责消除冗余循环；底层 LLVM 负责精细的指令调度、SIMD 向量展开和寄存器染色分配。各层 Pass 各司其职，避免了底层编译器在杂乱无章的扁平代码中尝试逆向工程高阶意图。</span>
+<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**异构目标（GPU/CPU）的分叉时机（Lowering Forking Point）**：</span>
+<span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a>  在异构计算编译中，Host（CPU）与 Device（GPU）的代码必须在降级流水线中找准分叉点。过早分叉会导致公共优化逻辑无法复用；过晚分叉则无法充分利用 GPU 独有的硬件层次（如 Warp/Block 与 Shared Memory）。</span>
+<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a>以一个极简整数加法函数的降级终端形态为例：</span>
+<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a><span class="in">```mlir</span></span>
+<span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a><span class="in">module {</span></span>
+<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a><span class="in">  llvm.func @add(%a: i32, %b: i32) -&gt; i32 {</span></span>
+<span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a><span class="in">    %sum = llvm.add %a, %b : i32</span></span>
+<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a><span class="in">    llvm.return %sum : i32</span></span>
+<span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a><span class="in">  }</span></span>
+<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a><span class="in">}</span></span>
+<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>输入：经由 <span class="in">`arith.addi`</span> 与 <span class="in">`func.func`</span> 降级而来的终极 MLIR 形式。</span>
+<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>操作：<span class="in">`llvm.add`</span> 与 <span class="in">`llvm.return`</span> 严格映射到 LLVM 标量指令集。</span>
+<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>终检验证：运行 <span class="in">`mlir-translate --mlir-to-llvmir`</span>，该 MLIR 会被无缝翻译成纯正的 LLVM IR：</span>
+<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a>  <span class="in">```llvm</span></span>
+<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a><span class="in">  define i32 @add(i32 %0, i32 %1) {</span></span>
+<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a><span class="in">    %3 = add i32 %0, %1</span></span>
+<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a><span class="in">    ret i32 %3</span></span>
+<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a><span class="in">  }</span></span>
+<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a><span class="in">  ```</span></span>
+<span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a>  此时方可移交 <span class="in">`clang`</span> 或 <span class="in">`llc`</span> 编译为 <span class="in">`.o`</span> 目标二进制机器码。</span>
+<span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb5-112"><a href="#cb5-112" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-113"><a href="#cb5-113" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb5-114"><a href="#cb5-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-115"><a href="#cb5-115" aria-hidden="true" tabindex="-1"></a>补齐 LLVM dialect 的整数加法与返回。</span>
+<span id="cb5-116"><a href="#cb5-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-117"><a href="#cb5-117" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb5-118"><a href="#cb5-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-121"><a href="#cb5-121" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb5-122"><a href="#cb5-122" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb5-123"><a href="#cb5-123" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
+<span id="cb5-124"><a href="#cb5-124" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb5-125"><a href="#cb5-125" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
+<span id="cb5-126"><a href="#cb5-126" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> ______ <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
+<span id="cb5-127"><a href="#cb5-127" aria-hidden="true" tabindex="-1"></a>    ______ <span class="op">%</span><span class="bu">sum</span> : i32</span>
+<span id="cb5-128"><a href="#cb5-128" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb5-129"><a href="#cb5-129" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb5-130"><a href="#cb5-130" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-131"><a href="#cb5-131" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-132"><a href="#cb5-132" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb5-133"><a href="#cb5-133" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-134"><a href="#cb5-134" aria-hidden="true" tabindex="-1"></a>用 <span class="in">`mlir-opt`</span> 验证，再用 <span class="in">`mlir-translate --mlir-to-llvmir`</span> 检查得到 LLVM IR；无工具时标记待验证。</span>
+<span id="cb5-135"><a href="#cb5-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-136"><a href="#cb5-136" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb5-137"><a href="#cb5-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-138"><a href="#cb5-138" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb5-139"><a href="#cb5-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-140"><a href="#cb5-140" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“逐级 Lowering 到 LLVM Dialect”的工作机制。</span>
+<span id="cb5-141"><a href="#cb5-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-142"><a href="#cb5-142" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb5-143"><a href="#cb5-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-144"><a href="#cb5-144" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb5-145"><a href="#cb5-145" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-146"><a href="#cb5-146" aria-hidden="true" tabindex="-1"></a>为什么看到 <span class="in">`llvm.*`</span> op 还不能声称已经生成机器码？</span>
+<span id="cb5-147"><a href="#cb5-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-148"><a href="#cb5-148" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb5-149"><a href="#cb5-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-150"><a href="#cb5-150" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb5-151"><a href="#cb5-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-152"><a href="#cb5-152" aria-hidden="true" tabindex="-1"></a>若目标是 GPU/NVVM，应在哪一层分叉 pipeline？</span>
+<span id="cb5-153"><a href="#cb5-153" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-154"><a href="#cb5-154" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb5-155"><a href="#cb5-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-156"><a href="#cb5-156" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb5-157"><a href="#cb5-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-158"><a href="#cb5-158" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb5-159"><a href="#cb5-159" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb5-160"><a href="#cb5-160" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb5-161"><a href="#cb5-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-162"><a href="#cb5-162" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb5-163"><a href="#cb5-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-164"><a href="#cb5-164" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-165"><a href="#cb5-165" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb5-166"><a href="#cb5-166" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb5-167"><a href="#cb5-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-168"><a href="#cb5-168" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb5-169"><a href="#cb5-169" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-172"><a href="#cb5-172" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb5-173"><a href="#cb5-173" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb5-174"><a href="#cb5-174" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>lesson07.mlir</span>
+<span id="cb5-175"><a href="#cb5-175" aria-hidden="true" tabindex="-1"></a>module {</span>
+<span id="cb5-176"><a href="#cb5-176" aria-hidden="true" tabindex="-1"></a>  llvm.func <span class="op">@</span>add(<span class="op">%</span>a: i32, <span class="op">%</span>b: i32) <span class="op">-&gt;</span> i32 {</span>
+<span id="cb5-177"><a href="#cb5-177" aria-hidden="true" tabindex="-1"></a>    <span class="op">%</span><span class="bu">sum</span> <span class="op">=</span> llvm.add <span class="op">%</span>a, <span class="op">%</span>b : i32</span>
+<span id="cb5-178"><a href="#cb5-178" aria-hidden="true" tabindex="-1"></a>    llvm.<span class="cf">return</span> <span class="op">%</span><span class="bu">sum</span> : i32</span>
+<span id="cb5-179"><a href="#cb5-179" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb5-180"><a href="#cb5-180" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb5-181"><a href="#cb5-181" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-182"><a href="#cb5-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-183"><a href="#cb5-183" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb5-184"><a href="#cb5-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-185"><a href="#cb5-185" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb5-186"><a href="#cb5-186" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（高阶结构化张量准备）**：以已完成内存分析的结构化计算 IR（如 <span class="in">`linalg`</span> + <span class="in">`scf`</span> + <span class="in">`memref`</span>）为起点，确保所有高阶数据流已经确定性降级为带物理布局和循环边界的中间形态。</span>
+<span id="cb5-187"><a href="#cb5-187" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（洋葱式逐级抽象剥离与拓扑降级）**：</span>
+<span id="cb5-188"><a href="#cb5-188" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第一级（控制流降级）：运行 <span class="in">`-convert-scf-to-cf`</span> 将高层 <span class="in">`scf.for/if`</span> 剥离为基础分支控制流 <span class="in">`cf.br/cond_br`</span>；</span>
+<span id="cb5-189"><a href="#cb5-189" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第二级（内存描述符展开）：运行 <span class="in">`-finalize-memref-to-llvm`</span> 将抽象多维 <span class="in">`memref`</span> 展开为包含基地址指针、对齐指针与动态维度的 LLVM 扁平 Struct 描述符；</span>
+<span id="cb5-190"><a href="#cb5-190" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第三级（算术与函数降级）：运行 <span class="in">`-convert-arith-to-llvm`</span> 和 <span class="in">`-convert-func-to-llvm`</span>，将所有算术操作与函数符号整体替换为 <span class="in">`llvm.`</span> 前缀的镜像算子，此时全模块达到 100% 的 LLVM Dialect 合法纯净态。</span>
+<span id="cb5-191"><a href="#cb5-191" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（跨框架物理翻译与机器码生成）**：调用 <span class="in">`mlir-translate --mlir-to-llvmir`</span> 走出 MLIR 上下文，在内存中正式具象化原生的 <span class="in">`llvm::Module`</span> C++ 对象树。随后调用 LLVM 原生 TargetMachine 发射本地机器汇编或二进制可执行文件（ELF / PTX）。</span>
+<span id="cb5-192"><a href="#cb5-192" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-193"><a href="#cb5-193" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb5-194"><a href="#cb5-194" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-195"><a href="#cb5-195" aria-hidden="true" tabindex="-1"></a>在 MLIR 文本中看到 <span class="in">`llvm.*`</span> 操作（如 <span class="in">`llvm.add`</span>、<span class="in">`llvm.load`</span>），**绝对不能声称已经生成了物理机器码**，原因在于：</span>
+<span id="cb5-196"><a href="#cb5-196" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**依然属于 MLIR 内存树节点**：<span class="in">`llvm.*`</span> 仅仅是 MLIR 官方提供的众多 Dialect 之一（<span class="in">`LLVMDialect`</span>）。它本质上与 <span class="in">`arith`</span>、<span class="in">`linalg`</span> 没有高下之分，依然是由 <span class="in">`mlir::Operation`</span> 构成的抽象语法树，驻留在 <span class="in">`MLIRContext`</span> 堆内存中，其数据结构并不是物理机器指令，甚至还不是原生的 <span class="in">`llvm::Instruction`</span>。</span>
+<span id="cb5-197"><a href="#cb5-197" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**距离机器码还有巨大的物理跨度**：</span>
+<span id="cb5-198"><a href="#cb5-198" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>必须通过 <span class="in">`mlir-translate`</span> 序列化并转换成原生的 <span class="in">`llvm::Module`</span>（LLVM IR）；</span>
+<span id="cb5-199"><a href="#cb5-199" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>真正的机器码生成（如 x86 汇编或 PTX 汇编）是由 LLVM 后端（Target-specific Code Generator）完成的。这期间必须经历指令选择（Instruction Selection: SelectionDAG 或 GlobalISel）、机器指令调度（Machine Instruction Scheduling）、物理寄存器分配（Register Allocation）、栈帧布局（Prologue/Epilogue Insertion）等极其沉重复杂的硬件映射过程。当前代码甚至尚未脱离纯文本 IR 阶段。</span>
+<span id="cb5-200"><a href="#cb5-200" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-201"><a href="#cb5-201" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb5-202"><a href="#cb5-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-203"><a href="#cb5-203" aria-hidden="true" tabindex="-1"></a>在编译异构计算程序（如包含 CPU 宿主代码与 GPU 内核的神经网络）时，Pipeline 分叉的最佳架构时机是**在 `gpu.launch_kernel` 或 Bufferize 之后的硬件并行抽象层分叉**：</span>
+<span id="cb5-204"><a href="#cb5-204" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**分叉点位置（`gpu` / `nvvm` 方言分界线）**：</span>
+<span id="cb5-205"><a href="#cb5-205" aria-hidden="true" tabindex="-1"></a>   流水线在高层图优化、Linalg 算子融合和 Bufferization 阶段保持统一。当张量被分块并映射到 GPU 的 Grid / Block 并行层次后（即通过 <span class="in">`-convert-linalg-to-parallel-loops`</span> 或生成 <span class="in">`gpu.launch_kernel`</span>），流水线正式分叉：</span>
+<span id="cb5-206"><a href="#cb5-206" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Device（GPU）分支**：将 <span class="in">`gpu.launch_kernel`</span> 内部的 GPU Kernel 代码提取为嵌套的独立 <span class="in">`gpu.module`</span>，在 GPU 侧进一步降低为 <span class="in">`nvvm`</span> / <span class="in">`rocdl`</span> 方言，随后由 <span class="in">`mlir-translate`</span> 编译为 PTX/CUBIN 二进制字面量。</span>
+<span id="cb5-207"><a href="#cb5-207" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Host（CPU）分支**：将外层的调度控制流、内存分配（如 <span class="in">`gpu.alloc`</span> 变为 CUDA Driver/Runtime API 调用 <span class="in">`cudaMalloc`</span>）以及 Kernel 启动指令降级为 CPU 端的 <span class="in">`func`</span> / <span class="in">`llvm`</span> 方言，链接 CUDA Driver API 库。</span>
+<span id="cb5-208"><a href="#cb5-208" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**过早与过晚分叉的工程坏味道**：过早分叉（如在 Tensor 层）会导致 Host 和 Device 无法共享图优化和常量折叠；过晚分叉（如降到底层标量 LLVM 后）会导致 GPU 的多维网格、Warp 洗牌和共享内存语义被不可逆地打散，再也无法生成高性能的 GPU 汇编。</span>
+<span id="cb5-209"><a href="#cb5-209" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-210"><a href="#cb5-210" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb5-211"><a href="#cb5-211" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-212"><a href="#cb5-212" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">MLIR Toy Tutorial</span><span class="co">](https://mlir.llvm.org/docs/Tutorials/Toy/)</span></span>
+<span id="cb5-213"><a href="#cb5-213" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Dialect Conversion</span><span class="co">](https://mlir.llvm.org/docs/DialectConversion/)</span></span>
+<span id="cb5-214"><a href="#cb5-214" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">LLVM Dialect</span><span class="co">](https://mlir.llvm.org/docs/Dialects/LLVM/)</span></span>
+<span id="cb5-215"><a href="#cb5-215" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-216"><a href="#cb5-216" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb5-217"><a href="#cb5-217" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

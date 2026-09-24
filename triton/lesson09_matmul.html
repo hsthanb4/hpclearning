@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -571,7 +600,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
         A_k["A 瓦片 (BLOCK_M × BLOCK_K)"]
         B_k["B 瓦片 (BLOCK_K × BLOCK_N)"]
         Acc["累加器 accumulator (FP32 精度)"]
-        A_k &amp; B_k ➔|tl.dot(a, b, acc)| Acc
+        A_k &amp; B_k --&gt;|"tl.dot(a, b, acc)"| Acc
     end
 </pre>
 </div>
@@ -605,31 +634,53 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>Triton GEMM 用二维 program grid 负责 C tile，在 K 维循环加载 A/B tiles 并用 <code>tl.dot</code> 累加。</p>
+<p>通用矩阵乘法（GEMM: <span class="math inline">\(C = A \times B\)</span>，<span class="math inline">\(A \in \mathbb{R}^{M \times K}, B \in \mathbb{R}^{K \times N}\)</span>）是现代人工智能模型（Transformer、CNN、MoE）中计算量占比超过 95% 的绝对算力支柱。 在 GPU 体系结构中，朴素的三重循环算法算术强度极低，会导致致命的显存带宽瓶颈。因此，高性能 GEMM 必须采用<strong>二维输出分块（Blocked Tiling）</strong>： 网格划分为 <span class="math inline">\(M \times N\)</span> 的宏观瓦片，每个 Program 块负责计算并写回输出矩阵的一小块 <span class="math inline">\(C[\text{BM}, \text{BN}]\)</span>；在内层沿 <span class="math inline">\(K\)</span> 维以跨步 <span class="math inline">\(BK\)</span> 循环切片，并在片上高速寄存器中不断执行外积累加。 本课解决的核心工程问题是：<strong>在 Triton 中如何使用 <code>tl.dot</code> 驱动硬件底层 Tensor Core 核心，如何通过 FP32 累加器维持混合精度数值稳定性，以及如何为 <span class="math inline">\(M, N, K\)</span> 三维独立施加谓词掩码，优雅处理任意非对齐的尾块尺寸</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>A mask 覆盖 M/K，B mask 覆盖 K/N；累加器用 FP32，最终按 C dtype 写回。</p>
+<p>分块矩阵乘瓦片流水线如图 9-1 与图 9-2 所示：</p>
+<ol type="1">
+<li><strong>累加器初始化</strong>： 每个 Program 处理输出的一个 <span class="math inline">\((BM, BN)\)</span> 子矩阵。在寄存器中初始化 FP32 全零矩阵： <code>acc = tl.zeros((BM, BN), tl.float32)</code></li>
+<li><strong>K 维分块迭代与独立掩码保护</strong>： 内层循环以 <span class="math inline">\(BK\)</span> 为步长推进：<code>for k0 in range(0, K, BK):</code>
+<ul>
+<li>加载 <span class="math inline">\(A\)</span> 的当前瓦片 <span class="math inline">\(A_k \in \mathbb{R}^{BM \times BK}\)</span>，地址为 <code>rm[:, None] * sam + rk[None, :] * sak</code>，掩码必须同时约束 <span class="math inline">\(M\)</span> 轴与 <span class="math inline">\(K\)</span> 轴： <code>mask = (rm[:, None] &lt; M) &amp; (rk[None, :] &lt; K)</code>，越界处填充加法单位元 <code>other=0.0</code>；</li>
+<li>加载 <span class="math inline">\(B\)</span> 的当前瓦片 <span class="math inline">\(B_k \in \mathbb{R}^{BK \times BN}\)</span>，掩码同时约束 <span class="math inline">\(K\)</span> 轴与 <span class="math inline">\(N\)</span> 轴： <code>mask = (rk[:, None] &lt; K) &amp; (rn[None, :] &lt; N)</code>，越界处同样填充 <code>other=0.0</code>。</li>
+</ul></li>
+<li><strong>Tensor Core 驱动的片上累加（<code>tl.dot</code>）</strong>： 执行 <code>acc += tl.dot(av, bv)</code>。在底层，Triton 编译器将 <code>tl.dot</code> 编译为 NVIDIA 原生 Tensor Core 硬件指令（如 Hopper 上的 <code>wgmma</code> 或 Ampere 上的 <code>mma.sync.m16n8k16</code>）。 输入矩阵以 FP16/BF16 载入并相乘，但累加在 FP32 寄存器中进行，从硬件层面保证了深层网络训练中成千上万次乘加的累积精度。</li>
+<li><strong>截断与写回（Epilogue）</strong>： <span class="math inline">\(K\)</span> 维循环结束后，累加器 <code>acc</code> 携带完整的瓦片点积和。通过输出掩码 <code>(rm[:, None] &lt; M) &amp; (rn[None, :] &lt; N)</code> 保护，将结果安全转换为目标数据类型（如 FP16）写回全局显存 <span class="math inline">\(C\)</span>。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>每个边界维都要独立 mask；容差必须符合输入/累加精度，不能与 CPU 双精度逐位比较。</p>
+<ul>
+<li><strong>K 维尾块遗漏掩码的累积污染</strong>： 若开发者仅在写回 <span class="math inline">\(C\)</span> 时施加了 <span class="math inline">\(M\)</span> 和 <span class="math inline">\(N\)</span> 的掩码，却在内层循环加载 <span class="math inline">\(A\)</span> 和 <span class="math inline">\(B\)</span> 时遗漏了 <code>rk &lt; K</code> 的检查： 对于尾块（<span class="math inline">\(K\)</span> 不是 <span class="math inline">\(BK\)</span> 整数倍），<code>tl.load</code> 会将 <span class="math inline">\(K\)</span> 维度之后的非法显存脏数据读入寄存器。经过 Tensor Core 乘积累加后，这些脏数据产生的外积结果会被永久熔铸进累加器 <code>acc</code> 中。即使在写回时做了输出掩码，算出的数值也已经是彻底错误的。</li>
+<li><strong>混合精度累加溢出陷阱</strong>： 若累加器初始化为 FP16（<code>tl.zeros((BM, BN), tl.float16)</code>），在 <span class="math inline">\(K\)</span> 较大（如 <span class="math inline">\(K=4096\)</span>）时，连续累加会导致 FP16 范围溢出（最大值仅 65504）或极严重的下溢与截断误差。必须严格遵循“低精度输入计算、高精度 FP32 累加”黄金法则。</li>
+<li><strong>浮点结合律与容差预期</strong>： 由于 GPU Tensor Core 的并行点积顺序与 CPU 上的串行双精度循环截然不同，浮点加法不满足严格结合律，因此断言比较必须留有适当的相对容差（如 <code>atol=2e-2, rtol=2e-2</code>），不能按位要求 bitwise-exact。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>BM/BN/BK、warps、stages 共同影响 tensor-core 利用率与资源；需要按 shape autotune。</p>
+<ul>
+<li><strong>Tile 形状与流水线深度（<code>BM, BN, BK</code>, <code>num_warps</code>, <code>num_stages</code>）</strong>： Triton GEMM 的性能极度依赖超参数选择：
+<ul>
+<li><code>(BM, BN, BK)</code> 决定了每个 Program 的计算强度与片上寄存器消耗；</li>
+<li><code>num_stages</code> 决定了使用共享内存软件流水线（Async Pipeline，如 <code>cp.async</code>）预取的循环级数，通常 3~4 级最佳；</li>
+<li><code>num_warps</code>（4 或 8）决定了 SM 上的指令级并发度。</li>
+</ul></li>
+<li><strong>训练 GEMM（大 M）与推理 Decode GEMV（M=1）的极化差异</strong>： 在 大模型预训练或 Prefill 阶段，<span class="math inline">\(M\)</span> 较大（如 <span class="math inline">\(M = 4096\)</span>），属于典型的计算密集型（Compute-bound），需要选择大 Tile（如 <span class="math inline">\(128 \times 128 \times 32\)</span>）打满 Tensor Core； 但在自回归推理解码（Decode）阶段，每次仅输入 1 个 Token（<span class="math inline">\(M=1\)</span>），算子退化为矩阵-向量乘法（GEMV），极度受限于显存带宽（Memory-bound）。此时若强行使用大 Tile 会导致 99% 的 Program 空转，必须采用专门针对 <span class="math inline">\(M=1\)</span> 优化的 Split-K GEMV 内核。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>M=17,K=33,N=19、tile=32 时 M/N/K 都有尾块，是高价值正确性用例。</p>
+<p>以 <span class="math inline">\(M = 17, K = 33, N = 19\)</span>、分块大小 <span class="math inline">\(BM = 32, BN = 32, BK = 32\)</span> 为例： - 网格发射 <span class="math inline">\(\lceil 17/32 \rceil \times \lceil 19/32 \rceil = 1 \times 1 = 1\)</span> 个 Program。 - <strong>K 维循环迭代</strong>：<span class="math inline">\(\lceil 33/32 \rceil = 2\)</span> 轮。 - <strong>第 1 轮</strong>（<span class="math inline">\(k0 = 0\)</span>）：<span class="math inline">\(rk \in [0..31]\)</span>。<span class="math inline">\(A\)</span> 掩码有效范围为 <span class="math inline">\([0..16, 0..31]\)</span>，<span class="math inline">\(B\)</span> 掩码有效范围为 <span class="math inline">\([0..31, 0..18]\)</span>。<code>tl.dot</code> 累加前 32 个通道的有效点积。 - <strong>第 2 轮</strong>（<span class="math inline">\(k0 = 32\)</span>）：<span class="math inline">\(rk \in [32..63]\)</span>。<span class="math inline">\(rk &lt; 33\)</span> 仅有第 32 这一列有效，后 31 列越界！由于指定了 <code>other=0.0</code>，<span class="math inline">\(A\)</span> 和 <span class="math inline">\(B\)</span> 的后 31 个切片全被填充为 0.0。<code>tl.dot</code> 仅计算第 32 通道的有效乘加，多余维度的 <span class="math inline">\(0.0 \times 0.0 = 0.0\)</span> 累加不改变精度。 - 最终写回仅输出前 <span class="math inline">\([17, 19]\)</span> 区域，全边界尾块数学解位级正确。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 K-tile 累加。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="0149a2db" class="cell" data-course_role="exercise">
+<div id="efd26a3b" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -715,7 +766,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="865fc646" class="cell" data-course_role="solution">
+<div id="418c38bc" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -759,15 +810,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>A mask 覆盖 M/K，B mask 覆盖 K/N；累加器用 FP32，最终按 C dtype 写回。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（2D 宏观网格与 K 维切片加载）</strong>：以二维网格映射输出矩阵瓦片，Program 块初始化 FP32 寄存器累加器 <code>acc</code>。外层循环沿 <span class="math inline">\(K\)</span> 维以 <span class="math inline">\(BK\)</span> 为步长推进。每一轮迭代中，Program 分别构造 <span class="math inline">\(A\)</span> 与 <span class="math inline">\(B\)</span> 瓦片的二维指针，并在双向掩码（<span class="math inline">\(A\)</span> 受控于 <span class="math inline">\((M, K)\)</span>，<span class="math inline">\(B\)</span> 受控于 <span class="math inline">\((K, N)\)</span>）保护下，结合 <code>other=0.0</code> 将当前切片合并载入片上寄存器。 2. <strong>状态变化阶段（Tensor Core 驱动的片上点积累加）</strong>：调用 <code>tl.dot(av, bv)</code> 将当前 <span class="math inline">\(A\)</span> 瓦片与 <span class="math inline">\(B\)</span> 瓦片送入 GPU 硬件底层的 Tensor Core 矩阵乘加流水线。计算采用 FP16 乘法并在 FP32 累加器中就地累加，经过多轮 <span class="math inline">\(K\)</span> 维切片迭代后，累加器逐步收敛出该瓦片的最终真实点积和，整个循环计算完全在片上寄存器展开。 3. <strong>输出阶段（输出掩码截断与类型转换写回）</strong>：将高精度累加器 <code>acc</code> 转换为目标张量数据类型（FP16/BF16），结合输出边界掩码 <code>(rm &lt; M) &amp; (rn &lt; N)</code>，通过 <code>tl.store</code> 写回全局目标矩阵 <span class="math inline">\(C\)</span>。越界位置完全被硬件屏蔽，保证零越界写入。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：每个边界维都要独立 mask；容差必须符合输入/累加精度，不能与 CPU 双精度逐位比较。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>若仅在输出写回 <span class="math inline">\(C\)</span> 时施加掩码，而在内层循环加载 <span class="math inline">\(A\)</span> 和 <span class="math inline">\(B\)</span> 时遗漏了针对 <span class="math inline">\(K\)</span> 维度的掩码保护（即没有 <code>rk &lt; K</code> 约束）： 1. <strong>尾块越界脏数据强行读入</strong>：当 <span class="math inline">\(K\)</span> 不是分块尺寸 <span class="math inline">\(BK\)</span> 的整数倍时（例如 <span class="math inline">\(K=33, BK=32\)</span>，在第二轮迭代中有效 <span class="math inline">\(K\)</span> 仅有 1 项，后 31 项为越界内存），内核会绕过边界检查，从显存越界地址中强行读取邻近内存的未初始化脏数据。 2. <strong>脏数据永久熔铸进累加器</strong>：在执行 <code>tl.dot(av, bv)</code> 时，这 31 个非法的脏数据向量会被送进 Tensor Core 进行点乘求和，产生不可预测的伪数值并直接累加进片上累加器 <code>acc</code> 中。 3. <strong>输出彻底毁坏</strong>：即使在最后写回 <span class="math inline">\(C\)</span> 时施加了 <span class="math inline">\(M\)</span> 和 <span class="math inline">\(N\)</span> 维度的输出掩码，累加器内存储的数值本身已经被脏数据彻底污染，最终写回目标张量的所有有效数值都会变成不可控的随机荒谬值。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：BM/BN/BK、warps、stages 共同影响 tensor-core 利用率与资源；需要按 shape autotune。</p>
+<p>大模型训练 GEMM 与自回归推理解码（Decode）阶段的计算特征处于完全不同的物理极端，绝对不能共用同一套分块配置： 1. <strong>训练 GEMM（<span class="math inline">\(M\)</span> 极大，如 <span class="math inline">\(M=4096, N=4096, K=4096\)</span>）</strong>： - <strong>体系特征</strong>：属于典型的<strong>计算密集型（Compute-bound）</strong>算子，算术强度极高。 - <strong>最优配置</strong>：需要采用大分块尺寸（如 <span class="math inline">\(BM=128, BN=128, BK=32\)</span> 或 64），以最大化寄存器与片上数据复用率，彻底释放 Tensor Core 的峰值 TFLOPs 吞吐，并使用 4~8 个 Warp 和深度流水线。 2. <strong>推理 Decode GEMM（<span class="math inline">\(M=1\)</span>）</strong>： - <strong>体系特征</strong>：退化为矩阵-向量乘法（GEMV），算术强度极低（每个权重只被使用 1 次），属于绝对的<strong>显存带宽密集型（Memory-bound）</strong>算子。 - <strong>配置灾难</strong>：若在 <span class="math inline">\(M=1\)</span> 时强行使用训练的大分块（如 <span class="math inline">\(BM=128\)</span>），在 <span class="math inline">\(M\)</span> 维度分配的 128 个线程中，有 127 个线程在整个内核执行期间完全处于无效 Mask 闲置状态，造成极其恐怖的硬件计算资源浪费；同时，整个输出矩阵仅发射 1 行 Program，导致庞大 GPU 上上百个 SM 处于完全空闲状态（Wavefront 饥饿）。对于 <span class="math inline">\(M=1\)</span>，必须采用 <span class="math inline">\(BM=1\)</span>、大 <span class="math inline">\(BN\)</span> 并结合 Split-K（跨多 Block 并行切分 <span class="math inline">\(K\)</span> 维并做原子归约）专用内核架构。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1291,7 +1342,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>        A_k[<span class="ot">"</span><span class="st">A 瓦片 (BLOCK_M × BLOCK_K)</span><span class="ot">"</span>]</span>
 <span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>        B_k[<span class="ot">"</span><span class="st">B 瓦片 (BLOCK_K × BLOCK_N)</span><span class="ot">"</span>]</span>
 <span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>        Acc[<span class="ot">"</span><span class="st">累加器 accumulator (FP32 精度)</span><span class="ot">"</span>]</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>        A_k &amp; B_k ➔|tl.dot(a, b, acc)| Acc</span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>        A_k &amp; B_k --&gt;|<span class="ot">"</span><span class="st">tl.dot(a, b, acc)</span><span class="ot">"</span>| Acc</span>
 <span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    end</span>
 <span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 9-1：Blocked Matmul 瓦片乘法与 FP32 累加器保持精度架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
@@ -1309,171 +1360,219 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>Triton GEMM 用二维 program grid 负责 C tile，在 K 维循环加载 A/B tiles 并用 <span class="in">`tl.dot`</span> 累加。</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>A mask 覆盖 M/K，B mask 覆盖 K/N；累加器用 FP32，最终按 C dtype 写回。</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>每个边界维都要独立 mask；容差必须符合输入/累加精度，不能与 CPU 双精度逐位比较。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>BM/BN/BK、warps、stages 共同影响 tensor-core 利用率与资源；需要按 shape autotune。</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>M=17,K=33,N=19、tile=32 时 M/N/K 都有尾块，是高价值正确性用例。</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>补齐 K-tile 累加。</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>通用矩阵乘法（GEMM: $C = A \times B$，$A \in \mathbb{R}^{M \times K}, B \in \mathbb{R}^{K \times N}$）是现代人工智能模型（Transformer、CNN、MoE）中计算量占比超过 95% 的绝对算力支柱。</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>在 GPU 体系结构中，朴素的三重循环算法算术强度极低，会导致致命的显存带宽瓶颈。因此，高性能 GEMM 必须采用**二维输出分块（Blocked Tiling）**：</span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>网格划分为 $M \times N$ 的宏观瓦片，每个 Program 块负责计算并写回输出矩阵的一小块 $C<span class="co">[</span><span class="ot">\text{BM}, \text{BN}</span><span class="co">]</span>$；在内层沿 $K$ 维以跨步 $BK$ 循环切片，并在片上高速寄存器中不断执行外积累加。</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**在 Triton 中如何使用 `tl.dot` 驱动硬件底层 Tensor Core 核心，如何通过 FP32 累加器维持混合精度数值稳定性，以及如何为 $M, N, K$ 三维独立施加谓词掩码，优雅处理任意非对齐的尾块尺寸**。</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>分块矩阵乘瓦片流水线如图 9-1 与图 9-2 所示：</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**累加器初始化**：</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>   每个 Program 处理输出的一个 $(BM, BN)$ 子矩阵。在寄存器中初始化 FP32 全零矩阵：</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>   <span class="in">`acc = tl.zeros((BM, BN), tl.float32)`</span></span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**K 维分块迭代与独立掩码保护**：</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>   内层循环以 $BK$ 为步长推进：<span class="in">`for k0 in range(0, K, BK):`</span></span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>加载 $A$ 的当前瓦片 $A_k \in \mathbb{R}^{BM \times BK}$，地址为 <span class="in">`rm[:, None] * sam + rk[None, :] * sak`</span>，掩码必须同时约束 $M$ 轴与 $K$ 轴：</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>     <span class="in">`mask = (rm[:, None] &lt; M) &amp; (rk[None, :] &lt; K)`</span>，越界处填充加法单位元 <span class="in">`other=0.0`</span>；</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>加载 $B$ 的当前瓦片 $B_k \in \mathbb{R}^{BK \times BN}$，掩码同时约束 $K$ 轴与 $N$ 轴：</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>     <span class="in">`mask = (rk[:, None] &lt; K) &amp; (rn[None, :] &lt; N)`</span>，越界处同样填充 <span class="in">`other=0.0`</span>。</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**Tensor Core 驱动的片上累加（`tl.dot`）**：</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>   执行 <span class="in">`acc += tl.dot(av, bv)`</span>。在底层，Triton 编译器将 <span class="in">`tl.dot`</span> 编译为 NVIDIA 原生 Tensor Core 硬件指令（如 Hopper 上的 <span class="in">`wgmma`</span> 或 Ampere 上的 <span class="in">`mma.sync.m16n8k16`</span>）。</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>   输入矩阵以 FP16/BF16 载入并相乘，但累加在 FP32 寄存器中进行，从硬件层面保证了深层网络训练中成千上万次乘加的累积精度。</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>**截断与写回（Epilogue）**：</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>   $K$ 维循环结束后，累加器 <span class="in">`acc`</span> 携带完整的瓦片点积和。通过输出掩码 <span class="in">`(rm[:, None] &lt; M) &amp; (rn[None, :] &lt; N)`</span> 保护，将结果安全转换为目标数据类型（如 FP16）写回全局显存 $C$。</span>
 <span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
 <span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**K 维尾块遗漏掩码的累积污染**：</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>  若开发者仅在写回 $C$ 时施加了 $M$ 和 $N$ 的掩码，却在内层循环加载 $A$ 和 $B$ 时遗漏了 <span class="in">`rk &lt; K`</span> 的检查：</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>  对于尾块（$K$ 不是 $BK$ 整数倍），<span class="in">`tl.load`</span> 会将 $K$ 维度之后的非法显存脏数据读入寄存器。经过 Tensor Core 乘积累加后，这些脏数据产生的外积结果会被永久熔铸进累加器 <span class="in">`acc`</span> 中。即使在写回时做了输出掩码，算出的数值也已经是彻底错误的。</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**混合精度累加溢出陷阱**：</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>  若累加器初始化为 FP16（<span class="in">`tl.zeros((BM, BN), tl.float16)`</span>），在 $K$ 较大（如 $K=4096$）时，连续累加会导致 FP16 范围溢出（最大值仅 65504）或极严重的下溢与截断误差。必须严格遵循“低精度输入计算、高精度 FP32 累加”黄金法则。</span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**浮点结合律与容差预期**：</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>  由于 GPU Tensor Core 的并行点积顺序与 CPU 上的串行双精度循环截然不同，浮点加法不满足严格结合律，因此断言比较必须留有适当的相对容差（如 <span class="in">`atol=2e-2, rtol=2e-2`</span>），不能按位要求 bitwise-exact。</span>
 <span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul_kernel(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>                  sam: tl.constexpr, sak: tl.constexpr,</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>                  sbk: tl.constexpr, sbn: tl.constexpr,</span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>                  scm: tl.constexpr, scn: tl.constexpr,</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    rm <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BM <span class="op">+</span> tl.arange(<span class="dv">0</span>, BM)</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    rn <span class="op">=</span> tl.program_id(<span class="dv">1</span>) <span class="op">*</span> BN <span class="op">+</span> tl.arange(<span class="dv">0</span>, BN)</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>    acc <span class="op">=</span> tl.zeros((BM, BN), tl.float32)</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k0 <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BK):</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>        rk <span class="op">=</span> k0 <span class="op">+</span> tl.arange(<span class="dv">0</span>, BK)</span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a>        av <span class="op">=</span> tl.load(a <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> sam <span class="op">+</span> rk[<span class="va">None</span>, :] <span class="op">*</span> sak,</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rk[<span class="va">None</span>, :] <span class="op">&lt;</span> K), other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a>        bv <span class="op">=</span> tl.load(b <span class="op">+</span> rk[:, <span class="va">None</span>] <span class="op">*</span> sbk <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> sbn,</span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rk[:, <span class="va">None</span>] <span class="op">&lt;</span> K) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N), other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a>        acc <span class="op">+=</span> ______  <span class="co"># </span><span class="al">TODO</span><span class="co">: tile 矩阵乘</span></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>    tl.store(c <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> scm <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> scn, acc,</span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>             mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N))</span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul(a, b):</span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> a.ndim <span class="op">==</span> b.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> a.shape[<span class="dv">1</span>] <span class="op">==</span> b.shape[<span class="dv">0</span>]</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> a.shape<span class="op">;</span> N <span class="op">=</span> b.shape[<span class="dv">1</span>]</span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>    c <span class="op">=</span> torch.empty((M, N), device<span class="op">=</span>a.device, dtype<span class="op">=</span>a.dtype)</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>    grid <span class="op">=</span> (triton.cdiv(M, <span class="dv">32</span>), triton.cdiv(N, <span class="dv">32</span>))</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>    matmul_kernel[grid](a, b, c, M, N, K, <span class="op">*</span>a.stride(), <span class="op">*</span>b.stride(), <span class="op">*</span>c.stride(),</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>                        BM<span class="op">=</span><span class="dv">32</span>, BN<span class="op">=</span><span class="dv">32</span>, BK<span class="op">=</span><span class="dv">32</span>)</span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> c</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Tile 形状与流水线深度（`BM, BN, BK`, `num_warps`, `num_stages`）**：</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>  Triton GEMM 的性能极度依赖超参数选择：</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span><span class="in">`(BM, BN, BK)`</span> 决定了每个 Program 的计算强度与片上寄存器消耗；</span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span><span class="in">`num_stages`</span> 决定了使用共享内存软件流水线（Async Pipeline，如 <span class="in">`cp.async`</span>）预取的循环级数，通常 3~4 级最佳；</span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span><span class="in">`num_warps`</span>（4 或 8）决定了 SM 上的指令级并发度。</span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**训练 GEMM（大 M）与推理 Decode GEMV（M=1）的极化差异**：</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>  在 大模型预训练或 Prefill 阶段，$M$ 较大（如 $M = 4096$），属于典型的计算密集型（Compute-bound），需要选择大 Tile（如 $128 \times 128 \times 32$）打满 Tensor Core；</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>  但在自回归推理解码（Decode）阶段，每次仅输入 1 个 Token（$M=1$），算子退化为矩阵-向量乘法（GEMV），极度受限于显存带宽（Memory-bound）。此时若强行使用大 Tile 会导致 99% 的 Program 空转，必须采用专门针对 $M=1$ 优化的 Split-K GEMV 内核。</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a>以 $M = 17, K = 33, N = 19$、分块大小 $BM = 32, BN = 32, BK = 32$ 为例：</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>网格发射 $\lceil 17/32 \rceil \times \lceil 19/32 \rceil = 1 \times 1 = 1$ 个 Program。</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**K 维循环迭代**：$\lceil 33/32 \rceil = 2$ 轮。</span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>**第 1 轮**（$k0 = 0$）：$rk \in <span class="co">[</span><span class="ot">0..31</span><span class="co">]</span>$。$A$ 掩码有效范围为 $<span class="co">[</span><span class="ot">0..16, 0..31</span><span class="co">]</span>$，$B$ 掩码有效范围为 $<span class="co">[</span><span class="ot">0..31, 0..18</span><span class="co">]</span>$。<span class="in">`tl.dot`</span> 累加前 32 个通道的有效点积。</span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>**第 2 轮**（$k0 = 32$）：$rk \in <span class="co">[</span><span class="ot">32..63</span><span class="co">]</span>$。$rk &lt; 33$ 仅有第 32 这一列有效，后 31 列越界！由于指定了 <span class="in">`other=0.0`</span>，$A$ 和 $B$ 的后 31 个切片全被填充为 0.0。<span class="in">`tl.dot`</span> 仅计算第 32 通道的有效乘加，多余维度的 $0.0 \times 0.0 = 0.0$ 累加不改变精度。</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>最终写回仅输出前 $<span class="co">[</span><span class="ot">17, 19</span><span class="co">]</span>$ 区域，全边界尾块数学解位级正确。</span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>补齐 K-tile 累加。</span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
 <span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">17</span>, <span class="dv">33</span>, <span class="dv">19</span>), (<span class="dv">64</span>, <span class="dv">64</span>, <span class="dv">64</span>)):</span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>    M, K, N <span class="op">=</span> shape</span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>    a <span class="op">=</span> torch.randn((M,K), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>    b <span class="op">=</span> torch.randn((K,N), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(matmul(a,b), a<span class="op">@</span>b, atol<span class="op">=</span><span class="fl">2e-2</span>, rtol<span class="op">=</span><span class="fl">2e-2</span>)</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Blocked Matmul 与 FP32 累加”的工作机制。</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>只 mask 输出而不 mask K 尾块会怎样？</span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul_kernel(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>                  sam: tl.constexpr, sak: tl.constexpr,</span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>                  sbk: tl.constexpr, sbn: tl.constexpr,</span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>                  scm: tl.constexpr, scn: tl.constexpr,</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):</span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>    rm <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BM <span class="op">+</span> tl.arange(<span class="dv">0</span>, BM)</span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>    rn <span class="op">=</span> tl.program_id(<span class="dv">1</span>) <span class="op">*</span> BN <span class="op">+</span> tl.arange(<span class="dv">0</span>, BN)</span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>    acc <span class="op">=</span> tl.zeros((BM, BN), tl.float32)</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k0 <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BK):</span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>        rk <span class="op">=</span> k0 <span class="op">+</span> tl.arange(<span class="dv">0</span>, BK)</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a>        av <span class="op">=</span> tl.load(a <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> sam <span class="op">+</span> rk[<span class="va">None</span>, :] <span class="op">*</span> sak,</span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rk[<span class="va">None</span>, :] <span class="op">&lt;</span> K), other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>        bv <span class="op">=</span> tl.load(b <span class="op">+</span> rk[:, <span class="va">None</span>] <span class="op">*</span> sbk <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> sbn,</span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rk[:, <span class="va">None</span>] <span class="op">&lt;</span> K) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N), other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>        acc <span class="op">+=</span> ______  <span class="co"># </span><span class="al">TODO</span><span class="co">: tile 矩阵乘</span></span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>    tl.store(c <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> scm <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> scn, acc,</span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>             mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N))</span>
 <span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>为什么训练 GEMM 与 decode 的 M=1 GEMM 不应共用同一配置？</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul(a, b):</span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> a.ndim <span class="op">==</span> b.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> a.shape[<span class="dv">1</span>] <span class="op">==</span> b.shape[<span class="dv">0</span>]</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> a.shape<span class="op">;</span> N <span class="op">=</span> b.shape[<span class="dv">1</span>]</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>    c <span class="op">=</span> torch.empty((M, N), device<span class="op">=</span>a.device, dtype<span class="op">=</span>a.dtype)</span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>    grid <span class="op">=</span> (triton.cdiv(M, <span class="dv">32</span>), triton.cdiv(N, <span class="dv">32</span>))</span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>    matmul_kernel[grid](a, b, c, M, N, K, <span class="op">*</span>a.stride(), <span class="op">*</span>b.stride(), <span class="op">*</span>c.stride(),</span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>                        BM<span class="op">=</span><span class="dv">32</span>, BN<span class="op">=</span><span class="dv">32</span>, BK<span class="op">=</span><span class="dv">32</span>)</span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> c</span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">17</span>, <span class="dv">33</span>, <span class="dv">19</span>), (<span class="dv">64</span>, <span class="dv">64</span>, <span class="dv">64</span>)):</span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>    M, K, N <span class="op">=</span> shape</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>    a <span class="op">=</span> torch.randn((M,K), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>    b <span class="op">=</span> torch.randn((K,N), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(matmul(a,b), a<span class="op">@</span>b, atol<span class="op">=</span><span class="fl">2e-2</span>, rtol<span class="op">=</span><span class="fl">2e-2</span>)</span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
 <span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“Blocked Matmul 与 FP32 累加”的工作机制。</span>
 <span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul_kernel(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,</span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a>                  sam: tl.constexpr, sak: tl.constexpr,</span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a>                  sbk: tl.constexpr, sbn: tl.constexpr,</span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>                  scm: tl.constexpr, scn: tl.constexpr,</span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):</span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a>    rm <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BM <span class="op">+</span> tl.arange(<span class="dv">0</span>, BM)</span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a>    rn <span class="op">=</span> tl.program_id(<span class="dv">1</span>) <span class="op">*</span> BN <span class="op">+</span> tl.arange(<span class="dv">0</span>, BN)</span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>    acc <span class="op">=</span> tl.zeros((BM, BN), tl.float32)</span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k0 <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BK):</span>
-<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a>        rk <span class="op">=</span> k0 <span class="op">+</span> tl.arange(<span class="dv">0</span>, BK)</span>
-<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a>        av <span class="op">=</span> tl.load(a <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> sam <span class="op">+</span> rk[<span class="va">None</span>, :] <span class="op">*</span> sak,</span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rk[<span class="va">None</span>, :] <span class="op">&lt;</span> K), other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a>        bv <span class="op">=</span> tl.load(b <span class="op">+</span> rk[:, <span class="va">None</span>] <span class="op">*</span> sbk <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> sbn,</span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rk[:, <span class="va">None</span>] <span class="op">&lt;</span> K) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N), other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a>        acc <span class="op">+=</span> tl.dot(av, bv)</span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>    tl.store(c <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> scm <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> scn, acc,</span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a>             mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N))</span>
-<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul(a, b):</span>
-<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> a.ndim <span class="op">==</span> b.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> a.shape[<span class="dv">1</span>] <span class="op">==</span> b.shape[<span class="dv">0</span>]</span>
-<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> a.shape<span class="op">;</span> N <span class="op">=</span> b.shape[<span class="dv">1</span>]</span>
-<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a>    c <span class="op">=</span> torch.empty((M, N), device<span class="op">=</span>a.device, dtype<span class="op">=</span>a.dtype)</span>
-<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a>    grid <span class="op">=</span> (triton.cdiv(M, <span class="dv">32</span>), triton.cdiv(N, <span class="dv">32</span>))</span>
-<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a>    matmul_kernel[grid](a, b, c, M, N, K, <span class="op">*</span>a.stride(), <span class="op">*</span>b.stride(), <span class="op">*</span>c.stride(),</span>
-<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a>                        BM<span class="op">=</span><span class="dv">32</span>, BN<span class="op">=</span><span class="dv">32</span>, BK<span class="op">=</span><span class="dv">32</span>)</span>
-<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> c</span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>只 mask 输出而不 mask K 尾块会怎样？</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a>为什么训练 GEMM 与 decode 的 M=1 GEMM 不应共用同一配置？</span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
 <span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">17</span>, <span class="dv">33</span>, <span class="dv">19</span>), (<span class="dv">64</span>, <span class="dv">64</span>, <span class="dv">64</span>)):</span>
-<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a>    M, K, N <span class="op">=</span> shape</span>
-<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a>    a <span class="op">=</span> torch.randn((M,K), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
-<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a>    b <span class="op">=</span> torch.randn((K,N), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
-<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(matmul(a,b), a<span class="op">@</span>b, atol<span class="op">=</span><span class="fl">2e-2</span>, rtol<span class="op">=</span><span class="fl">2e-2</span>)</span>
-<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>A mask 覆盖 M/K，B mask 覆盖 K/N；累加器用 FP32，最终按 C dtype 写回。</span>
-<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：每个边界维都要独立 mask；容差必须符合输入/累加精度，不能与 CPU 双精度逐位比较。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：BM/BN/BK、warps、stages 共同影响 tensor-core 利用率与资源；需要按 shape autotune。</span>
-<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
-<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
-<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul_kernel(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,</span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a>                  sam: tl.constexpr, sak: tl.constexpr,</span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a>                  sbk: tl.constexpr, sbn: tl.constexpr,</span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a>                  scm: tl.constexpr, scn: tl.constexpr,</span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a>                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):</span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a>    rm <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BM <span class="op">+</span> tl.arange(<span class="dv">0</span>, BM)</span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a>    rn <span class="op">=</span> tl.program_id(<span class="dv">1</span>) <span class="op">*</span> BN <span class="op">+</span> tl.arange(<span class="dv">0</span>, BN)</span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a>    acc <span class="op">=</span> tl.zeros((BM, BN), tl.float32)</span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k0 <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BK):</span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a>        rk <span class="op">=</span> k0 <span class="op">+</span> tl.arange(<span class="dv">0</span>, BK)</span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a>        av <span class="op">=</span> tl.load(a <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> sam <span class="op">+</span> rk[<span class="va">None</span>, :] <span class="op">*</span> sak,</span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rk[<span class="va">None</span>, :] <span class="op">&lt;</span> K), other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a>        bv <span class="op">=</span> tl.load(b <span class="op">+</span> rk[:, <span class="va">None</span>] <span class="op">*</span> sbk <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> sbn,</span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>                     mask<span class="op">=</span>(rk[:, <span class="va">None</span>] <span class="op">&lt;</span> K) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N), other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>        acc <span class="op">+=</span> tl.dot(av, bv)</span>
+<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a>    tl.store(c <span class="op">+</span> rm[:, <span class="va">None</span>] <span class="op">*</span> scm <span class="op">+</span> rn[<span class="va">None</span>, :] <span class="op">*</span> scn, acc,</span>
+<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a>             mask<span class="op">=</span>(rm[:, <span class="va">None</span>] <span class="op">&lt;</span> M) <span class="op">&amp;</span> (rn[<span class="va">None</span>, :] <span class="op">&lt;</span> N))</span>
+<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> matmul(a, b):</span>
+<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> a.ndim <span class="op">==</span> b.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> a.shape[<span class="dv">1</span>] <span class="op">==</span> b.shape[<span class="dv">0</span>]</span>
+<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a>    M, K <span class="op">=</span> a.shape<span class="op">;</span> N <span class="op">=</span> b.shape[<span class="dv">1</span>]</span>
+<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a>    c <span class="op">=</span> torch.empty((M, N), device<span class="op">=</span>a.device, dtype<span class="op">=</span>a.dtype)</span>
+<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a>    grid <span class="op">=</span> (triton.cdiv(M, <span class="dv">32</span>), triton.cdiv(N, <span class="dv">32</span>))</span>
+<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a>    matmul_kernel[grid](a, b, c, M, N, K, <span class="op">*</span>a.stride(), <span class="op">*</span>b.stride(), <span class="op">*</span>c.stride(),</span>
+<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a>                        BM<span class="op">=</span><span class="dv">32</span>, BN<span class="op">=</span><span class="dv">32</span>, BK<span class="op">=</span><span class="dv">32</span>)</span>
+<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> c</span>
+<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-241"><a href="#cb3-241" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">17</span>, <span class="dv">33</span>, <span class="dv">19</span>), (<span class="dv">64</span>, <span class="dv">64</span>, <span class="dv">64</span>)):</span>
+<span id="cb3-242"><a href="#cb3-242" aria-hidden="true" tabindex="-1"></a>    M, K, N <span class="op">=</span> shape</span>
+<span id="cb3-243"><a href="#cb3-243" aria-hidden="true" tabindex="-1"></a>    a <span class="op">=</span> torch.randn((M,K), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb3-244"><a href="#cb3-244" aria-hidden="true" tabindex="-1"></a>    b <span class="op">=</span> torch.randn((K,N), device<span class="op">=</span><span class="st">"cuda"</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb3-245"><a href="#cb3-245" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(matmul(a,b), a<span class="op">@</span>b, atol<span class="op">=</span><span class="fl">2e-2</span>, rtol<span class="op">=</span><span class="fl">2e-2</span>)</span>
+<span id="cb3-246"><a href="#cb3-246" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-247"><a href="#cb3-247" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-248"><a href="#cb3-248" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-249"><a href="#cb3-249" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-250"><a href="#cb3-250" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-251"><a href="#cb3-251" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（2D 宏观网格与 K 维切片加载）**：以二维网格映射输出矩阵瓦片，Program 块初始化 FP32 寄存器累加器 <span class="in">`acc`</span>。外层循环沿 $K$ 维以 $BK$ 为步长推进。每一轮迭代中，Program 分别构造 $A$ 与 $B$ 瓦片的二维指针，并在双向掩码（$A$ 受控于 $(M, K)$，$B$ 受控于 $(K, N)$）保护下，结合 <span class="in">`other=0.0`</span> 将当前切片合并载入片上寄存器。</span>
+<span id="cb3-252"><a href="#cb3-252" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（Tensor Core 驱动的片上点积累加）**：调用 <span class="in">`tl.dot(av, bv)`</span> 将当前 $A$ 瓦片与 $B$ 瓦片送入 GPU 硬件底层的 Tensor Core 矩阵乘加流水线。计算采用 FP16 乘法并在 FP32 累加器中就地累加，经过多轮 $K$ 维切片迭代后，累加器逐步收敛出该瓦片的最终真实点积和，整个循环计算完全在片上寄存器展开。</span>
+<span id="cb3-253"><a href="#cb3-253" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（输出掩码截断与类型转换写回）**：将高精度累加器 <span class="in">`acc`</span> 转换为目标张量数据类型（FP16/BF16），结合输出边界掩码 <span class="in">`(rm &lt; M) &amp; (rn &lt; N)`</span>，通过 <span class="in">`tl.store`</span> 写回全局目标矩阵 $C$。越界位置完全被硬件屏蔽，保证零越界写入。</span>
+<span id="cb3-254"><a href="#cb3-254" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-255"><a href="#cb3-255" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-256"><a href="#cb3-256" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-257"><a href="#cb3-257" aria-hidden="true" tabindex="-1"></a>若仅在输出写回 $C$ 时施加掩码，而在内层循环加载 $A$ 和 $B$ 时遗漏了针对 $K$ 维度的掩码保护（即没有 <span class="in">`rk &lt; K`</span> 约束）：</span>
+<span id="cb3-258"><a href="#cb3-258" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**尾块越界脏数据强行读入**：当 $K$ 不是分块尺寸 $BK$ 的整数倍时（例如 $K=33, BK=32$，在第二轮迭代中有效 $K$ 仅有 1 项，后 31 项为越界内存），内核会绕过边界检查，从显存越界地址中强行读取邻近内存的未初始化脏数据。</span>
+<span id="cb3-259"><a href="#cb3-259" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**脏数据永久熔铸进累加器**：在执行 <span class="in">`tl.dot(av, bv)`</span> 时，这 31 个非法的脏数据向量会被送进 Tensor Core 进行点乘求和，产生不可预测的伪数值并直接累加进片上累加器 <span class="in">`acc`</span> 中。</span>
+<span id="cb3-260"><a href="#cb3-260" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出彻底毁坏**：即使在最后写回 $C$ 时施加了 $M$ 和 $N$ 维度的输出掩码，累加器内存储的数值本身已经被脏数据彻底污染，最终写回目标张量的所有有效数值都会变成不可控的随机荒谬值。</span>
+<span id="cb3-261"><a href="#cb3-261" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-262"><a href="#cb3-262" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-263"><a href="#cb3-263" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-264"><a href="#cb3-264" aria-hidden="true" tabindex="-1"></a>大模型训练 GEMM 与自回归推理解码（Decode）阶段的计算特征处于完全不同的物理极端，绝对不能共用同一套分块配置：</span>
+<span id="cb3-265"><a href="#cb3-265" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**训练 GEMM（$M$ 极大，如 $M=4096, N=4096, K=4096$）**：</span>
+<span id="cb3-266"><a href="#cb3-266" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**体系特征**：属于典型的**计算密集型（Compute-bound）**算子，算术强度极高。</span>
+<span id="cb3-267"><a href="#cb3-267" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**最优配置**：需要采用大分块尺寸（如 $BM=128, BN=128, BK=32$ 或 64），以最大化寄存器与片上数据复用率，彻底释放 Tensor Core 的峰值 TFLOPs 吞吐，并使用 4~8 个 Warp 和深度流水线。</span>
+<span id="cb3-268"><a href="#cb3-268" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**推理 Decode GEMM（$M=1$）**：</span>
+<span id="cb3-269"><a href="#cb3-269" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**体系特征**：退化为矩阵-向量乘法（GEMV），算术强度极低（每个权重只被使用 1 次），属于绝对的**显存带宽密集型（Memory-bound）**算子。</span>
+<span id="cb3-270"><a href="#cb3-270" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**配置灾难**：若在 $M=1$ 时强行使用训练的大分块（如 $BM=128$），在 $M$ 维度分配的 128 个线程中，有 127 个线程在整个内核执行期间完全处于无效 Mask 闲置状态，造成极其恐怖的硬件计算资源浪费；同时，整个输出矩阵仅发射 1 行 Program，导致庞大 GPU 上上百个 SM 处于完全空闲状态（Wavefront 饥饿）。对于 $M=1$，必须采用 $BM=1$、大 $BN$ 并结合 Split-K（跨多 Block 并行切分 $K$ 维并做原子归约）专用内核架构。</span>
+<span id="cb3-271"><a href="#cb3-271" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-272"><a href="#cb3-272" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-273"><a href="#cb3-273" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-274"><a href="#cb3-274" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
+<span id="cb3-275"><a href="#cb3-275" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
+<span id="cb3-276"><a href="#cb3-276" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-277"><a href="#cb3-277" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-278"><a href="#cb3-278" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -601,31 +630,58 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>均值和方差是两次 reduction；masked load 的 0 对 sum 安全，但减 mean 后 padding lane 变成 <code>-mean</code>。</p>
+<p>在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 <span class="math inline">\(\mu\)</span> 与方差 <span class="math inline">\(\sigma^2\)</span> 是必经步骤。总体方差（Population Variance）的经典定义为： <span class="math display">\[ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 \]</span> 在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 <span class="math inline">\(2\)</span> 的幂次 <span class="math inline">\(\text{BLOCK}\)</span>。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 <span class="math inline">\(0.0\)</span>。 但本课揭示了一个极其隐蔽的致命陷阱：<strong>“单位元的代数污染”</strong>。 当执行中心化操作 <span class="math inline">\((x - \mu)\)</span> 时，原先填充了 <span class="math inline">\(0.0\)</span> 的 Padding lanes 会变为 <span class="math inline">\((0.0 - \mu) = -\mu\)</span>；其平方则变为 <span class="math inline">\((-\mu)^2 = \mu^2 \neq 0\)</span>。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 <span class="math inline">\((\text{BLOCK} - N) \times \mu^2\)</span> 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。 本课解决的核心工程问题是：<strong>理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>先算 mean，再对平方差显式 <code>where(mask,...,0)</code>，最后除真实 N 而非 BLOCK。</p>
+<p>两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：</p>
+<ol type="1">
+<li><strong>Pass 1（带掩码加载与均值规约）</strong>：
+<ul>
+<li>使用 <code>cols = tl.arange(0, BLOCK)</code> 与 <code>mask = cols &lt; N</code>。</li>
+<li><code>values = tl.load(..., mask=mask, other=0.0)</code>。</li>
+<li>在片上调用 <code>tl.sum(values, axis=0)</code> 并除以<strong>真实逻辑长度 <span class="math inline">\(N\)</span></strong>（绝对不能除以硬件向量长度 <span class="math inline">\(\text{BLOCK}\)</span>），得到严格无偏的均值标量 <span class="math inline">\(\mu\)</span>。</li>
+</ul></li>
+<li><strong>中心化与掩码重施加（Re-masking）</strong>：
+<ul>
+<li>寄存器中所有 lane 同时广播减去标量 <span class="math inline">\(\mu\)</span>：<code>diff = values - mean</code>。</li>
+<li>此时，前 <span class="math inline">\(N\)</span> 个有效 lane 为 <span class="math inline">\(x_i - \mu\)</span>；后 <span class="math inline">\(\text{BLOCK} - N\)</span> 个 Padding lane 变为 <span class="math inline">\(-\mu\)</span>。</li>
+<li>计算元素平方项 <code>diff_sq = diff * diff</code>。此时 Padding lane 上的数值为 <span class="math inline">\(\mu^2\)</span>。</li>
+<li><strong>核心二次传播防护</strong>：通过 <code>tl.where(mask, diff_sq, 0.0)</code> 强制对平方项重新施加掩码。将后 <span class="math inline">\(\text{BLOCK} - N\)</span> 个 lane 携带的 <span class="math inline">\(\mu^2\)</span> 重新强行抹平为加法单位元 <span class="math inline">\(0.0\)</span>。</li>
+</ul></li>
+<li><strong>Pass 2（方差规约与双标量写回）</strong>：
+<ul>
+<li>对清洗后的 <code>centered_sq</code> 向量执行二次 <code>tl.sum</code>，除以真实长度 <span class="math inline">\(N\)</span>，得到位级精准的总体方差 <span class="math inline">\(\sigma^2\)</span>。</li>
+<li>将均值与方差标量分别通过 <code>tl.store</code> 写回显存。</li>
+</ul></li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>必须区分 population variance 与 unbiased sample variance；N=1 时后者无定义。</p>
+<ul>
+<li><strong>归一化分母混淆（除 <span class="math inline">\(N\)</span> vs 除 <span class="math inline">\(\text{BLOCK}\)</span>）</strong>： 若在计算均值或方差时误用除以 <code>BLOCK</code>，由于 <span class="math inline">\(\text{BLOCK} \ge N\)</span>，算出的统计量将被无辜缩小 <span class="math inline">\(N / \text{BLOCK}\)</span> 倍。必须除以真实有效元素数 <span class="math inline">\(N\)</span>。</li>
+<li><strong>样本方差 vs 总体方差（Bessel 校正）</strong>： PyTorch 默认的 <code>torch.var</code> 使用无偏样本方差（Unbiased Sample Variance，分母为 <span class="math inline">\(N - 1\)</span>）。而神经网络算子（如 LayerNorm）规范定义使用总体方差（Population Variance，分母为 <span class="math inline">\(N\)</span>，对应 PyTorch 的 <code>unbiased=False</code>）。当 <span class="math inline">\(N=1\)</span> 时，样本方差的分母为 0 导致除零错误，必须在系统边界做契约防御。</li>
+<li><strong>遗漏 <code>tl.where</code> 的二次掩码</strong>： 这是新手最容易犯的隐蔽 Bug。只要 <span class="math inline">\(\mu \neq 0\)</span> 且存在 Padding（<span class="math inline">\(N &lt; \text{BLOCK}\)</span>），不重施掩码就会导致方差偏大 <span class="math inline">\((\text{BLOCK}-N)\mu^2 / N\)</span>。当输入均值很大时，方差误差可达数个数量级。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>两遍统计简单但有额外运算；Welford 更稳定、combine 更复杂。</p>
+<ul>
+<li><strong>片上两遍计算（Two-pass）的极致性能</strong>： 在 Triton 中，数据加载到寄存器后，均值与方差的两轮规约完全在片上寄存器文件内部展开，中间数据 <code>values</code> 和 <code>centered_sq</code> 根本不需要写入全局显存（HBM）。访存量仅为读取矩阵一次（<span class="math inline">\(M \times N\)</span> 元素），相比于在 PyTorch 中分别调用 <code>x.mean()</code> 和 <code>x.var()</code> 导致的 2 次全局显存扫描，显存带宽节约了整整 50%。</li>
+<li><strong>数值稳定性与 Welford 算法</strong>： 两阶段算法（Two-pass）需要先求均值再求方差。如果遇到“大均值、小方差”极端分布（例如所有元素在 <span class="math inline">\(10^6\)</span> 附近，波动仅 <span class="math inline">\(10^{-4}\)</span>），两次减法可能在浮点有限精度下产生轻微的灾难性抵消。此时若采用 Welford 增量流式算法，数值条件数最好，但 Welford 的 Warp 间归约公式较为复杂（需要维护 <span class="math inline">\((n, \mu, M_2)\)</span> 三元组）。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>N=3、BLOCK=4，padding 值 0；若 mean=2，padding 的平方差是 4，未重新 mask 会污染方差。</p>
+<p>以 <span class="math inline">\(N = 3, \text{BLOCK} = 4\)</span>，输入行向量为 <span class="math inline">\([1.0, 2.0, 3.0]\)</span> 为例： 1. <strong>Pass 1 均值</strong>： - 加载向量：<code>values = [1.0, 2.0, 3.0, 0.0]</code>（Padding 位被赋予 0.0）。 - 求和：<span class="math inline">\(1 + 2 + 3 + 0 = 6.0\)</span>。 - 均值：<span class="math inline">\(\mu = 6.0 / 3 = 2.0\)</span>。正确。 2. <strong>中心化陷阱（若无二次掩码）</strong>： - 差值向量：<code>values - mean = [1-2, 2-2, 3-2, 0-2] = [-1.0, 0.0, 1.0, -2.0]</code>。 - 平方向量：<code>[1.0, 0.0, 1.0, 4.0]</code>。注意第 3 位变成了 <span class="math inline">\(4.0\)</span>！ - 若直接求和：<span class="math inline">\(1 + 0 + 1 + 4 = 6.0 \to \sigma^2 = 6.0 / 3 = 2.0\)</span>。而真实方差为 <span class="math inline">\((1+0+1)/3 = 2/3 \approx 0.667\)</span>。误差高达 <span class="math inline">\(200\%\)</span>！ 3. <strong>二次掩码保护（<code>tl.where</code>）</strong>： - 施加掩码：<code>tl.where(mask, diff_sq, 0.0) = [1.0, 0.0, 1.0, 0.0]</code>。第 3 位被精准重置为 0.0。 - 求和：<span class="math inline">\(1 + 0 + 1 + 0 = 2.0\)</span>。 - 方差：<span class="math inline">\(\sigma^2 = 2.0 / 3 \approx 0.667\)</span>。与理论数学解位级完全契合。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐二次 mask。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="2cbe3764" class="cell" data-course_role="exercise">
+<div id="9a6318f5" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -705,7 +761,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="3682ef6a" class="cell" data-course_role="solution">
+<div id="b5aaece4" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -743,15 +799,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>先算 mean，再对平方差显式 <code>where(mask,...,0)</code>，最后除真实 N 而非 BLOCK。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（网格绑定与加法零元注入）</strong>：按行发射 Program，列维度以 2 的幂次构造 <code>cols = tl.arange(0, BLOCK)</code>。在掩码 <code>mask = cols &lt; N</code> 保护下，通过带 <code>other=0.0</code> 的 <code>tl.load</code> 一次性将该行数据拉入寄存器向量 <code>values</code>，超出 <span class="math inline">\(N\)</span> 的 Padding lane 注入加法单位元 0.0。 2. <strong>状态变化阶段（两阶段归约与二次掩码阻断）</strong>： - 阶段 A：调用 <code>tl.sum</code> 计算有效总和，除以真实列宽 <span class="math inline">\(N\)</span> 得到行均值标量 <span class="math inline">\(\mu\)</span>。 - 阶段 B：执行广播减法 <code>values - mean</code> 并求平方。由于 Padding lane 上的 0.0 变为 <span class="math inline">\(-\mu\)</span> 后平方变成 <span class="math inline">\(\mu^2\)</span>，立即通过 <code>tl.where(mask, diff_sq, 0.0)</code> 强制将 Padding lane 的虚假能量清零，使加法单位元在数据流中重新闭环。 - 阶段 C：调用二次 <code>tl.sum</code> 计算清洗后的方差平方和，除以真实列宽 <span class="math inline">\(N\)</span> 得到总体方差 <span class="math inline">\(\sigma^2\)</span>。 3. <strong>输出阶段（双标量写回）</strong>：将算出的均值标量与方差标量，通过各自独立的 <code>tl.store</code> 写回到目标全局内存地址 <code>means + row</code> 与 <code>variances + row</code>。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：必须区分 population variance 与 unbiased sample variance；N=1 时后者无定义。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在初始加载阶段（<code>tl.load</code>）通过 <code>other=0.0</code> 确实成功阻断了未初始化内存的污染，使加法归约满足 <span class="math inline">\(X_i + 0.0 = X_i\)</span>。 但是，计算方差的前提是执行<strong>中心化偏移运算</strong> <span class="math inline">\((x_i - \mu)\)</span>： 对于有效的 <span class="math inline">\(N\)</span> 个数据，计算的是真实的差值 <span class="math inline">\((x_i - \mu)\)</span>； 但对于多余的 <span class="math inline">\(\text{BLOCK} - N\)</span> 个 Padding lanes，其寄存器数值为 0.0，参与运算后变成了 <span class="math inline">\((0.0 - \mu) = -\mu\)</span>。 随后的平方运算使其变成了 <span class="math inline">\((-\mu)^2 = \mu^2\)</span>。只要均值 <span class="math inline">\(\mu \neq 0\)</span>，<span class="math inline">\(\mu^2\)</span> 就必然是一个大于 0 的正数！ 这意味着，多余的每个 Padding lane 都会虚构出一个数值为 <span class="math inline">\(\mu^2\)</span> 的非零偏差。在后续执行 <code>tl.sum</code> 时，这些本该被完全忽略的无效 lane 会向累加器注入总量为 <span class="math inline">\((\text{BLOCK} - N) \times \mu^2\)</span> 的巨大伪方差能量，导致计算出的方差虚高，产生严重的数学错误。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：两遍统计简单但有额外运算；Welford 更稳定、combine 更复杂。</p>
+<p>当输入数据呈现“大均值、小方差”特征时（例如数据集中在 <span class="math inline">\(10^6 \pm 0.01\)</span>），直接使用单精度 FP32 的两阶段朴素公式会导致严重的<strong>灾难性数值抵消（Catastrophic Cancellation）</strong>。工程改进策略包括： 1. <strong>寄存器累加器提升为 FP64 计算</strong>： 在计算均值与平方和时，将寄存器内的 <code>values</code> 显式转换为高精度的双精度浮点数 <code>tl.float64</code>。求出 <code>mean</code> 与二次中心化平方和后再转换回 FP32 写回，彻底抹平浮点尾数截断误差。 2. <strong>采用流式 Welford 增量递推算法</strong>： 改用单遍（One-pass）Welford 在线均值方差算法： <span class="math display">\[ \mu_k = \mu_{k-1} + \frac{x_k - \mu_{k-1}}{k}, \quad M_{2, k} = M_{2, k-1} + (x_k - \mu_{k-1})(x_k - \mu_k) \]</span> 在 Warp Shuffle 归约时采用 Welford Combine 算子合成两个子块的统计量。该算法从代数结构上保证了差值始终在局部小量之间累积，条件数最优，理论上杜绝了浮点相消问题。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1289,159 +1345,214 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>均值和方差是两次 reduction；masked load 的 0 对 sum 安全，但减 mean 后 padding lane 变成 <span class="in">`-mean`</span>。</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>先算 mean，再对平方差显式 <span class="in">`where(mask,...,0)`</span>，最后除真实 N 而非 BLOCK。</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>必须区分 population variance 与 unbiased sample variance；N=1 时后者无定义。</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>两遍统计简单但有额外运算；Welford 更稳定、combine 更复杂。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>N=3、BLOCK=4，padding 值 0；若 mean=2，padding 的平方差是 4，未重新 mask 会污染方差。</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>补齐二次 mask。</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 $\mu$ 与方差 $\sigma^2$ 是必经步骤。总体方差（Population Variance）的经典定义为：</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>$$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 $$</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 $2$ 的幂次 $\text{BLOCK}$。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 $0.0$。</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>但本课揭示了一个极其隐蔽的致命陷阱：**“单位元的代数污染”**。</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>当执行中心化操作 $(x - \mu)$ 时，原先填充了 $0.0$ 的 Padding lanes 会变为 $(0.0 - \mu) = -\mu$；其平方则变为 $(-\mu)^2 = \mu^2 \neq 0$。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 $(\text{BLOCK} - N) \times \mu^2$ 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染**。</span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Pass 1（带掩码加载与均值规约）**：</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>使用 <span class="in">`cols = tl.arange(0, BLOCK)`</span> 与 <span class="in">`mask = cols &lt; N`</span>。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`values = tl.load(..., mask=mask, other=0.0)`</span>。</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>在片上调用 <span class="in">`tl.sum(values, axis=0)`</span> 并除以**真实逻辑长度 $N$**（绝对不能除以硬件向量长度 $\text{BLOCK}$），得到严格无偏的均值标量 $\mu$。</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**中心化与掩码重施加（Re-masking）**：</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>寄存器中所有 lane 同时广播减去标量 $\mu$：<span class="in">`diff = values - mean`</span>。</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时，前 $N$ 个有效 lane 为 $x_i - \mu$；后 $\text{BLOCK} - N$ 个 Padding lane 变为 $-\mu$。</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>计算元素平方项 <span class="in">`diff_sq = diff * diff`</span>。此时 Padding lane 上的数值为 $\mu^2$。</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**核心二次传播防护**：通过 <span class="in">`tl.where(mask, diff_sq, 0.0)`</span> 强制对平方项重新施加掩码。将后 $\text{BLOCK} - N$ 个 lane 携带的 $\mu^2$ 重新强行抹平为加法单位元 $0.0$。</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**Pass 2（方差规约与双标量写回）**：</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对清洗后的 <span class="in">`centered_sq`</span> 向量执行二次 <span class="in">`tl.sum`</span>，除以真实长度 $N$，得到位级精准的总体方差 $\sigma^2$。</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>将均值与方差标量分别通过 <span class="in">`tl.store`</span> 写回显存。</span>
 <span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
 <span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var_kernel(x, means, variances, N: tl.constexpr,</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>                    stride_m: tl.constexpr, BLOCK: tl.constexpr):</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>    mean <span class="op">=</span> tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>    centered_sq <span class="op">=</span> tl.where(______, (values <span class="op">-</span> mean) <span class="op">*</span> (values <span class="op">-</span> mean), <span class="fl">0.0</span>)  <span class="co"># </span><span class="al">TODO</span></span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>    var <span class="op">=</span> tl.<span class="bu">sum</span>(centered_sq, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    tl.store(means <span class="op">+</span> row, mean)</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    tl.store(variances <span class="op">+</span> row, var)</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var(x):</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>    means <span class="op">=</span> torch.empty(M, device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a>    variances <span class="op">=</span> torch.empty_like(means)</span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>    mean_var_kernel[(M,)](x, means, variances, N, x.stride(<span class="dv">0</span>),</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a>                          BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> means, variances</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**归一化分母混淆（除 $N$ vs 除 $\text{BLOCK}$）**：</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>  若在计算均值或方差时误用除以 <span class="in">`BLOCK`</span>，由于 $\text{BLOCK} \ge N$，算出的统计量将被无辜缩小 $N / \text{BLOCK}$ 倍。必须除以真实有效元素数 $N$。</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**样本方差 vs 总体方差（Bessel 校正）**：</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>  PyTorch 默认的 <span class="in">`torch.var`</span> 使用无偏样本方差（Unbiased Sample Variance，分母为 $N - 1$）。而神经网络算子（如 LayerNorm）规范定义使用总体方差（Population Variance，分母为 $N$，对应 PyTorch 的 <span class="in">`unbiased=False`</span>）。当 $N=1$ 时，样本方差的分母为 0 导致除零错误，必须在系统边界做契约防御。</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**遗漏 `tl.where` 的二次掩码**：</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>  这是新手最容易犯的隐蔽 Bug。只要 $\mu \neq 0$ 且存在 Padding（$N &lt; \text{BLOCK}$），不重施掩码就会导致方差偏大 $(\text{BLOCK}-N)\mu^2 / N$。当输入均值很大时，方差误差可达数个数量级。</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**片上两遍计算（Two-pass）的极致性能**：</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>  在 Triton 中，数据加载到寄存器后，均值与方差的两轮规约完全在片上寄存器文件内部展开，中间数据 <span class="in">`values`</span> 和 <span class="in">`centered_sq`</span> 根本不需要写入全局显存（HBM）。访存量仅为读取矩阵一次（$M \times N$ 元素），相比于在 PyTorch 中分别调用 <span class="in">`x.mean()`</span> 和 <span class="in">`x.var()`</span> 导致的 2 次全局显存扫描，显存带宽节约了整整 50%。</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**数值稳定性与 Welford 算法**：</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>  两阶段算法（Two-pass）需要先求均值再求方差。如果遇到“大均值、小方差”极端分布（例如所有元素在 $10^6$ 附近，波动仅 $10^{-4}$），两次减法可能在浮点有限精度下产生轻微的灾难性抵消。此时若采用 Welford 增量流式算法，数值条件数最好，但 Welford 的 Warp 间归约公式较为复杂（需要维护 $(n, \mu, M_2)$ 三元组）。</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>以 $N = 3, \text{BLOCK} = 4$，输入行向量为 $<span class="co">[</span><span class="ot">1.0, 2.0, 3.0</span><span class="co">]</span>$ 为例：</span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Pass 1 均值**：</span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>加载向量：<span class="in">`values = [1.0, 2.0, 3.0, 0.0]`</span>（Padding 位被赋予 0.0）。</span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>求和：$1 + 2 + 3 + 0 = 6.0$。</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>均值：$\mu = 6.0 / 3 = 2.0$。正确。</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**中心化陷阱（若无二次掩码）**：</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>差值向量：<span class="in">`values - mean = [1-2, 2-2, 3-2, 0-2] = [-1.0, 0.0, 1.0, -2.0]`</span>。</span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>平方向量：<span class="in">`[1.0, 0.0, 1.0, 4.0]`</span>。注意第 3 位变成了 $4.0$！</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若直接求和：$1 + 0 + 1 + 4 = 6.0 \to \sigma^2 = 6.0 / 3 = 2.0$。而真实方差为 $(1+0+1)/3 = 2/3 \approx 0.667$。误差高达 $200\%$！</span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**二次掩码保护（`tl.where`）**：</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>施加掩码：<span class="in">`tl.where(mask, diff_sq, 0.0) = [1.0, 0.0, 1.0, 0.0]`</span>。第 3 位被精准重置为 0.0。</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>求和：$1 + 0 + 1 + 0 = 2.0$。</span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>方差：$\sigma^2 = 2.0 / 3 \approx 0.667$。与理论数学解位级完全契合。</span>
 <span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">3</span>, <span class="dv">17</span>), (<span class="dv">4</span>, <span class="dv">128</span>)):</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>    m, v <span class="op">=</span> mean_var(x)</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(m, x.mean(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(v, x.var(<span class="dv">1</span>, unbiased<span class="op">=</span><span class="va">False</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“均值方差与 Mask 二次传播”的工作机制。</span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>只在 load 时 mask 为什么仍会污染方差？</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>大均值小方差时如何改进数值稳定性？</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>补齐二次 mask。</span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var_kernel(x, means, variances, N: tl.constexpr,</span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>                    stride_m: tl.constexpr, BLOCK: tl.constexpr):</span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>    mean <span class="op">=</span> tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>    centered_sq <span class="op">=</span> tl.where(______, (values <span class="op">-</span> mean) <span class="op">*</span> (values <span class="op">-</span> mean), <span class="fl">0.0</span>)  <span class="co"># </span><span class="al">TODO</span></span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>    var <span class="op">=</span> tl.<span class="bu">sum</span>(centered_sq, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>    tl.store(means <span class="op">+</span> row, mean)</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>    tl.store(variances <span class="op">+</span> row, var)</span>
 <span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var(x):</span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>    means <span class="op">=</span> torch.empty(M, device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>    variances <span class="op">=</span> torch.empty_like(means)</span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>    mean_var_kernel[(M,)](x, means, variances, N, x.stride(<span class="dv">0</span>),</span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>                          BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> means, variances</span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">3</span>, <span class="dv">17</span>), (<span class="dv">4</span>, <span class="dv">128</span>)):</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>    m, v <span class="op">=</span> mean_var(x)</span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(m, x.mean(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(v, x.var(<span class="dv">1</span>, unbiased<span class="op">=</span><span class="va">False</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var_kernel(x, means, variances, N: tl.constexpr,</span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>                    stride_m: tl.constexpr, BLOCK: tl.constexpr):</span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>    mean <span class="op">=</span> tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>    centered_sq <span class="op">=</span> tl.where(mask, (values <span class="op">-</span> mean) <span class="op">*</span> (values <span class="op">-</span> mean), <span class="fl">0.0</span>)</span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a>    var <span class="op">=</span> tl.<span class="bu">sum</span>(centered_sq, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>    tl.store(means <span class="op">+</span> row, mean)</span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a>    tl.store(variances <span class="op">+</span> row, var)</span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var(x):</span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a>    means <span class="op">=</span> torch.empty(M, device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a>    variances <span class="op">=</span> torch.empty_like(means)</span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>    mean_var_kernel[(M,)](x, means, variances, N, x.stride(<span class="dv">0</span>),</span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>                          BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
-<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> means, variances</span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“均值方差与 Mask 二次传播”的工作机制。</span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>只在 load 时 mask 为什么仍会污染方差？</span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a>大均值小方差时如何改进数值稳定性？</span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
 <span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">3</span>, <span class="dv">17</span>), (<span class="dv">4</span>, <span class="dv">128</span>)):</span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>    m, v <span class="op">=</span> mean_var(x)</span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(m, x.mean(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(v, x.var(<span class="dv">1</span>, unbiased<span class="op">=</span><span class="va">False</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>先算 mean，再对平方差显式 <span class="in">`where(mask,...,0)`</span>，最后除真实 N 而非 BLOCK。</span>
-<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：必须区分 population variance 与 unbiased sample variance；N=1 时后者无定义。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：两遍统计简单但有额外运算；Welford 更稳定、combine 更复杂。</span>
-<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
-<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
-<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var_kernel(x, means, variances, N: tl.constexpr,</span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a>                    stride_m: tl.constexpr, BLOCK: tl.constexpr):</span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a>    mean <span class="op">=</span> tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a>    centered_sq <span class="op">=</span> tl.where(mask, (values <span class="op">-</span> mean) <span class="op">*</span> (values <span class="op">-</span> mean), <span class="fl">0.0</span>)</span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>    var <span class="op">=</span> tl.<span class="bu">sum</span>(centered_sq, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> N</span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a>    tl.store(means <span class="op">+</span> row, mean)</span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a>    tl.store(variances <span class="op">+</span> row, var)</span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> mean_var(x):</span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a>    means <span class="op">=</span> torch.empty(M, device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>    variances <span class="op">=</span> torch.empty_like(means)</span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a>    mean_var_kernel[(M,)](x, means, variances, N, x.stride(<span class="dv">0</span>),</span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a>                          BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> means, variances</span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">3</span>, <span class="dv">17</span>), (<span class="dv">4</span>, <span class="dv">128</span>)):</span>
+<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
+<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a>    m, v <span class="op">=</span> mean_var(x)</span>
+<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(m, x.mean(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
+<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(v, x.var(<span class="dv">1</span>, unbiased<span class="op">=</span><span class="va">False</span>), atol<span class="op">=</span><span class="fl">2e-4</span>, rtol<span class="op">=</span><span class="fl">2e-4</span>)</span>
+<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（网格绑定与加法零元注入）**：按行发射 Program，列维度以 2 的幂次构造 <span class="in">`cols = tl.arange(0, BLOCK)`</span>。在掩码 <span class="in">`mask = cols &lt; N`</span> 保护下，通过带 <span class="in">`other=0.0`</span> 的 <span class="in">`tl.load`</span> 一次性将该行数据拉入寄存器向量 <span class="in">`values`</span>，超出 $N$ 的 Padding lane 注入加法单位元 0.0。</span>
+<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（两阶段归约与二次掩码阻断）**：</span>
+<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 A：调用 <span class="in">`tl.sum`</span> 计算有效总和，除以真实列宽 $N$ 得到行均值标量 $\mu$。</span>
+<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 B：执行广播减法 <span class="in">`values - mean`</span> 并求平方。由于 Padding lane 上的 0.0 变为 $-\mu$ 后平方变成 $\mu^2$，立即通过 <span class="in">`tl.where(mask, diff_sq, 0.0)`</span> 强制将 Padding lane 的虚假能量清零，使加法单位元在数据流中重新闭环。</span>
+<span id="cb3-241"><a href="#cb3-241" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>阶段 C：调用二次 <span class="in">`tl.sum`</span> 计算清洗后的方差平方和，除以真实列宽 $N$ 得到总体方差 $\sigma^2$。</span>
+<span id="cb3-242"><a href="#cb3-242" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（双标量写回）**：将算出的均值标量与方差标量，通过各自独立的 <span class="in">`tl.store`</span> 写回到目标全局内存地址 <span class="in">`means + row`</span> 与 <span class="in">`variances + row`</span>。</span>
+<span id="cb3-243"><a href="#cb3-243" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-244"><a href="#cb3-244" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-245"><a href="#cb3-245" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-246"><a href="#cb3-246" aria-hidden="true" tabindex="-1"></a>在初始加载阶段（<span class="in">`tl.load`</span>）通过 <span class="in">`other=0.0`</span> 确实成功阻断了未初始化内存的污染，使加法归约满足 $X_i + 0.0 = X_i$。</span>
+<span id="cb3-247"><a href="#cb3-247" aria-hidden="true" tabindex="-1"></a>但是，计算方差的前提是执行**中心化偏移运算** $(x_i - \mu)$：</span>
+<span id="cb3-248"><a href="#cb3-248" aria-hidden="true" tabindex="-1"></a>对于有效的 $N$ 个数据，计算的是真实的差值 $(x_i - \mu)$；</span>
+<span id="cb3-249"><a href="#cb3-249" aria-hidden="true" tabindex="-1"></a>但对于多余的 $\text{BLOCK} - N$ 个 Padding lanes，其寄存器数值为 0.0，参与运算后变成了 $(0.0 - \mu) = -\mu$。</span>
+<span id="cb3-250"><a href="#cb3-250" aria-hidden="true" tabindex="-1"></a>随后的平方运算使其变成了 $(-\mu)^2 = \mu^2$。只要均值 $\mu \neq 0$，$\mu^2$ 就必然是一个大于 0 的正数！</span>
+<span id="cb3-251"><a href="#cb3-251" aria-hidden="true" tabindex="-1"></a>这意味着，多余的每个 Padding lane 都会虚构出一个数值为 $\mu^2$ 的非零偏差。在后续执行 <span class="in">`tl.sum`</span> 时，这些本该被完全忽略的无效 lane 会向累加器注入总量为 $(\text{BLOCK} - N) \times \mu^2$ 的巨大伪方差能量，导致计算出的方差虚高，产生严重的数学错误。</span>
+<span id="cb3-252"><a href="#cb3-252" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-253"><a href="#cb3-253" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-254"><a href="#cb3-254" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-255"><a href="#cb3-255" aria-hidden="true" tabindex="-1"></a>当输入数据呈现“大均值、小方差”特征时（例如数据集中在 $10^6 \pm 0.01$），直接使用单精度 FP32 的两阶段朴素公式会导致严重的**灾难性数值抵消（Catastrophic Cancellation）**。工程改进策略包括：</span>
+<span id="cb3-256"><a href="#cb3-256" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**寄存器累加器提升为 FP64 计算**：</span>
+<span id="cb3-257"><a href="#cb3-257" aria-hidden="true" tabindex="-1"></a>   在计算均值与平方和时，将寄存器内的 <span class="in">`values`</span> 显式转换为高精度的双精度浮点数 <span class="in">`tl.float64`</span>。求出 <span class="in">`mean`</span> 与二次中心化平方和后再转换回 FP32 写回，彻底抹平浮点尾数截断误差。</span>
+<span id="cb3-258"><a href="#cb3-258" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**采用流式 Welford 增量递推算法**：</span>
+<span id="cb3-259"><a href="#cb3-259" aria-hidden="true" tabindex="-1"></a>   改用单遍（One-pass）Welford 在线均值方差算法：</span>
+<span id="cb3-260"><a href="#cb3-260" aria-hidden="true" tabindex="-1"></a>   $$ \mu_k = \mu_{k-1} + \frac{x_k - \mu_{k-1}}{k}, \quad M_{2, k} = M_{2, k-1} + (x_k - \mu_{k-1})(x_k - \mu_k) $$</span>
+<span id="cb3-261"><a href="#cb3-261" aria-hidden="true" tabindex="-1"></a>   在 Warp Shuffle 归约时采用 Welford Combine 算子合成两个子块的统计量。该算法从代数结构上保证了差值始终在局部小量之间累积，条件数最优，理论上杜绝了浮点相消问题。</span>
+<span id="cb3-262"><a href="#cb3-262" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-263"><a href="#cb3-263" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-264"><a href="#cb3-264" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-265"><a href="#cb3-265" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
+<span id="cb3-266"><a href="#cb3-266" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
+<span id="cb3-267"><a href="#cb3-267" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-268"><a href="#cb3-268" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-269"><a href="#cb3-269" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

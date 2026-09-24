@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -600,31 +629,49 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>Triton <code>tl.sum</code> 在 program 内归约 tensor；常把 BLOCK 取为 N 的下一 2 次幂。</p>
+<p>在科学计算与深度学习中，跨维度规约（Reduction，如求和、均值、方差、Softmax 分母）是高频核心模式。对于矩阵 <span class="math inline">\(X \in \mathbb{R}^{M \times N}\)</span>，行求和操作（Row Sum）输出一个 <span class="math inline">\(M\)</span> 维列向量： <span class="math display">\[ y_i = \sum_{j=0}^{N-1} X_{i, j} \]</span> 传统 CUDA 实现中，行归约需要由一个 Thread Block 协作完成，开发者必须精细管理共享内存、多轮 <code>__syncthreads()</code> 同步壁垒以及 Warp Shuffle 洗牌指令。 而在 Triton 中，规约通过内置原语 <code>tl.sum</code> 在 Program 块内对张量直接完成。 本课解决的核心工程问题是：<strong>当矩阵列数 <span class="math inline">\(N\)</span> 不是 2 的幂次时，如何通过填充“代数单位元（Algebraic Identity Element）”，让 SIMD 折半树状规约硬件与任意物理形状完美解耦，保证计算的绝对正确性</strong>。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>mask 外 load 使用加法单位元 0，使 padding lanes 不改变 sum。</p>
+<p>行归约的代数保护与片上树状折半数据通路如图 5-1 与图 5-2 所示：</p>
+<ol type="1">
+<li><strong>行绑定与 2 的幂次对齐</strong>： 网格以行维度划分 <code>grid = (M,)</code>，Program <span class="math inline">\(i\)</span> 绑定矩阵第 <span class="math inline">\(i\)</span> 行。由于硬件 SIMD/Tensor 树状折半规约算法严格依赖 2 的幂次分治架构，Triton 要求张量块大小必须为 2 的幂：<code>BLOCK = triton.next_power_of_2(N)</code>。</li>
+<li><strong>带单位元的安全合并加载（Identity-padded Masked Load）</strong>： 构造谓词 <code>mask = cols &lt; N</code>。在执行 <code>tl.load</code> 时，必须显式指定 <code>other=0.0</code>： <code>values = tl.load(x + row * stride_m + cols, mask=mask, other=0.0)</code> 对于有效索引 <span class="math inline">\(j &lt; N\)</span>，加载真实的显存数值；对于超出 <span class="math inline">\(N\)</span> 的 Padding lanes（数量为 <span class="math inline">\(\text{BLOCK} - N\)</span>），硬件直接将其在寄存器中初始化为加法单位元 <span class="math inline">\(0.0\)</span>。</li>
+<li><strong>片上 SIMD 树状归约（Reduction Tree）</strong>： 调用 <code>tl.sum(values, axis=0)</code> 时，Triton 编译器将一维向量寄存器自动映射为 Warp 内 Shuffle 折半加法网络（如 <span class="math inline">\(\text{lane}[i] += \text{lane}[i+16]\)</span>、<span class="math inline">\(\text{lane}[i+8] \dots\)</span>）。因为 Padding 处的数值恒为加法零元： <span class="math display">\[ X_{i,j} + 0.0 = X_{i,j} \]</span> 因此这部分虚构的 lane 参与任何层级的两两加法，都不会污染真实的数值总和。</li>
+<li><strong>标量结果写回</strong>： 归约完成后产生一个标量寄存器值，通过 <code>tl.store(out + row, ...)</code> 单播写回全局内存目标向量。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>BLOCK 可能受硬件最大 block size 限制；N=0 无 next_power_of_2 的普通定义，应由 wrapper 拒绝或约定。</p>
+<ul>
+<li><strong>单位元与代数算子的严格对齐（Identity Mismatch）</strong>： 单位元的选择必须严格满足代数群论中该算子的零元性质：
+<ul>
+<li>求和规约（Sum）：单位元为加法零元 <span class="math inline">\(0.0\)</span>；</li>
+<li>乘积规约（Prod）：单位元为乘法单位元 <span class="math inline">\(1.0\)</span>；</li>
+<li>最大值规约（Max）：单位元为负无穷大 <span class="math inline">\(-\infty\)</span>（<code>float('-inf')</code>）；</li>
+<li>最小值规约（Min）：单位元为正无穷大 <span class="math inline">\(+\infty\)</span>（<code>float('inf')</code>）。 若在求和时误设 <code>other=1.0</code>，最终结果将必然产生偏移误差 <span class="math inline">\(+ (\text{BLOCK} - N)\)</span>；若在求 Max 时误设 <code>other=0.0</code>，如果该行数据全为负数（如 <span class="math inline">\([-5, -10, -3]\)</span>），Padding 的 0 将反客为主被错误判定为最大值。</li>
+</ul></li>
+<li><strong>Hardware Block 尺寸上限</strong>： Triton 单个 Program 块的 <code>BLOCK</code> 大小受 GPU 寄存器文件和编译约束限制（通常最大支持 4096 或 8192）。若列数 <span class="math inline">\(N = 65536\)</span>，单 Program 强行开辟 <code>BLOCK = 65536</code> 会引发编译器内部崩溃或极端溢出，必须采用两阶段多 Block 分块规约（Two-pass Reduction）。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>一 program 一行简单；超宽行需分块两阶段归约。</p>
+<ul>
+<li><strong>一 Program 一行 vs 循环分块规约</strong>： 当 <span class="math inline">\(N \le 4096\)</span> 时，“一行一 Program”模型能够将整行数据全部装入片上寄存器，完全消除共享内存与全局内存中继开销，具有极致的延迟优势。</li>
+<li><strong>Padding 算力浪费与对齐开销</strong>： 若 <span class="math inline">\(N = 1025\)</span>，其下一 2 的幂为 <span class="math inline">\(2048\)</span>。此时有 <span class="math inline">\(2048 - 1025 = 1023\)</span> 个无效 lane（近 50% 的算力与寄存器被单位元填充）。虽然这看似浪费了寄存器空间，但由于保持了规约树的完全平衡（Balanced Binary Tree），其硬件执行效率（无 Warp 分化、全流水线发射）反而远高于处理任意奇数步长的复杂动态循环。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>N=100 时 BLOCK=128，128 lanes 中 100 个有效、28 个以 0 参与归约。</p>
+<p>以 <span class="math inline">\(N = 100\)</span> 为例： - 计算 <code>BLOCK = triton.next_power_of_2(100) = 128</code>。 - 构建 <code>cols = [0, 1, ..., 99, 100, ..., 127]</code>。 - <code>mask = [True x 100, False x 28]</code>。 - 执行 <code>tl.load(..., mask=mask, other=0.0)</code> 后，寄存器向量前 100 个 lane 为矩阵真实值，后 28 个 lane 严格置为 0.0。 - 执行 7 级折半相加网络（<span class="math inline">\(128 \to 64 \to 32 \to 16 \to 8 \to 4 \to 2 \to 1\)</span>），第 0 lane 最终汇聚出位级精准的 <span class="math inline">\(\sum_{j=0}^{99} X_{i,j}\)</span>，无条件抑制了多余 28 个虚拟维度的干扰。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 masked load 的 other。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="9e68581f" class="cell" data-course_role="exercise">
+<div id="959ee707" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -696,7 +743,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="1cef6071" class="cell" data-course_role="solution">
+<div id="26d37463" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -726,15 +773,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>mask 外 load 使用加法单位元 0，使 padding lanes 不改变 sum。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（网格绑定与幂次对齐生成）</strong>：Python 包装层为每个矩阵行发射一个独立的 Program，核函数内部利用 <code>cols = tl.arange(0, BLOCK)</code> 生成向上对齐到 2 的幂次的列索引向量。在 <code>mask = cols &lt; N</code> 保护下，通过 <code>tl.load</code> 结合 <code>other=0.0</code> 加载数据，有效索引从显存读入真实数据，越界索引在寄存器中初始化为加法单位元 0.0。 2. <strong>状态变化阶段（寄存器折半树状归约）</strong>：调用 <code>tl.sum</code> 时，底层硬件调度执行 Warp 内 Shuffle 指令，按严格平衡的二叉树网络展开折半累加（例如 128 维经过 7 轮步长递减累加折叠为 1 个标量）。由于后 28 个 lane 携带的是加法单位元 0.0，代数上满足 <span class="math inline">\(x + 0 = x\)</span>，折半树中任意节点与 0.0 相加均不改变真实数据累加和，以极高流水线吞吐在寄存器内完成归约。 3. <strong>输出阶段（标量定点写回）</strong>：折半树汇聚出的单精度标量值，通过 <code>tl.store(out + row, ...)</code> 直接写入目标一维张量的第 <code>row</code> 个位置。整个过程各行之间完全数据隔离，零线程间争用。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：BLOCK 可能受硬件最大 block size 限制；N=0 无 next_power_of_2 的普通定义，应由 wrapper 拒绝或约定。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在 GPU 的 SIMD/SIMT 硬件体系结构中： 1. <strong>硬件折半树与 Warp 对齐要求</strong>：并行规约的核心是利用 Shuffle 向量指令（如 <code>__shfl_down_sync</code>）构建平衡二叉树网络。这种折半网络算法要求参与元素必须是 2 的整数幂（128, 64, 32…），以保证每一轮折半跨步（Stride = 64, 32, 16, 8, 4, 2, 1）所有活动线程均处于结构对称状态。 2. <strong>消灭分化与分支开销</strong>：如果试图在硬件层面“只处理 100 个 lane”，不仅无法直接复用硬件原生对数复杂度 <span class="math inline">\(O(\log_2 \text{BLOCK})\)</span> 的树状规约指令网络，而且会引入复杂的条件分支与非对齐循环控制，导致严重的 Warp 分化（Warp Divergence）与流水线停顿。 因此，通过填充 28 个不影响加法数学结果的“加法单位元 0.0”，用极其微小的寄存器代价换取硬件完全对齐的无分支极速规约，是现代 GPU 编译器的标准核心范式。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：一 program 一行简单；超宽行需分块两阶段归约。</p>
+<p>若归约算子从求和（Sum）改为最大值（Max），<code>other</code> 必须从加法单位元 <span class="math inline">\(0.0\)</span> 修改为<strong>最大值代数单位元：负无穷大 <span class="math inline">\(-\infty\)</span></strong>（在 Triton/Python 中写作 <code>float('-inf')</code>）。 - <strong>数学因果链</strong>：最大值代数运算 <span class="math inline">\((\mathbb{R} \cup \{-\infty\}, \max)\)</span> 的单位元是 <span class="math inline">\(-\infty\)</span>，对于任意实数 <span class="math inline">\(x\)</span>，恒有 <span class="math inline">\(\max(x, -\infty) = x\)</span>。 - <strong>错误后果</strong>：若错误保留 <code>other=0.0</code>，一旦输入行中的所有有效元素全部为负数（例如一组对数概率值 <span class="math inline">\([-3.5, -7.2, -1.8]\)</span>），无效的 Padding lanes 携带的 0.0 会在折半比较中强行胜出（<span class="math inline">\(\max(-1.8, 0.0) = 0.0\)</span>），导致整个内核输出完全荒谬的错误最大值 0.0。</p>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1271,143 +1318,184 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>Triton <span class="in">`tl.sum`</span> 在 program 内归约 tensor；常把 BLOCK 取为 N 的下一 2 次幂。</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>mask 外 load 使用加法单位元 0，使 padding lanes 不改变 sum。</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>在科学计算与深度学习中，跨维度规约（Reduction，如求和、均值、方差、Softmax 分母）是高频核心模式。对于矩阵 $X \in \mathbb{R}^{M \times N}$，行求和操作（Row Sum）输出一个 $M$ 维列向量：</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>$$ y_i = \sum_{j=0}^{N-1} X_{i, j} $$</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>传统 CUDA 实现中，行归约需要由一个 Thread Block 协作完成，开发者必须精细管理共享内存、多轮 <span class="in">`__syncthreads()`</span> 同步壁垒以及 Warp Shuffle 洗牌指令。</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>而在 Triton 中，规约通过内置原语 <span class="in">`tl.sum`</span> 在 Program 块内对张量直接完成。</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**当矩阵列数 $N$ 不是 2 的幂次时，如何通过填充“代数单位元（Algebraic Identity Element）”，让 SIMD 折半树状规约硬件与任意物理形状完美解耦，保证计算的绝对正确性**。</span>
 <span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>BLOCK 可能受硬件最大 block size 限制；N=0 无 next_power_of_2 的普通定义，应由 wrapper 拒绝或约定。</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>行归约的代数保护与片上树状折半数据通路如图 5-1 与图 5-2 所示：</span>
 <span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>一 program 一行简单；超宽行需分块两阶段归约。</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>N=100 时 BLOCK=128，128 lanes 中 100 个有效、28 个以 0 参与归约。</span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>补齐 masked load 的 other。</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span>______)  <span class="co"># </span><span class="al">TODO</span><span class="co">: 加法单位元</span></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row, tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>))</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum(x):</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty((M,), device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>    row_sum_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">1</span>, <span class="dv">1</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">7</span>, <span class="dv">257</span>)):</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(row_sum(x), x.<span class="bu">sum</span>(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**行绑定与 2 的幂次对齐**：</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>   网格以行维度划分 <span class="in">`grid = (M,)`</span>，Program $i$ 绑定矩阵第 $i$ 行。由于硬件 SIMD/Tensor 树状折半规约算法严格依赖 2 的幂次分治架构，Triton 要求张量块大小必须为 2 的幂：<span class="in">`BLOCK = triton.next_power_of_2(N)`</span>。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**带单位元的安全合并加载（Identity-padded Masked Load）**：</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>   构造谓词 <span class="in">`mask = cols &lt; N`</span>。在执行 <span class="in">`tl.load`</span> 时，必须显式指定 <span class="in">`other=0.0`</span>：</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>   <span class="in">`values = tl.load(x + row * stride_m + cols, mask=mask, other=0.0)`</span></span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>   对于有效索引 $j &lt; N$，加载真实的显存数值；对于超出 $N$ 的 Padding lanes（数量为 $\text{BLOCK} - N$），硬件直接将其在寄存器中初始化为加法单位元 $0.0$。</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**片上 SIMD 树状归约（Reduction Tree）**：</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>   调用 <span class="in">`tl.sum(values, axis=0)`</span> 时，Triton 编译器将一维向量寄存器自动映射为 Warp 内 Shuffle 折半加法网络（如 $\text{lane}<span class="co">[</span><span class="ot">i</span><span class="co">]</span> += \text{lane}<span class="co">[</span><span class="ot">i+16</span><span class="co">]</span>$、$\text{lane}<span class="co">[</span><span class="ot">i+8</span><span class="co">]</span> \dots$）。因为 Padding 处的数值恒为加法零元：</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>   $$ X_{i,j} + 0.0 = X_{i,j} $$</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>   因此这部分虚构的 lane 参与任何层级的两两加法，都不会污染真实的数值总和。</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>**标量结果写回**：</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>   归约完成后产生一个标量寄存器值，通过 <span class="in">`tl.store(out + row, ...)`</span> 单播写回全局内存目标向量。</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**单位元与代数算子的严格对齐（Identity Mismatch）**：</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>  单位元的选择必须严格满足代数群论中该算子的零元性质：</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>求和规约（Sum）：单位元为加法零元 $0.0$；</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>乘积规约（Prod）：单位元为乘法单位元 $1.0$；</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>最大值规约（Max）：单位元为负无穷大 $-\infty$（<span class="in">`float('-inf')`</span>）；</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>最小值规约（Min）：单位元为正无穷大 $+\infty$（<span class="in">`float('inf')`</span>）。</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>  若在求和时误设 <span class="in">`other=1.0`</span>，最终结果将必然产生偏移误差 $+ (\text{BLOCK} - N)$；若在求 Max 时误设 <span class="in">`other=0.0`</span>，如果该行数据全为负数（如 $<span class="co">[</span><span class="ot">-5, -10, -3</span><span class="co">]</span>$），Padding 的 0 将反客为主被错误判定为最大值。</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Hardware Block 尺寸上限**：</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>  Triton 单个 Program 块的 <span class="in">`BLOCK`</span> 大小受 GPU 寄存器文件和编译约束限制（通常最大支持 4096 或 8192）。若列数 $N = 65536$，单 Program 强行开辟 <span class="in">`BLOCK = 65536`</span> 会引发编译器内部崩溃或极端溢出，必须采用两阶段多 Block 分块规约（Two-pass Reduction）。</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**一 Program 一行 vs 循环分块规约**：</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  当 $N \le 4096$ 时，“一行一 Program”模型能够将整行数据全部装入片上寄存器，完全消除共享内存与全局内存中继开销，具有极致的延迟优势。</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Padding 算力浪费与对齐开销**：</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>  若 $N = 1025$，其下一 2 的幂为 $2048$。此时有 $2048 - 1025 = 1023$ 个无效 lane（近 50% 的算力与寄存器被单位元填充）。虽然这看似浪费了寄存器空间，但由于保持了规约树的完全平衡（Balanced Binary Tree），其硬件执行效率（无 Warp 分化、全流水线发射）反而远高于处理任意奇数步长的复杂动态循环。</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>以 $N = 100$ 为例：</span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>计算 <span class="in">`BLOCK = triton.next_power_of_2(100) = 128`</span>。</span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>构建 <span class="in">`cols = [0, 1, ..., 99, 100, ..., 127]`</span>。</span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="in">`mask = [True x 100, False x 28]`</span>。</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>执行 <span class="in">`tl.load(..., mask=mask, other=0.0)`</span> 后，寄存器向量前 100 个 lane 为矩阵真实值，后 28 个 lane 严格置为 0.0。</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>执行 7 级折半相加网络（$128 \to 64 \to 32 \to 16 \to 8 \to 4 \to 2 \to 1$），第 0 lane 最终汇聚出位级精准的 $\sum_{j=0}^{99} X_{i,j}$，无条件抑制了多余 28 个虚拟维度的干扰。</span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
 <span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a>补齐 masked load 的 other。</span>
 <span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
 <span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“行归约与 Padding 单位元”的工作机制。</span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
 <span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>为什么 padding 有 28 lanes 而不是“只处理 100 lanes”？</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>若归约是 max，other 应改成什么？</span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span>______)  <span class="co"># </span><span class="al">TODO</span><span class="co">: 加法单位元</span></span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row, tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>))</span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum(x):</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty((M,), device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>    row_sum_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">1</span>, <span class="dv">1</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">7</span>, <span class="dv">257</span>)):</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(row_sum(x), x.<span class="bu">sum</span>(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span><span class="fl">0.0</span>)</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row, tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>))</span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“行归约与 Padding 单位元”的工作机制。</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>为什么 padding 有 28 lanes 而不是“只处理 100 lanes”？</span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>若归约是 max，other 应改成什么？</span>
 <span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum(x):</span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty((M,), device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>    row_sum_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">1</span>, <span class="dv">1</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">7</span>, <span class="dv">257</span>)):</span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(row_sum(x), x.<span class="bu">sum</span>(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
 <span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>mask 外 load 使用加法单位元 0，使 padding lanes 不改变 sum。</span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
 <span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：BLOCK 可能受硬件最大 block size 限制；N=0 无 next_power_of_2 的普通定义，应由 wrapper 拒绝或约定。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：一 program 一行简单；超宽行需分块两阶段归约。</span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
 <span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
-<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum_kernel(x, out, N: tl.constexpr, stride_m: tl.constexpr,</span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>                   BLOCK: tl.constexpr):</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a>    cols <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> cols <span class="op">&lt;</span> N</span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>    values <span class="op">=</span> tl.load(x <span class="op">+</span> row <span class="op">*</span> stride_m <span class="op">+</span> cols, mask<span class="op">=</span>mask, other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> row, tl.<span class="bu">sum</span>(values, axis<span class="op">=</span><span class="dv">0</span>))</span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> row_sum(x):</span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.ndim <span class="op">==</span> <span class="dv">2</span> <span class="kw">and</span> x.stride(<span class="dv">1</span>) <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a>    M, N <span class="op">=</span> x.shape</span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty((M,), device<span class="op">=</span>x.device, dtype<span class="op">=</span>x.dtype)</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a>    row_sum_kernel[(M,)](x, out, N, x.stride(<span class="dv">0</span>), BLOCK<span class="op">=</span>triton.next_power_of_2(N))</span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> shape <span class="kw">in</span> ((<span class="dv">1</span>, <span class="dv">1</span>), (<span class="dv">4</span>, <span class="dv">100</span>), (<span class="dv">7</span>, <span class="dv">257</span>)):</span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> torch.randn(shape, device<span class="op">=</span><span class="st">"cuda"</span>)</span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a>    torch.testing.assert_close(row_sum(x), x.<span class="bu">sum</span>(<span class="dv">1</span>), atol<span class="op">=</span><span class="fl">1e-4</span>, rtol<span class="op">=</span><span class="fl">1e-4</span>)</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（网格绑定与幂次对齐生成）**：Python 包装层为每个矩阵行发射一个独立的 Program，核函数内部利用 <span class="in">`cols = tl.arange(0, BLOCK)`</span> 生成向上对齐到 2 的幂次的列索引向量。在 <span class="in">`mask = cols &lt; N`</span> 保护下，通过 <span class="in">`tl.load`</span> 结合 <span class="in">`other=0.0`</span> 加载数据，有效索引从显存读入真实数据，越界索引在寄存器中初始化为加法单位元 0.0。</span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（寄存器折半树状归约）**：调用 <span class="in">`tl.sum`</span> 时，底层硬件调度执行 Warp 内 Shuffle 指令，按严格平衡的二叉树网络展开折半累加（例如 128 维经过 7 轮步长递减累加折叠为 1 个标量）。由于后 28 个 lane 携带的是加法单位元 0.0，代数上满足 $x + 0 = x$，折半树中任意节点与 0.0 相加均不改变真实数据累加和，以极高流水线吞吐在寄存器内完成归约。</span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（标量定点写回）**：折半树汇聚出的单精度标量值，通过 <span class="in">`tl.store(out + row, ...)`</span> 直接写入目标一维张量的第 <span class="in">`row`</span> 个位置。整个过程各行之间完全数据隔离，零线程间争用。</span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a>在 GPU 的 SIMD/SIMT 硬件体系结构中：</span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**硬件折半树与 Warp 对齐要求**：并行规约的核心是利用 Shuffle 向量指令（如 <span class="in">`__shfl_down_sync`</span>）构建平衡二叉树网络。这种折半网络算法要求参与元素必须是 2 的整数幂（128, 64, 32...），以保证每一轮折半跨步（Stride = 64, 32, 16, 8, 4, 2, 1）所有活动线程均处于结构对称状态。</span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**消灭分化与分支开销**：如果试图在硬件层面“只处理 100 个 lane”，不仅无法直接复用硬件原生对数复杂度 $O(\log_2 \text{BLOCK})$ 的树状规约指令网络，而且会引入复杂的条件分支与非对齐循环控制，导致严重的 Warp 分化（Warp Divergence）与流水线停顿。</span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a>因此，通过填充 28 个不影响加法数学结果的“加法单位元 0.0”，用极其微小的寄存器代价换取硬件完全对齐的无分支极速规约，是现代 GPU 编译器的标准核心范式。</span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>若归约算子从求和（Sum）改为最大值（Max），<span class="in">`other`</span> 必须从加法单位元 $0.0$ 修改为**最大值代数单位元：负无穷大 $-\infty$**（在 Triton/Python 中写作 <span class="in">`float('-inf')`</span>）。</span>
+<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**数学因果链**：最大值代数运算 $(\mathbb{R} \cup <span class="sc">\{</span>-\infty<span class="sc">\}</span>, \max)$ 的单位元是 $-\infty$，对于任意实数 $x$，恒有 $\max(x, -\infty) = x$。</span>
+<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**错误后果**：若错误保留 <span class="in">`other=0.0`</span>，一旦输入行中的所有有效元素全部为负数（例如一组对数概率值 $<span class="co">[</span><span class="ot">-3.5, -7.2, -1.8</span><span class="co">]</span>$），无效的 Padding lanes 携带的 0.0 会在折半比较中强行胜出（$\max(-1.8, 0.0) = 0.0$），导致整个内核输出完全荒谬的错误最大值 0.0。</span>
+<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
+<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
+<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

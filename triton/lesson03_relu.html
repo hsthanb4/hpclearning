@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -117,6 +117,35 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
 <link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 <link rel="stylesheet" href="../styles.css">
 </head>
@@ -602,31 +631,43 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>ReLU 是逐元素 max(x,0)，没有跨 lane 通信，是 Triton 最适合的入门融合单元。</p>
+<p>在深度神经网络中，非线性激活函数（如 ReLU、SiLU、GELU）是计算拓扑中的基石组件。ReLU 的数学定义极其简明： <span class="math display">\[ \text{ReLU}(x) = \max(x, 0) \]</span> 从并行体系结构视角看，ReLU 属于纯粹的<strong>独立逐元素算子（Embarrassingly Elementwise Operation）</strong>，其每一个数据分量的计算完全独立，不存在跨线程、跨 Warp 或跨 Block 的数据依赖或归约通信（Communication-free）。 本课解决的核心工程问题是：在 Triton 的 SIMD 向量化张量抽象下，如何以硬件原生的无分支（Branchless）方式高效执行截断，以及如何识别算子融合边界，消除无谓的高带宽内存（HBM）乒乓搬运。</p>
 </section>
 <section id="它如何工作" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>load 后用 <code>tl.maximum</code> 生成 lane-wise 结果；编译器生成 predicated/select 风格代码而非 Python 分支。</p>
+<p>逐元素激活计算与算子融合的数据通路如图 3-1 与图 3-2 所示：</p>
+<ol type="1">
+<li><strong>向量化加载与掩码隔离</strong>：Program 依据 <code>offsets</code> 和尾块 <code>mask</code>，自全局显存加载一个向量块 <code>xv</code> 到向量寄存器组。对于越界元素，<code>tl.load</code> 自动隔离或赋予安全值。</li>
+<li><strong>硬件原生无分支指令（Branchless Vectorized Selection）</strong>： 在 Triton 中，<code>tl.maximum(xv, 0.0)</code> 绝不会被编译为条件跳转指令（<code>BRA</code>），而是被 LLVM 后端直接映射为底层 GPU 的原生硬件无分支指令（如 PTX 中的 <code>max.f32</code> 或 <code>setp + selp</code> 条件选择指令）。 每一个 SIMD Lane 独立并发执行最大值裁决，不存在传统 CPU 上的分支预测失误开销，也不存在传统 CUDA 中因线程执行不同分支路径而产生的 Warp 分化（Warp Divergence）。</li>
+<li><strong>融合流水线（Fusion Pipeline）</strong>： 当 ReLU 紧随 GEMM 或 Bias 之后时（如 <a href="file:///Users/wujie/hpclearning/triton/lesson03_relu.qmd">图 3-2</a> 所示），ReLU 计算直接在寄存器累加器（Accumulator）中原地完成，随后立即送入下一阶段（如 Dropout 或直接写回），彻底免去将中间特征图写入显存再重新读入的完整往返。</li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
-<p>NaN 的 maximum 语义应与参考框架核对；原地写需要确认没有后续读旧值。</p>
+<ul>
+<li><strong>NaN 传播语义（IEEE 754 契约）</strong>： 在 IEEE 754 浮点规范中，<span class="math inline">\(\max(\text{NaN}, 0.0)\)</span> 与 <span class="math inline">\(\max(0.0, \text{NaN})\)</span> 的行为在不同硬件架构和指令集上可能存在差异。在 PyTorch 中，<span class="math inline">\(\text{ReLU}(\text{NaN}) = \text{NaN}\)</span>。使用 <code>tl.maximum(xv, 0.0)</code> 时，需保证底层指令遵循传播 NaN 的契约；若使用 <code>tl.where(xv &gt; 0.0, xv, 0.0)</code>，由于 <code>NaN &gt; 0.0</code> 判定为 False，NaN 将被错误地清洗为 0.0，造成梯度掩盖与静默数值错误。</li>
+<li><strong>动态控制流误用（Python if 陷阱）</strong>： Triton 内核中操作的 <code>xv</code> 是一个 <code>tl.tensor</code>（形状为 <code>(BLOCK,)</code> 的向量寄存器块）。在 Python 层面直接书写 <code>if xv &gt; 0:</code> 是非法语法，因为向量张量的布尔值为歧义数组。必须使用向量级原语 <code>tl.maximum</code> 或 <code>tl.where</code>。</li>
+<li><strong>原位覆盖写（In-Place Modification）边界</strong>： 若将输入与输出指针指向同一内存地址进行 In-Place 写回，必须确认该输入张量在反向传播计算图中不需要被保留作为反向激活（Saved Tensor），否则会导致反向传播梯度计算崩溃。</li>
+</ul>
 </section>
 <section id="性能与工程取舍" class="level3">
 <h3 class="anchored" data-anchor-id="性能与工程取舍">4. 性能与工程取舍</h3>
-<p>单独 kernel 算术强度极低；融合减少 HBM 流量和 launch，但会耦合上游 shape。</p>
+<ul>
+<li><strong>极低的算术强度与内存墙阻断</strong>： 独立运行的 FP32 ReLU 算子算术强度为： <span class="math display">\[ \text{Arithmetic Intensity} = \frac{1 \text{ FLOP}}{2 \times 4 \text{ Bytes}} = 0.125 \text{ FLOP/Byte} \]</span> 在 H100（内存带宽约 3.35 TB/s，FP32 算力约 67 TFLOPs）上，GPU 计算单元利用率不足 1%，超过 99% 的硬件执行时间被浪费在等待 HBM 访存指令上。</li>
+<li><strong>融合（Fusion）的绝对主导地位</strong>： 将 ReLU 融合进上游算子（如 Linear/Conv 的 Epilogue 阶段）或者下游算子（如 Dropout），可彻底抹平整个算子的访存延迟。工程取舍在于：高度融合的定制 Kernel 会牺牲算子的通用性与模块解耦度，增加 JIT 编译组合爆炸的风险；而保持算子独立则具有最高的模块复用性，但代价是极高的显存带宽浪费。</li>
+</ul>
 </section>
 </section>
 <section id="具体演示" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>[-2,0,3] 映射为 [0,0,3]；尾块 mask 不影响有效 lane。</p>
+<p>以输入向量 <span class="math inline">\(x = [-2.0, 0.0, 3.0, -4.0, 5.0]\)</span>、<span class="math inline">\(\text{BLOCK} = 256\)</span> 为例： 1. <strong>加载与谓词控制</strong>：首个 Program 处理索引 <span class="math inline">\(0 \sim 4\)</span>（<span class="math inline">\(\text{mask} = \text{True}\)</span>），其余 <span class="math inline">\(5 \sim 255\)</span> 位的 <span class="math inline">\(\text{mask} = \text{False}\)</span>。 2. <strong>寄存器变换</strong>： <span class="math display">\[ \text{xv}[0:5] = [-2.0, 0.0, 3.0, -4.0, 5.0] \]</span> <span class="math display">\[ \text{tl.maximum}(\text{xv}, 0.0)[0:5] = [\max(-2,0), \max(0,0), \max(3,0), \max(-4,0), \max(5,0)] = [0.0, 0.0, 3.0, 0.0, 5.0] \]</span> 3. <strong>安全写回</strong>：硬件写屏蔽精准拦截索引 <span class="math inline">\(5 \sim 255\)</span>，仅前 5 个有效元素被写回全局显存，输出与 <code>torch.relu(x)</code> 产生位级一致的确定性结果。</p>
 <p>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</p>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 lane-wise ReLU。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="abc41acc" class="cell" data-course_role="exercise">
+<div id="7b88102f" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -695,7 +736,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="d602396b" class="cell" data-course_role="solution">
+<div id="7d3744ea" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -722,15 +763,26 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 <section id="q1-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q1-参考答案">Q1 参考答案</h3>
-<p>load 后用 <code>tl.maximum</code> 生成 lane-wise 结果；编译器生成 predicated/select 风格代码而非 Python 分支。</p>
+<p>从三个阶段拆解其运行机制： 1. <strong>输入阶段（指针寻址与带掩码载入）</strong>：调度层分配一维线性网格，Program 依据 <code>program_id</code> 配合 <code>BLOCK</code> 步长计算出连续的全局显存地址向量 <code>x + offsets</code>。在 <code>mask = offsets &lt; n</code> 的保护下，内存控制器执行宽位宽合并读取，将输入张量载入片上向量寄存器 <code>xv</code>，未击中掩码的无效 lane 在寄存器中填充为安全默认值。 2. <strong>状态变化阶段（无分支向量化截断）</strong>：SM 调度执行单元调用硬件底层单周期原生最大值指令（如 <code>max.f32</code>），并发对 <code>xv</code> 中的所有 lane 执行与标量 0.0 的数值裁决。该过程完全在硬件 SIMD/SIMT 寄存器层就地完成，没有任何分支跳转或条件分化，直接输出激活后的寄存器张量。 3. <strong>输出阶段（带掩码原子写回）</strong>：将寄存器内的计算结果通过 <code>tl.store</code> 配合相同的 <code>mask</code> 写回全局显存 <code>out + offsets</code>。越界 lane 的写事务被硬件写掩码屏蔽，整个 Program 块完成任务后即刻退役释放硬件上下文。</p>
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>判断时先检查本课不变量：NaN 的 maximum 语义应与参考框架核对；原地写需要确认没有后续读旧值。 若不成立，最终数值或系统状态即使暂时正常也不可信。</p>
+<p>在 Triton JIT 编译器中，<code>xv</code> 不是一个标量数值，而是一个保存在片上寄存器文件中的向量张量对象（形状为 <code>(BLOCK,)</code> 的一维数组）。 在 Python 语言中，<code>if cond:</code> 语句要求条件表达式 <code>cond</code> 必须能够被求值为一个明确的全局单一布尔标量（<code>True</code> 或 <code>False</code>），从而决定程序计数器（PC）跳转到哪个控制流分支。 而表达式 <code>xv &gt; 0</code> 产生的是一个长度为 <code>BLOCK</code> 的布尔向量（每个 lane 各有独立的 True/False 状态）。如果直接写 <code>if xv &gt; 0:</code>，Python 解释器在语法解析期即会抛出歧义异常（类似 NumPy 的 <code>ValueError: The truth value of an array with more than one element is ambiguous</code>）。在硬件并行语义上，GPU 不可能让同一组 SIMD 线程在同一个线程块内同时既走 if 分支又走 else 分支；必须使用 <code>tl.maximum</code> 或基于 Predicate 的 <code>tl.where</code> 原语，由硬件条件选择指令逐 lane 独立评估。</p>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>迁移时先保证正确性，再比较代价。这里的核心取舍是：单独 kernel 算术强度极低；融合减少 HBM 流量和 launch，但会耦合上游 shape。</p>
+<ol type="1">
+<li><strong>融进 GEMM Epilogue 的优缺点</strong>：
+<ul>
+<li><strong>优势（吞吐与显存极致优化）</strong>：GEMM 的矩阵乘累加结果直接驻留在片上 FP32 累加寄存器中。在将累加结果写回显存的尾声阶段（Epilogue），顺带执行一条 <code>tl.maximum</code> 指令，耗时几乎为 0。完全消除了 ReLU 算子对输入矩阵的二次全局显存读取与临时张量写回，节省了整整 1 次读和 1 次写的 HBM 带宽流量，并减少了一次独立的 Kernel Launch 开销。</li>
+<li><strong>劣势（显存占用与训练反向解耦）</strong>：在前向训练过程中，反向传播计算梯度时需要知道 ReLU 输入的正负掩码（或输出值）。如果直接在 GEMM 内覆盖写回激活值，必须额外将激活前的线性值保存下来，或者依赖激活后的输出判断；同时，Epilogue 融合导致 GEMM 内核代码复杂度剧增，模板实例化膨胀。</li>
+</ul></li>
+<li><strong>保持独立 Kernel 的优缺点</strong>：
+<ul>
+<li><strong>优势（模块正交解耦与通用性）</strong>：GEMM 内核与激活内核完全解耦，计算图调度器可以自由替换任意复杂的激活函数，支持任意张量形状与内存布局，便于调试与框架抽象。</li>
+<li><strong>劣势（严重的访存瓶颈）</strong>：激活算子沦为典型的内存带宽受限（Memory-bound）算子，算术强度极低，造成昂贵的显存读写往返延迟和显存带宽浪费。</li>
+</ul></li>
+</ol>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1269,137 +1321,172 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>ReLU 是逐元素 max(x,0)，没有跨 lane 通信，是 Triton 最适合的入门融合单元。</span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>load 后用 <span class="in">`tl.maximum`</span> 生成 lane-wise 结果；编译器生成 predicated/select 风格代码而非 Python 分支。</span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>NaN 的 maximum 语义应与参考框架核对；原地写需要确认没有后续读旧值。</span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>单独 kernel 算术强度极低；融合减少 HBM 流量和 launch，但会耦合上游 shape。</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>在深度神经网络中，非线性激活函数（如 ReLU、SiLU、GELU）是计算拓扑中的基石组件。ReLU 的数学定义极其简明：</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>$$ \text{ReLU}(x) = \max(x, 0) $$</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>从并行体系结构视角看，ReLU 属于纯粹的**独立逐元素算子（Embarrassingly Elementwise Operation）**，其每一个数据分量的计算完全独立，不存在跨线程、跨 Warp 或跨 Block 的数据依赖或归约通信（Communication-free）。</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：在 Triton 的 SIMD 向量化张量抽象下，如何以硬件原生的无分支（Branchless）方式高效执行截断，以及如何识别算子融合边界，消除无谓的高带宽内存（HBM）乒乓搬运。</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>逐元素激活计算与算子融合的数据通路如图 3-1 与图 3-2 所示：</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**向量化加载与掩码隔离**：Program 依据 <span class="in">`offsets`</span> 和尾块 <span class="in">`mask`</span>，自全局显存加载一个向量块 <span class="in">`xv`</span> 到向量寄存器组。对于越界元素，<span class="in">`tl.load`</span> 自动隔离或赋予安全值。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**硬件原生无分支指令（Branchless Vectorized Selection）**：</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>   在 Triton 中，<span class="in">`tl.maximum(xv, 0.0)`</span> 绝不会被编译为条件跳转指令（<span class="in">`BRA`</span>），而是被 LLVM 后端直接映射为底层 GPU 的原生硬件无分支指令（如 PTX 中的 <span class="in">`max.f32`</span> 或 <span class="in">`setp + selp`</span> 条件选择指令）。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>   每一个 SIMD Lane 独立并发执行最大值裁决，不存在传统 CPU 上的分支预测失误开销，也不存在传统 CUDA 中因线程执行不同分支路径而产生的 Warp 分化（Warp Divergence）。</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**融合流水线（Fusion Pipeline）**：</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>   当 ReLU 紧随 GEMM 或 Bias 之后时（如 <span class="co">[</span><span class="ot">图 3-2</span><span class="co">](file:///Users/wujie/hpclearning/triton/lesson03_relu.qmd)</span> 所示），ReLU 计算直接在寄存器累加器（Accumulator）中原地完成，随后立即送入下一阶段（如 Dropout 或直接写回），彻底免去将中间特征图写入显存再重新读入的完整往返。</span>
 <span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="co">[</span><span class="ot">-2,0,3</span><span class="co">]</span> 映射为 <span class="co">[</span><span class="ot">0,0,3</span><span class="co">]</span>；尾块 mask 不影响有效 lane。</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
 <span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>补齐 lane-wise ReLU。</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**NaN 传播语义（IEEE 754 契约）**：</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>  在 IEEE 754 浮点规范中，$\max(\text{NaN}, 0.0)$ 与 $\max(0.0, \text{NaN})$ 的行为在不同硬件架构和指令集上可能存在差异。在 PyTorch 中，$\text{ReLU}(\text{NaN}) = \text{NaN}$。使用 <span class="in">`tl.maximum(xv, 0.0)`</span> 时，需保证底层指令遵循传播 NaN 的契约；若使用 <span class="in">`tl.where(xv &gt; 0.0, xv, 0.0)`</span>，由于 <span class="in">`NaN &gt; 0.0`</span> 判定为 False，NaN 将被错误地清洗为 0.0，造成梯度掩盖与静默数值错误。</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**动态控制流误用（Python if 陷阱）**：</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>  Triton 内核中操作的 <span class="in">`xv`</span> 是一个 <span class="in">`tl.tensor`</span>（形状为 <span class="in">`(BLOCK,)`</span> 的向量寄存器块）。在 Python 层面直接书写 <span class="in">`if xv &gt; 0:`</span> 是非法语法，因为向量张量的布尔值为歧义数组。必须使用向量级原语 <span class="in">`tl.maximum`</span> 或 <span class="in">`tl.where`</span>。</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**原位覆盖写（In-Place Modification）边界**：</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>  若将输入与输出指针指向同一内存地址进行 In-Place 写回，必须确认该输入张量在反向传播计算图中不需要被保留作为反向激活（Saved Tensor），否则会导致反向传播梯度计算崩溃。</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**极低的算术强度与内存墙阻断**：</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>  独立运行的 FP32 ReLU 算子算术强度为：</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>  $$ \text{Arithmetic Intensity} = \frac{1 \text{ FLOP}}{2 \times 4 \text{ Bytes}} = 0.125 \text{ FLOP/Byte} $$</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>  在 H100（内存带宽约 3.35 TB/s，FP32 算力约 67 TFLOPs）上，GPU 计算单元利用率不足 1%，超过 99% 的硬件执行时间被浪费在等待 HBM 访存指令上。</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**融合（Fusion）的绝对主导地位**：</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>  将 ReLU 融合进上游算子（如 Linear/Conv 的 Epilogue 阶段）或者下游算子（如 Dropout），可彻底抹平整个算子的访存延迟。工程取舍在于：高度融合的定制 Kernel 会牺牲算子的通用性与模块解耦度，增加 JIT 编译组合爆炸的风险；而保持算子独立则具有最高的模块复用性，但代价是极高的显存带宽浪费。</span>
 <span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu_kernel(x, out, n: tl.constexpr, BLOCK: tl.constexpr):</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    offsets <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BLOCK <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>    xv <span class="op">=</span> tl.load(x <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> offsets, ______, mask<span class="op">=</span>mask)  <span class="co"># </span><span class="al">TODO</span><span class="co">: ReLU</span></span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu(x):</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.is_contiguous()</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> x.numel()</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>    relu_kernel[(triton.cdiv(n, <span class="dv">256</span>),)](x, out, n, BLOCK<span class="op">=</span><span class="dv">256</span>)</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a>x <span class="op">=</span> torch.tensor([<span class="op">-</span><span class="fl">2.</span>, <span class="fl">0.</span>, <span class="fl">3.</span>, <span class="op">-</span><span class="fl">4.</span>, <span class="fl">5.</span>], device<span class="op">=</span><span class="st">"cuda"</span>)</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>torch.testing.assert_close(relu(x), torch.relu(x))</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“逐元素激活与融合边界”的工作机制。</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>以输入向量 $x = <span class="co">[</span><span class="ot">-2.0, 0.0, 3.0, -4.0, 5.0</span><span class="co">]</span>$、$\text{BLOCK} = 256$ 为例：</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**加载与谓词控制**：首个 Program 处理索引 $0 \sim 4$（$\text{mask} = \text{True}$），其余 $5 \sim 255$ 位的 $\text{mask} = \text{False}$。</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**寄存器变换**：</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>   $$ \text{xv}<span class="co">[</span><span class="ot">0:5</span><span class="co">]</span> = <span class="co">[</span><span class="ot">-2.0, 0.0, 3.0, -4.0, 5.0</span><span class="co">]</span> $$</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>   $$ \text{tl.maximum}(\text{xv}, 0.0)<span class="co">[</span><span class="ot">0:5</span><span class="co">]</span> = <span class="co">[</span><span class="ot">\max(-2,0), \max(0,0), \max(3,0), \max(-4,0), \max(5,0)</span><span class="co">]</span> = <span class="co">[</span><span class="ot">0.0, 0.0, 3.0, 0.0, 5.0</span><span class="co">]</span> $$</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**安全写回**：硬件写屏蔽精准拦截索引 $5 \sim 255$，仅前 5 个有效元素被写回全局显存，输出与 <span class="in">`torch.relu(x)`</span> 产生位级一致的确定性结果。</span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>请在阅读后先合上这一节，用自己的语言复述“输入状态 → 中间状态 → 输出状态”，再做练习。</span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>补齐 lane-wise ReLU。</span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu_kernel(x, out, n: tl.constexpr, BLOCK: tl.constexpr):</span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a>    offsets <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BLOCK <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n</span>
+<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a>    xv <span class="op">=</span> tl.load(x <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> offsets, ______, mask<span class="op">=</span>mask)  <span class="co"># </span><span class="al">TODO</span><span class="co">: ReLU</span></span>
 <span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>用 Python <span class="in">`if xv &gt; 0`</span> 为什么不符合 tensor lane 语义？</span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a>ReLU 融进 GEMM epilogue 与保持独立各有什么取舍？</span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu(x):</span>
+<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.is_contiguous()</span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
+<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> x.numel()</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a>    relu_kernel[(triton.cdiv(n, <span class="dv">256</span>),)](x, out, n, BLOCK<span class="op">=</span><span class="dv">256</span>)</span>
+<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>x <span class="op">=</span> torch.tensor([<span class="op">-</span><span class="fl">2.</span>, <span class="fl">0.</span>, <span class="fl">3.</span>, <span class="op">-</span><span class="fl">4.</span>, <span class="fl">5.</span>], device<span class="op">=</span><span class="st">"cuda"</span>)</span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>torch.testing.assert_close(relu(x), torch.relu(x))</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>在 CUDA/Triton 环境运行本单元格；断言覆盖规则尺寸和非规则尾块。首次 JIT 不计入性能。</span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu_kernel(x, out, n: tl.constexpr, BLOCK: tl.constexpr):</span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>    offsets <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BLOCK <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>    xv <span class="op">=</span> tl.load(x <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> offsets, tl.maximum(xv, <span class="fl">0.0</span>), mask<span class="op">=</span>mask)</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu(x):</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.is_contiguous()</span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> x.numel()</span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a>    relu_kernel[(triton.cdiv(n, <span class="dv">256</span>),)](x, out, n, BLOCK<span class="op">=</span><span class="dv">256</span>)</span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>x <span class="op">=</span> torch.tensor([<span class="op">-</span><span class="fl">2.</span>, <span class="fl">0.</span>, <span class="fl">3.</span>, <span class="op">-</span><span class="fl">4.</span>, <span class="fl">5.</span>], device<span class="op">=</span><span class="st">"cuda"</span>)</span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>torch.testing.assert_close(relu(x), torch.relu(x))</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>load 后用 <span class="in">`tl.maximum`</span> 生成 lane-wise 结果；编译器生成 predicated/select 风格代码而非 Python 分支。</span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>判断时先检查本课不变量：NaN 的 maximum 语义应与参考框架核对；原地写需要确认没有后续读旧值。  若不成立，最终数值或系统状态即使暂时正常也不可信。</span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>迁移时先保证正确性，再比较代价。这里的核心取舍是：单独 kernel 算术强度极低；融合减少 HBM 流量和 launch，但会耦合上游 shape。</span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“逐元素激活与融合边界”的工作机制。</span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>用 Python <span class="in">`if xv &gt; 0`</span> 为什么不符合 tensor lane 语义？</span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>ReLU 融进 GEMM epilogue 与保持独立各有什么取舍？</span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton</span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu_kernel(x, out, n: tl.constexpr, BLOCK: tl.constexpr):</span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a>    offsets <span class="op">=</span> tl.program_id(<span class="dv">0</span>) <span class="op">*</span> BLOCK <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK)</span>
+<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n</span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>    xv <span class="op">=</span> tl.load(x <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a>    tl.store(out <span class="op">+</span> offsets, tl.maximum(xv, <span class="fl">0.0</span>), mask<span class="op">=</span>mask)</span>
 <span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> relu(x):</span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> x.is_contiguous()</span>
+<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> torch.empty_like(x)</span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a>    n <span class="op">=</span> x.numel()</span>
+<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>    relu_kernel[(triton.cdiv(n, <span class="dv">256</span>),)](x, out, n, BLOCK<span class="op">=</span><span class="dv">256</span>)</span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> out</span>
+<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a>x <span class="op">=</span> torch.tensor([<span class="op">-</span><span class="fl">2.</span>, <span class="fl">0.</span>, <span class="fl">3.</span>, <span class="op">-</span><span class="fl">4.</span>, <span class="fl">5.</span>], device<span class="op">=</span><span class="st">"cuda"</span>)</span>
+<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>torch.testing.assert_close(relu(x), torch.relu(x))</span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a>从三个阶段拆解其运行机制：</span>
+<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（指针寻址与带掩码载入）**：调度层分配一维线性网格，Program 依据 <span class="in">`program_id`</span> 配合 <span class="in">`BLOCK`</span> 步长计算出连续的全局显存地址向量 <span class="in">`x + offsets`</span>。在 <span class="in">`mask = offsets &lt; n`</span> 的保护下，内存控制器执行宽位宽合并读取，将输入张量载入片上向量寄存器 <span class="in">`xv`</span>，未击中掩码的无效 lane 在寄存器中填充为安全默认值。</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（无分支向量化截断）**：SM 调度执行单元调用硬件底层单周期原生最大值指令（如 <span class="in">`max.f32`</span>），并发对 <span class="in">`xv`</span> 中的所有 lane 执行与标量 0.0 的数值裁决。该过程完全在硬件 SIMD/SIMT 寄存器层就地完成，没有任何分支跳转或条件分化，直接输出激活后的寄存器张量。</span>
+<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（带掩码原子写回）**：将寄存器内的计算结果通过 <span class="in">`tl.store`</span> 配合相同的 <span class="in">`mask`</span> 写回全局显存 <span class="in">`out + offsets`</span>。越界 lane 的写事务被硬件写掩码屏蔽，整个 Program 块完成任务后即刻退役释放硬件上下文。</span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a>在 Triton JIT 编译器中，<span class="in">`xv`</span> 不是一个标量数值，而是一个保存在片上寄存器文件中的向量张量对象（形状为 <span class="in">`(BLOCK,)`</span> 的一维数组）。</span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a>在 Python 语言中，<span class="in">`if cond:`</span> 语句要求条件表达式 <span class="in">`cond`</span> 必须能够被求值为一个明确的全局单一布尔标量（<span class="in">`True`</span> 或 <span class="in">`False`</span>），从而决定程序计数器（PC）跳转到哪个控制流分支。</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a>而表达式 <span class="in">`xv &gt; 0`</span> 产生的是一个长度为 <span class="in">`BLOCK`</span> 的布尔向量（每个 lane 各有独立的 True/False 状态）。如果直接写 <span class="in">`if xv &gt; 0:`</span>，Python 解释器在语法解析期即会抛出歧义异常（类似 NumPy 的 <span class="in">`ValueError: The truth value of an array with more than one element is ambiguous`</span>）。在硬件并行语义上，GPU 不可能让同一组 SIMD 线程在同一个线程块内同时既走 if 分支又走 else 分支；必须使用 <span class="in">`tl.maximum`</span> 或基于 Predicate 的 <span class="in">`tl.where`</span> 原语，由硬件条件选择指令逐 lane 独立评估。</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**融进 GEMM Epilogue 的优缺点**：</span>
+<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**优势（吞吐与显存极致优化）**：GEMM 的矩阵乘累加结果直接驻留在片上 FP32 累加寄存器中。在将累加结果写回显存的尾声阶段（Epilogue），顺带执行一条 <span class="in">`tl.maximum`</span> 指令，耗时几乎为 0。完全消除了 ReLU 算子对输入矩阵的二次全局显存读取与临时张量写回，节省了整整 1 次读和 1 次写的 HBM 带宽流量，并减少了一次独立的 Kernel Launch 开销。</span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**劣势（显存占用与训练反向解耦）**：在前向训练过程中，反向传播计算梯度时需要知道 ReLU 输入的正负掩码（或输出值）。如果直接在 GEMM 内覆盖写回激活值，必须额外将激活前的线性值保存下来，或者依赖激活后的输出判断；同时，Epilogue 融合导致 GEMM 内核代码复杂度剧增，模板实例化膨胀。</span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**保持独立 Kernel 的优缺点**：</span>
+<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**优势（模块正交解耦与通用性）**：GEMM 内核与激活内核完全解耦，计算图调度器可以自由替换任意复杂的激活函数，支持任意张量形状与内存布局，便于调试与框架抽象。</span>
+<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**劣势（严重的访存瓶颈）**：激活算子沦为典型的内存带宽受限（Memory-bound）算子，算术强度极低，造成昂贵的显存读写往返延迟和显存带宽浪费。</span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton Tutorials</span><span class="co">](https://triton-lang.org/main/getting-started/tutorials/)</span></span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Triton language API</span><span class="co">](https://triton-lang.org/main/python-api/triton.language.html)</span></span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

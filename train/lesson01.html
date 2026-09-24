@@ -82,9 +82,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
-<link href="../site_libs/bootstrap/bootstrap-dark-dab2b022128b8e04c62ccf3b27694845.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
-<link href="../site_libs/bootstrap/bootstrap-1f3c6f3c4d7ca130e34e3b48dcec8d53.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-5b009829487c04a585c16c763421d20a.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-05d83d85778f76a614ff8d9e9d4651e8.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -518,8 +518,11 @@ window.Quarto = {
   <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
   <ul class="collapse">
   <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
+  <li><a href="#训练迭代的三阶段与显存生命周期" id="toc-训练迭代的三阶段与显存生命周期" class="nav-link" data-scroll-target="#训练迭代的三阶段与显存生命周期">1. 训练迭代的三阶段与显存生命周期</a></li>
+  <li><a href="#训练显存的四大支柱与静态账本" id="toc-训练显存的四大支柱与静态账本" class="nav-link" data-scroll-target="#训练显存的四大支柱与静态账本">2. 训练显存的四大支柱与静态账本</a></li>
+  <li><a href="#静态显存与物理峰值的真实边界" id="toc-静态显存与物理峰值的真实边界" class="nav-link" data-scroll-target="#静态显存与物理峰值的真实边界">3. 静态显存与物理峰值的真实边界</a></li>
   </ul></li>
-  <li><a href="#具体演示" id="toc-具体演示" class="nav-link" data-scroll-target="#具体演示">具体演示</a></li>
+  <li><a href="#具体演示7b-模型的显存估算推演" id="toc-具体演示7b-模型的显存估算推演" class="nav-link" data-scroll-target="#具体演示7b-模型的显存估算推演">具体演示：7B 模型的显存估算推演</a></li>
   <li><a href="#代码填空题" id="toc-代码填空题" class="nav-link" data-scroll-target="#代码填空题">代码填空题</a></li>
   <li><a href="#三个问答题" id="toc-三个问答题" class="nav-link" data-scroll-target="#三个问答题">三个问答题</a>
   <ul class="collapse">
@@ -631,63 +634,78 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 1-2：训练单步生命周期中的显存峰值与状态释放时序流</em>
 </p>
-<p>一次普通训练迭代包括：</p>
+</section>
+<section id="训练迭代的三阶段与显存生命周期" class="level3">
+<h3 class="anchored" data-anchor-id="训练迭代的三阶段与显存生命周期">1. 训练迭代的三阶段与显存生命周期</h3>
+<p>一次标准的深度学习模型训练迭代由三个紧密耦合的阶段构成（如上图 1-2 所示）：</p>
 <ol type="1">
-<li>Forward：计算预测，并保存反向传播需要的激活。</li>
-<li>Backward：利用激活计算梯度，逐步释放部分激活。</li>
-<li>Optimizer step：使用梯度和优化器状态更新参数。</li>
+<li><strong>前向传播（Forward Pass）</strong>：根据输入微批次数据逐层执行矩阵乘与激活计算，输出预测值与 Loss。在此过程中，必须在 GPU 显存中保存反向传播求导所需的中间隐藏状态（即<strong>动态激活值 Activation</strong>）。随着网络深度推进，动态显存占用持续攀升至整个训练周期的最高点（激活峰值）。</li>
+<li><strong>反向传播（Backward Pass）</strong>：从标量 Loss 出发，沿着计算图逆向逐层应用链式法则计算参数梯度。在此阶段，上一层的激活值在完成求导后立即被显式释放，同时申请显存用于存放计算出的梯度（Gradient）。激活释放与梯度建立交替进行，显存曲线呈现锯齿状回落。</li>
+<li><strong>优化器更新（Optimizer Step）</strong>：在累积完全部梯度后，优化器遍历所有参数张量，结合历史动量与方差状态执行数值更新。更新完成后立即将梯度缓冲区清零或释放，显存回落至基线静态常驻状态。</li>
 </ol>
-<p>训练显存的四个主要部分是：</p>
-<p><span class="math display">\[\text{总显存需求} = \text{模型参数} + \text{梯度} + \text{优化器状态} + \text{动态激活值}\]</span></p>
-<p>前三项主要取决于参数量和精度，称为本课的”静态账本”。激活还取决于 batch size、序列长度和模型结构，将在第 2 课处理。</p>
-<p>设模型有 (N) 个参数。</p>
-<p>普通 FP32 + Adam：</p>
+</section>
+<section id="训练显存的四大支柱与静态账本" class="level3">
+<h3 class="anchored" data-anchor-id="训练显存的四大支柱与静态账本">2. 训练显存的四大支柱与静态账本</h3>
+<p>在整个训练生命周期中，显存需求由四个核心部分构成：</p>
+<p><span class="math display">\[\text{总显存需求} = \text{模型参数 (Model Parameters)} + \text{梯度 (Gradients)} + \text{优化器状态 (Optimizer States)} + \text{动态激活值 (Activations)}\]</span></p>
+<p>其中前三项仅取决于模型架构参数量 <span class="math inline">\(N\)</span> 与数值精度，与输入的 Batch Size 和序列长度无关，构成了大模型训练的<strong>静态显存账本（Static Memory Footprint）</strong>。第四项动态激活值则与 Batch Size、序列长度紧密相关，将在第 2 课深入拆解。</p>
+<section id="方案一标准全精度训练fp32-adam" class="level4">
+<h4 class="anchored" data-anchor-id="方案一标准全精度训练fp32-adam">方案一：标准全精度训练（FP32 + Adam）</h4>
+<p>设模型参数总量为 <span class="math inline">\(N\)</span>。在传统的单精度训练中：</p>
 <p><span class="math display">\[\begin{aligned}
-\text{FP32 参数} &amp;: 4N \text{ bytes} \\
-\text{FP32 梯度} &amp;: 4N \text{ bytes} \\
-\text{Adam 一阶、二阶状态} &amp;: 8N \text{ bytes} \\
+\text{FP32 模型参数} &amp;: 4N \text{ bytes} \quad (4 \text{ bytes/param}) \\
+\text{FP32 参数梯度} &amp;: 4N \text{ bytes} \quad (4 \text{ bytes/param}) \\
+\text{Adam 一阶动量 } m_t &amp;: 4N \text{ bytes} \quad (\text{FP32 均值估算}) \\
+\text{Adam 二阶动量 } v_t &amp;: 4N \text{ bytes} \quad (\text{FP32 方差估算}) \\
 \hline
 \mathbf{静态显存总计} &amp;: \mathbf{16N \text{ bytes}}
 \end{aligned}\]</span></p>
-<p>典型 BF16 混合精度 + Adam：</p>
+</section>
+<section id="方案二工业级主流混合精度训练bf16-fp16-adam" class="level4">
+<h4 class="anchored" data-anchor-id="方案二工业级主流混合精度训练bf16-fp16-adam">方案二：工业级主流混合精度训练（BF16 / FP16 + Adam）</h4>
+<p>在现代大模型分布式预训练中，计算普遍采用 16 位浮点（BF16 或 FP16）以充分释放 Tensor Core 算力。此时显存构成如下：</p>
 <p><span class="math display">\[\begin{aligned}
-\text{BF16 参数} &amp;: 2N \text{ bytes} \\
-\text{BF16 梯度} &amp;: 2N \text{ bytes} \\
-\text{FP32 Master Weights} &amp;: 4N \text{ bytes} \\
-\text{FP32 Adam 状态} &amp;: 8N \text{ bytes} \\
+\text{BF16 / FP16 模型参数} &amp;: 2N \text{ bytes} \quad (\text{用于前向与反向高效计算}) \\
+\text{BF16 / FP16 参数梯度} &amp;: 2N \text{ bytes} \quad (\text{用于反向计算与通信}) \\
+\text{FP32 主权重 (Master Weights)} &amp;: 4N \text{ bytes} \quad (\text{高精度参数副本，防止数值下溢}) \\
+\text{FP32 Adam 一阶动量 } m_t &amp;: 4N \text{ bytes} \quad (\text{必须保持单精度以保证数值稳定性}) \\
+\text{FP32 Adam 二阶动量 } v_t &amp;: 4N \text{ bytes} \quad (\text{梯度平方累加极易溢出，必须单精度}) \\
 \hline
 \mathbf{静态显存总计} &amp;: \mathbf{16N \text{ bytes}}
 \end{aligned}\]</span></p>
-<p>如果另外保留 FP32 梯度累积缓冲区，再增加 (4N) bytes，总计 (20N)。</p>
-<p>这说明一个常见面试误区：<strong>混合精度不一定降低参数、梯度和优化器状态的总显存。</strong> 它的重要优势还包括更快的低精度计算和更小的激活。</p>
-<p>这些估算不包含：</p>
-<ul>
-<li>激活</li>
-<li>CUDA context 和内核开销</li>
-<li>临时缓冲区</li>
-<li>显存碎片</li>
-<li>通信缓冲区</li>
-</ul>
-<p>因此它是下界或组成分析，不是准确的峰值显存预测。</p>
-</section>
-</section>
-<section id="具体演示" class="level2">
-<h2 class="anchored" data-anchor-id="具体演示">具体演示</h2>
-<p>一个 7B 参数模型，在不保留 FP32 梯度缓冲区时：</p>
-<p><span class="math display">\[\begin{aligned}
-7 \times 10^9 \text{ parameters} \times 16 \text{ bytes/parameter} &amp;= 112 \times 10^9 \text{ bytes} \\
-&amp;= 112 \text{ GB} \approx 104.3 \text{ GiB}
-\end{aligned}\]</span></p>
-<p>仅静态状态就超过 80 GB，还没有计算激活。但严谨的结论应当是：</p>
+<p>若开启高精度梯度累积（保留一个独立的 FP32 梯度缓冲区以避免跨微批次累加时的舍入误差），则需额外增加 <span class="math inline">\(4N\)</span> bytes，总计达到 <strong><span class="math inline">\(20N\)</span> bytes</strong>。</p>
 <blockquote class="blockquote">
-<p>标准、未切分、未卸载的这种训练配置无法放进一张 80 GB GPU。</p>
+<p><strong>核心认知与面试关键考点</strong>：<br>
+<strong>混合精度训练并不必然减少模型的静态显存占用！</strong><br>
+为什么？因为当学习率 <span class="math inline">\(\eta \sim 10^{-4}\)</span>、梯度 <span class="math inline">\(g \sim 10^{-3}\)</span> 时，参数单步更新量 <span class="math inline">\(\Delta W = -\eta \cdot g \sim 10^{-7}\)</span>。BF16 的尾数仅有 7 位有效数字，直接在 BF16 上做加法会导致该增量被截断归零（Underflow / 浮点加法下溢）。因此必须维持一份 FP32 Master Weights，导致混合精度下的静态账本仍然高达 <span class="math inline">\(16N\)</span> 甚至 <span class="math inline">\(20N\)</span> 字节。混合精度的核心价值在于<strong>将张量算力翻倍、通信带宽压力减半、并将动态激活显存压减为原来的 <span class="math inline">\(50\%\)</span></strong>。</p>
 </blockquote>
-<p>不能扩大成”7B 模型绝对无法在一张 80 GB GPU 上训练”，因为优化器、量化、分片、卸载和冻结参数都可能改变前提。</p>
+</section>
+</section>
+<section id="静态显存与物理峰值的真实边界" class="level3">
+<h3 class="anchored" data-anchor-id="静态显存与物理峰值的真实边界">3. 静态显存与物理峰值的真实边界</h3>
+<p>上述 <span class="math inline">\(16N \sim 20N\)</span> 仅是纯数学理论下界，在生产环境中，显存物理峰值还包括以下必要开销：</p>
+<ul>
+<li><strong>动态激活显存（Activation Memory）</strong>：多层 Transformer 的注意力与 MLP 中间张量，长序列下往往显著反超静态账本。</li>
+<li><strong>CUDA Context 与运行时驻留</strong>：cuBLAS、NCCL 等底层库的驱动上下文与执行内核，通常常驻占用约 <span class="math inline">\(1 \sim 2\text{ GB}\)</span>。</li>
+<li><strong>临时与通信工作缓冲区（Workspace / Scratchpad）</strong>：GEMM 内核计算缓冲、跨卡通信聚合分桶（如 DDP 的 Bucket，默认 25MB）。</li>
+<li><strong>显存内存池碎片（Allocator Fragmentation）</strong>：PyTorch Caching Allocator 采用分块复用机制，频繁申请/释放变长张量时通常会产生 <span class="math inline">\(10\% \sim 25\%\)</span> 的物理显存碎片。</li>
+</ul>
+</section>
+</section>
+<section id="具体演示7b-模型的显存估算推演" class="level2">
+<h2 class="anchored" data-anchor-id="具体演示7b-模型的显存估算推演">具体演示：7B 模型的显存估算推演</h2>
+<p>以标准的 LLaMA-7B 模型（<span class="math inline">\(N = 7 \times 10^9\)</span>）为例，采用无额外 FP32 累积缓冲区的 BF16 + Adam 配置：</p>
+<p><span class="math display">\[\begin{aligned}
+\text{静态显存总量} &amp;= 7 \times 10^9 \text{ 参数} \times 16 \text{ 字节/参数} \\
+&amp;= 112 \times 10^9 \text{ bytes} \\
+&amp;= 112.0 \text{ GB (十进制)} \approx 104.3 \text{ GiB (二进制，} 112 \times 10^9 / 1024^3 \text{)}
+\end{aligned}\]</span></p>
+<p>一台配备 80 GB 显存的 NVIDIA A100/H100 SXM 节点，实际可用物理显存约为 <span class="math inline">\(80 \times 10^9 \text{ bytes} \approx 74.5\text{ GiB}\)</span>。这意味着： - 单张 80GB 卡甚至连 7B 模型的静态权重和优化器状态都无法完整装入（<span class="math inline">\(104.3\text{ GiB} &gt; 74.5\text{ GiB}\)</span>），尚未运行任何前向计算就会直接 OOM！ - <strong>严谨的系统设计推论</strong>：标准、全参数、单副本的 7B 模型训练<strong>绝不可能单卡完成</strong>，必须引入参数与优化器分片（ZeRO / FSDP，详见第 5 课）或多维并行拆分。只有在采用 LoRA（冻结基座、仅更新约 <span class="math inline">\(1\%\)</span> 参数）、8-bit 优化器（如 bitsandbytes 将优化器状态压减至 <span class="math inline">\(2N\)</span>）或模型卸载（CPU Offloading）等特殊手段下，单卡 80GB 才能跑通训练。</p>
 </section>
 <section id="代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
 <p>补全以下程序。不得删除某个显存分量，也不要直接写死最终总数。</p>
-<div id="6c9854ba" class="cell" data-course_role="exercise">
+<div id="3fbf4d86" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
@@ -831,7 +849,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
-<div id="d403c0de" class="cell" data-course_role="solution">
+<div id="e725a7ae" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
@@ -1571,404 +1589,412 @@ window.Quarto = {
 <span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-2：训练单步生命周期中的显存峰值与状态释放时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a>一次普通训练迭代包括：</span>
+<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 训练迭代的三阶段与显存生命周期</span></span>
 <span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>Forward：计算预测，并保存反向传播需要的激活。</span>
-<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>Backward：利用激活计算梯度，逐步释放部分激活。</span>
-<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>Optimizer step：使用梯度和优化器状态更新参数。</span>
-<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>训练显存的四个主要部分是：</span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a>一次标准的深度学习模型训练迭代由三个紧密耦合的阶段构成（如上图 1-2 所示）：</span>
+<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**前向传播（Forward Pass）**：根据输入微批次数据逐层执行矩阵乘与激活计算，输出预测值与 Loss。在此过程中，必须在 GPU 显存中保存反向传播求导所需的中间隐藏状态（即**动态激活值 Activation**）。随着网络深度推进，动态显存占用持续攀升至整个训练周期的最高点（激活峰值）。</span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**反向传播（Backward Pass）**：从标量 Loss 出发，沿着计算图逆向逐层应用链式法则计算参数梯度。在此阶段，上一层的激活值在完成求导后立即被显式释放，同时申请显存用于存放计算出的梯度（Gradient）。激活释放与梯度建立交替进行，显存曲线呈现锯齿状回落。</span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**优化器更新（Optimizer Step）**：在累积完全部梯度后，优化器遍历所有参数张量，结合历史动量与方差状态执行数值更新。更新完成后立即将梯度缓冲区清零或释放，显存回落至基线静态常驻状态。</span>
 <span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a>$$\text{总显存需求} = \text{模型参数} + \text{梯度} + \text{优化器状态} + \text{动态激活值}$$</span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 训练显存的四大支柱与静态账本</span></span>
 <span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a>前三项主要取决于参数量和精度，称为本课的"静态账本"。激活还取决于 batch size、序列长度和模型结构，将在第 2 课处理。</span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a>在整个训练生命周期中，显存需求由四个核心部分构成：</span>
 <span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a>设模型有 <span class="sc">\(</span>N<span class="sc">\)</span> 个参数。</span>
+<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a>$$\text{总显存需求} = \text{模型参数 (Model Parameters)} + \text{梯度 (Gradients)} + \text{优化器状态 (Optimizer States)} + \text{动态激活值 (Activations)}$$</span>
 <span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a>普通 FP32 + Adam：</span>
+<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a>其中前三项仅取决于模型架构参数量 $N$ 与数值精度，与输入的 Batch Size 和序列长度无关，构成了大模型训练的**静态显存账本（Static Memory Footprint）**。第四项动态激活值则与 Batch Size、序列长度紧密相关，将在第 2 课深入拆解。</span>
 <span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a>$$\begin{aligned}</span>
-<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a>\text{FP32 参数} &amp;: 4N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a>\text{FP32 梯度} &amp;: 4N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a>\text{Adam 一阶、二阶状态} &amp;: 8N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a>\hline</span>
-<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a>\mathbf{静态显存总计} &amp;: \mathbf{16N \text{ bytes}}</span>
-<span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a>\end{aligned}$$</span>
-<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a>典型 BF16 混合精度 + Adam：</span>
-<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a>$$\begin{aligned}</span>
-<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a>\text{BF16 参数} &amp;: 2N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a>\text{BF16 梯度} &amp;: 2N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a>\text{FP32 Master Weights} &amp;: 4N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a>\text{FP32 Adam 状态} &amp;: 8N \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a>\hline</span>
-<span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a>\mathbf{静态显存总计} &amp;: \mathbf{16N \text{ bytes}}</span>
-<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a>\end{aligned}$$</span>
-<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a>如果另外保留 FP32 梯度累积缓冲区，再增加 <span class="sc">\(</span>4N<span class="sc">\)</span> bytes，总计 <span class="sc">\(</span>20N<span class="sc">\)</span>。</span>
-<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a>这说明一个常见面试误区：**混合精度不一定降低参数、梯度和优化器状态的总显存。** 它的重要优势还包括更快的低精度计算和更小的激活。</span>
-<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a>这些估算不包含：</span>
-<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>激活</span>
-<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>CUDA context 和内核开销</span>
-<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>临时缓冲区</span>
-<span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>显存碎片</span>
-<span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>通信缓冲区</span>
-<span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-112"><a href="#cb5-112" aria-hidden="true" tabindex="-1"></a>因此它是下界或组成分析，不是准确的峰值显存预测。</span>
+<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 方案一：标准全精度训练（FP32 + Adam）</span></span>
+<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a>设模型参数总量为 $N$。在传统的单精度训练中：</span>
+<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a>$$\begin{aligned}</span>
+<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a>\text{FP32 模型参数} &amp;: 4N \text{ bytes} \quad (4 \text{ bytes/param}) <span class="sc">\\</span></span>
+<span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a>\text{FP32 参数梯度} &amp;: 4N \text{ bytes} \quad (4 \text{ bytes/param}) <span class="sc">\\</span></span>
+<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a>\text{Adam 一阶动量 } m_t &amp;: 4N \text{ bytes} \quad (\text{FP32 均值估算}) <span class="sc">\\</span></span>
+<span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a>\text{Adam 二阶动量 } v_t &amp;: 4N \text{ bytes} \quad (\text{FP32 方差估算}) <span class="sc">\\</span></span>
+<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a>\hline</span>
+<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a>\mathbf{静态显存总计} &amp;: \mathbf{16N \text{ bytes}}</span>
+<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a>\end{aligned}$$</span>
+<span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 方案二：工业级主流混合精度训练（BF16 / FP16 + Adam）</span></span>
+<span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a>在现代大模型分布式预训练中，计算普遍采用 16 位浮点（BF16 或 FP16）以充分释放 Tensor Core 算力。此时显存构成如下：</span>
+<span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a>$$\begin{aligned}</span>
+<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a>\text{BF16 / FP16 模型参数} &amp;: 2N \text{ bytes} \quad (\text{用于前向与反向高效计算}) <span class="sc">\\</span></span>
+<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a>\text{BF16 / FP16 参数梯度} &amp;: 2N \text{ bytes} \quad (\text{用于反向计算与通信}) <span class="sc">\\</span></span>
+<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a>\text{FP32 主权重 (Master Weights)} &amp;: 4N \text{ bytes} \quad (\text{高精度参数副本，防止数值下溢}) <span class="sc">\\</span></span>
+<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a>\text{FP32 Adam 一阶动量 } m_t &amp;: 4N \text{ bytes} \quad (\text{必须保持单精度以保证数值稳定性}) <span class="sc">\\</span></span>
+<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a>\text{FP32 Adam 二阶动量 } v_t &amp;: 4N \text{ bytes} \quad (\text{梯度平方累加极易溢出，必须单精度}) <span class="sc">\\</span></span>
+<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a>\hline</span>
+<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a>\mathbf{静态显存总计} &amp;: \mathbf{16N \text{ bytes}}</span>
+<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a>\end{aligned}$$</span>
+<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a>若开启高精度梯度累积（保留一个独立的 FP32 梯度缓冲区以避免跨微批次累加时的舍入误差），则需额外增加 $4N$ bytes，总计达到 **$20N$ bytes**。</span>
+<span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **核心认知与面试关键考点**：</span>  </span>
+<span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **混合精度训练并不必然减少模型的静态显存占用！**</span>  </span>
+<span id="cb5-112"><a href="#cb5-112" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 为什么？因为当学习率 $\eta \sim 10^{-4}$、梯度 $g \sim 10^{-3}$ 时，参数单步更新量 $\Delta W = -\eta \cdot g \sim 10^{-7}$。BF16 的尾数仅有 7 位有效数字，直接在 BF16 上做加法会导致该增量被截断归零（Underflow / 浮点加法下溢）。因此必须维持一份 FP32 Master Weights，导致混合精度下的静态账本仍然高达 $16N$ 甚至 $20N$ 字节。混合精度的核心价值在于**将张量算力翻倍、通信带宽压力减半、并将动态激活显存压减为原来的 $50\%$**。</span></span>
 <span id="cb5-113"><a href="#cb5-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-114"><a href="#cb5-114" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示</span></span>
+<span id="cb5-114"><a href="#cb5-114" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 静态显存与物理峰值的真实边界</span></span>
 <span id="cb5-115"><a href="#cb5-115" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-116"><a href="#cb5-116" aria-hidden="true" tabindex="-1"></a>一个 7B 参数模型，在不保留 FP32 梯度缓冲区时：</span>
+<span id="cb5-116"><a href="#cb5-116" aria-hidden="true" tabindex="-1"></a>上述 $16N \sim 20N$ 仅是纯数学理论下界，在生产环境中，显存物理峰值还包括以下必要开销：</span>
 <span id="cb5-117"><a href="#cb5-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-118"><a href="#cb5-118" aria-hidden="true" tabindex="-1"></a>$$\begin{aligned}</span>
-<span id="cb5-119"><a href="#cb5-119" aria-hidden="true" tabindex="-1"></a>7 \times 10^9 \text{ parameters} \times 16 \text{ bytes/parameter} &amp;= 112 \times 10^9 \text{ bytes} <span class="sc">\\</span></span>
-<span id="cb5-120"><a href="#cb5-120" aria-hidden="true" tabindex="-1"></a>&amp;= 112 \text{ GB} \approx 104.3 \text{ GiB}</span>
-<span id="cb5-121"><a href="#cb5-121" aria-hidden="true" tabindex="-1"></a>\end{aligned}$$</span>
+<span id="cb5-118"><a href="#cb5-118" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**动态激活显存（Activation Memory）**：多层 Transformer 的注意力与 MLP 中间张量，长序列下往往显著反超静态账本。</span>
+<span id="cb5-119"><a href="#cb5-119" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CUDA Context 与运行时驻留**：cuBLAS、NCCL 等底层库的驱动上下文与执行内核，通常常驻占用约 $1 \sim 2\text{ GB}$。</span>
+<span id="cb5-120"><a href="#cb5-120" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**临时与通信工作缓冲区（Workspace / Scratchpad）**：GEMM 内核计算缓冲、跨卡通信聚合分桶（如 DDP 的 Bucket，默认 25MB）。</span>
+<span id="cb5-121"><a href="#cb5-121" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**显存内存池碎片（Allocator Fragmentation）**：PyTorch Caching Allocator 采用分块复用机制，频繁申请/释放变长张量时通常会产生 $10\% \sim 25\%$ 的物理显存碎片。</span>
 <span id="cb5-122"><a href="#cb5-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-123"><a href="#cb5-123" aria-hidden="true" tabindex="-1"></a>仅静态状态就超过 80 GB，还没有计算激活。但严谨的结论应当是：</span>
+<span id="cb5-123"><a href="#cb5-123" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：7B 模型的显存估算推演</span></span>
 <span id="cb5-124"><a href="#cb5-124" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-125"><a href="#cb5-125" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 标准、未切分、未卸载的这种训练配置无法放进一张 80 GB GPU。</span></span>
+<span id="cb5-125"><a href="#cb5-125" aria-hidden="true" tabindex="-1"></a>以标准的 LLaMA-7B 模型（$N = 7 \times 10^9$）为例，采用无额外 FP32 累积缓冲区的 BF16 + Adam 配置：</span>
 <span id="cb5-126"><a href="#cb5-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-127"><a href="#cb5-127" aria-hidden="true" tabindex="-1"></a>不能扩大成"7B 模型绝对无法在一张 80 GB GPU 上训练"，因为优化器、量化、分片、卸载和冻结参数都可能改变前提。</span>
-<span id="cb5-128"><a href="#cb5-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-129"><a href="#cb5-129" aria-hidden="true" tabindex="-1"></a><span class="fu">## 代码填空题</span></span>
-<span id="cb5-130"><a href="#cb5-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-131"><a href="#cb5-131" aria-hidden="true" tabindex="-1"></a>补全以下程序。不得删除某个显存分量，也不要直接写死最终总数。</span>
+<span id="cb5-127"><a href="#cb5-127" aria-hidden="true" tabindex="-1"></a>$$\begin{aligned}</span>
+<span id="cb5-128"><a href="#cb5-128" aria-hidden="true" tabindex="-1"></a>\text{静态显存总量} &amp;= 7 \times 10^9 \text{ 参数} \times 16 \text{ 字节/参数} <span class="sc">\\</span></span>
+<span id="cb5-129"><a href="#cb5-129" aria-hidden="true" tabindex="-1"></a>&amp;= 112 \times 10^9 \text{ bytes} <span class="sc">\\</span></span>
+<span id="cb5-130"><a href="#cb5-130" aria-hidden="true" tabindex="-1"></a>&amp;= 112.0 \text{ GB (十进制)} \approx 104.3 \text{ GiB (二进制，} 112 \times 10^9 / 1024^3 \text{)}</span>
+<span id="cb5-131"><a href="#cb5-131" aria-hidden="true" tabindex="-1"></a>\end{aligned}$$</span>
 <span id="cb5-132"><a href="#cb5-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-135"><a href="#cb5-135" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb5-136"><a href="#cb5-136" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb5-137"><a href="#cb5-137" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
+<span id="cb5-133"><a href="#cb5-133" aria-hidden="true" tabindex="-1"></a>一台配备 80 GB 显存的 NVIDIA A100/H100 SXM 节点，实际可用物理显存约为 $80 \times 10^9 \text{ bytes} \approx 74.5\text{ GiB}$。这意味着：</span>
+<span id="cb5-134"><a href="#cb5-134" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>单张 80GB 卡甚至连 7B 模型的静态权重和优化器状态都无法完整装入（$104.3\text{ GiB} &gt; 74.5\text{ GiB}$），尚未运行任何前向计算就会直接 OOM！</span>
+<span id="cb5-135"><a href="#cb5-135" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**严谨的系统设计推论**：标准、全参数、单副本的 7B 模型训练**绝不可能单卡完成**，必须引入参数与优化器分片（ZeRO / FSDP，详见第 5 课）或多维并行拆分。只有在采用 LoRA（冻结基座、仅更新约 $1\%$ 参数）、8-bit 优化器（如 bitsandbytes 将优化器状态压减至 $2N$）或模型卸载（CPU Offloading）等特殊手段下，单卡 80GB 才能跑通训练。</span>
+<span id="cb5-136"><a href="#cb5-136" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-137"><a href="#cb5-137" aria-hidden="true" tabindex="-1"></a><span class="fu">## 代码填空题</span></span>
 <span id="cb5-138"><a href="#cb5-138" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-139"><a href="#cb5-139" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-140"><a href="#cb5-140" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span>(frozen<span class="op">=</span><span class="va">True</span>)</span>
-<span id="cb5-141"><a href="#cb5-141" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemoryBreakdown:</span>
-<span id="cb5-142"><a href="#cb5-142" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""所有字段的单位都是 byte。"""</span></span>
-<span id="cb5-143"><a href="#cb5-143" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-144"><a href="#cb5-144" aria-hidden="true" tabindex="-1"></a>    model_bf16: <span class="bu">int</span></span>
-<span id="cb5-145"><a href="#cb5-145" aria-hidden="true" tabindex="-1"></a>    grad_bf16: <span class="bu">int</span></span>
-<span id="cb5-146"><a href="#cb5-146" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32: <span class="bu">int</span></span>
-<span id="cb5-147"><a href="#cb5-147" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32: <span class="bu">int</span></span>
-<span id="cb5-148"><a href="#cb5-148" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32: <span class="bu">int</span></span>
-<span id="cb5-149"><a href="#cb5-149" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32: <span class="bu">int</span></span>
-<span id="cb5-150"><a href="#cb5-150" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-151"><a href="#cb5-151" aria-hidden="true" tabindex="-1"></a>    <span class="at">@property</span></span>
-<span id="cb5-152"><a href="#cb5-152" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> total(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
-<span id="cb5-153"><a href="#cb5-153" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 不能手写"每参数共多少 byte"；</span></span>
-<span id="cb5-154"><a href="#cb5-154" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 应从各分量求和，以便检查每一项是否被重复或遗漏。</span></span>
-<span id="cb5-155"><a href="#cb5-155" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> ______________________________</span>
-<span id="cb5-156"><a href="#cb5-156" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-157"><a href="#cb5-157" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-158"><a href="#cb5-158" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> estimate_adam_memory(</span>
-<span id="cb5-159"><a href="#cb5-159" aria-hidden="true" tabindex="-1"></a>    num_params: <span class="bu">int</span>,</span>
-<span id="cb5-160"><a href="#cb5-160" aria-hidden="true" tabindex="-1"></a>    use_fp32_grad_accum: <span class="bu">bool</span>,</span>
-<span id="cb5-161"><a href="#cb5-161" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> MemoryBreakdown:</span>
-<span id="cb5-162"><a href="#cb5-162" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
-<span id="cb5-163"><a href="#cb5-163" aria-hidden="true" tabindex="-1"></a><span class="co">    估算 BF16 混合精度训练的静态显存。</span></span>
+<span id="cb5-139"><a href="#cb5-139" aria-hidden="true" tabindex="-1"></a>补全以下程序。不得删除某个显存分量，也不要直接写死最终总数。</span>
+<span id="cb5-140"><a href="#cb5-140" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-143"><a href="#cb5-143" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb5-144"><a href="#cb5-144" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb5-145"><a href="#cb5-145" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
+<span id="cb5-146"><a href="#cb5-146" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-147"><a href="#cb5-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-148"><a href="#cb5-148" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span>(frozen<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-149"><a href="#cb5-149" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemoryBreakdown:</span>
+<span id="cb5-150"><a href="#cb5-150" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""所有字段的单位都是 byte。"""</span></span>
+<span id="cb5-151"><a href="#cb5-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-152"><a href="#cb5-152" aria-hidden="true" tabindex="-1"></a>    model_bf16: <span class="bu">int</span></span>
+<span id="cb5-153"><a href="#cb5-153" aria-hidden="true" tabindex="-1"></a>    grad_bf16: <span class="bu">int</span></span>
+<span id="cb5-154"><a href="#cb5-154" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32: <span class="bu">int</span></span>
+<span id="cb5-155"><a href="#cb5-155" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32: <span class="bu">int</span></span>
+<span id="cb5-156"><a href="#cb5-156" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32: <span class="bu">int</span></span>
+<span id="cb5-157"><a href="#cb5-157" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32: <span class="bu">int</span></span>
+<span id="cb5-158"><a href="#cb5-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-159"><a href="#cb5-159" aria-hidden="true" tabindex="-1"></a>    <span class="at">@property</span></span>
+<span id="cb5-160"><a href="#cb5-160" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> total(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
+<span id="cb5-161"><a href="#cb5-161" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 不能手写"每参数共多少 byte"；</span></span>
+<span id="cb5-162"><a href="#cb5-162" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 应从各分量求和，以便检查每一项是否被重复或遗漏。</span></span>
+<span id="cb5-163"><a href="#cb5-163" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> ______________________________</span>
 <span id="cb5-164"><a href="#cb5-164" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-165"><a href="#cb5-165" aria-hidden="true" tabindex="-1"></a><span class="co">    假设：</span></span>
-<span id="cb5-166"><a href="#cb5-166" aria-hidden="true" tabindex="-1"></a><span class="co">    1. 前向、反向使用 BF16 参数和梯度。</span></span>
-<span id="cb5-167"><a href="#cb5-167" aria-hidden="true" tabindex="-1"></a><span class="co">    2. 保留 FP32 master weights。</span></span>
-<span id="cb5-168"><a href="#cb5-168" aria-hidden="true" tabindex="-1"></a><span class="co">    3. Adam 的一阶、二阶状态均为 FP32。</span></span>
-<span id="cb5-169"><a href="#cb5-169" aria-hidden="true" tabindex="-1"></a><span class="co">    4. 可选一个额外的 FP32 梯度累积缓冲区。</span></span>
-<span id="cb5-170"><a href="#cb5-170" aria-hidden="true" tabindex="-1"></a><span class="co">    5. 不包含激活、临时 buffer、CUDA context 和碎片。</span></span>
-<span id="cb5-171"><a href="#cb5-171" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
-<span id="cb5-172"><a href="#cb5-172" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_params <span class="op">&lt;=</span> <span class="dv">0</span>:</span>
-<span id="cb5-173"><a href="#cb5-173" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"num_params must be positive"</span>)</span>
-<span id="cb5-174"><a href="#cb5-174" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-175"><a href="#cb5-175" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 BF16 数值占多少 byte？</span></span>
-<span id="cb5-176"><a href="#cb5-176" aria-hidden="true" tabindex="-1"></a>    bf16_bytes <span class="op">=</span> ______</span>
-<span id="cb5-177"><a href="#cb5-177" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-178"><a href="#cb5-178" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 FP32 数值占多少 byte？</span></span>
-<span id="cb5-179"><a href="#cb5-179" aria-hidden="true" tabindex="-1"></a>    fp32_bytes <span class="op">=</span> ______</span>
-<span id="cb5-180"><a href="#cb5-180" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-181"><a href="#cb5-181" aria-hidden="true" tabindex="-1"></a>    model_bf16 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
-<span id="cb5-182"><a href="#cb5-182" aria-hidden="true" tabindex="-1"></a>    grad_bf16 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
-<span id="cb5-183"><a href="#cb5-183" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-184"><a href="#cb5-184" aria-hidden="true" tabindex="-1"></a>    <span class="co"># master weights 是用于稳定更新的 FP32 参数副本。</span></span>
-<span id="cb5-185"><a href="#cb5-185" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
-<span id="cb5-186"><a href="#cb5-186" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-187"><a href="#cb5-187" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Adam 为每个参数分别维护一阶矩和二阶矩。</span></span>
-<span id="cb5-188"><a href="#cb5-188" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
-<span id="cb5-189"><a href="#cb5-189" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
-<span id="cb5-190"><a href="#cb5-190" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-191"><a href="#cb5-191" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 注意：这是额外缓冲区，不能拿它替代 BF16 梯度。</span></span>
-<span id="cb5-192"><a href="#cb5-192" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32 <span class="op">=</span> (</span>
-<span id="cb5-193"><a href="#cb5-193" aria-hidden="true" tabindex="-1"></a>        num_params <span class="op">*</span> ______ <span class="cf">if</span> use_fp32_grad_accum <span class="cf">else</span> <span class="dv">0</span></span>
-<span id="cb5-194"><a href="#cb5-194" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb5-195"><a href="#cb5-195" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-196"><a href="#cb5-196" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> MemoryBreakdown(</span>
-<span id="cb5-197"><a href="#cb5-197" aria-hidden="true" tabindex="-1"></a>        model_bf16<span class="op">=</span>model_bf16,</span>
-<span id="cb5-198"><a href="#cb5-198" aria-hidden="true" tabindex="-1"></a>        grad_bf16<span class="op">=</span>grad_bf16,</span>
-<span id="cb5-199"><a href="#cb5-199" aria-hidden="true" tabindex="-1"></a>        master_weights_fp32<span class="op">=</span>master_weights_fp32,</span>
-<span id="cb5-200"><a href="#cb5-200" aria-hidden="true" tabindex="-1"></a>        adam_m_fp32<span class="op">=</span>adam_m_fp32,</span>
-<span id="cb5-201"><a href="#cb5-201" aria-hidden="true" tabindex="-1"></a>        adam_v_fp32<span class="op">=</span>adam_v_fp32,</span>
-<span id="cb5-202"><a href="#cb5-202" aria-hidden="true" tabindex="-1"></a>        grad_accum_fp32<span class="op">=</span>grad_accum_fp32,</span>
-<span id="cb5-203"><a href="#cb5-203" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb5-204"><a href="#cb5-204" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-205"><a href="#cb5-205" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-206"><a href="#cb5-206" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gb(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
-<span id="cb5-207"><a href="#cb5-207" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""十进制 GB，硬件和原文表格常使用这个单位。"""</span></span>
-<span id="cb5-208"><a href="#cb5-208" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> __________________</span>
-<span id="cb5-209"><a href="#cb5-209" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-210"><a href="#cb5-210" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-211"><a href="#cb5-211" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gib(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
-<span id="cb5-212"><a href="#cb5-212" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""二进制 GiB；1 GiB = 1024^3 bytes。"""</span></span>
-<span id="cb5-213"><a href="#cb5-213" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> __________________</span>
-<span id="cb5-214"><a href="#cb5-214" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-215"><a href="#cb5-215" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-216"><a href="#cb5-216" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> size <span class="kw">in</span> (<span class="dv">1_000_000_000</span>, <span class="dv">7_000_000_000</span>):</span>
-<span id="cb5-217"><a href="#cb5-217" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> fp32_accum <span class="kw">in</span> (<span class="va">False</span>, <span class="va">True</span>):</span>
-<span id="cb5-218"><a href="#cb5-218" aria-hidden="true" tabindex="-1"></a>        result <span class="op">=</span> estimate_adam_memory(size, fp32_accum)</span>
-<span id="cb5-219"><a href="#cb5-219" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(</span>
-<span id="cb5-220"><a href="#cb5-220" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"params=</span><span class="sc">{</span>size <span class="op">/</span> <span class="fl">1e9</span><span class="sc">:.0f}</span><span class="ss">B, "</span></span>
-<span id="cb5-221"><a href="#cb5-221" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"fp32_grad_accum=</span><span class="sc">{</span>fp32_accum<span class="sc">}</span><span class="ss">, "</span></span>
-<span id="cb5-222"><a href="#cb5-222" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gb(result.total)<span class="sc">:.1f}</span><span class="ss"> GB, "</span></span>
-<span id="cb5-223"><a href="#cb5-223" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gib(result.total)<span class="sc">:.1f}</span><span class="ss"> GiB"</span></span>
-<span id="cb5-224"><a href="#cb5-224" aria-hidden="true" tabindex="-1"></a>        )</span>
-<span id="cb5-225"><a href="#cb5-225" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-226"><a href="#cb5-226" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-227"><a href="#cb5-227" aria-hidden="true" tabindex="-1"></a><span class="fu">## 三个问答题</span></span>
-<span id="cb5-228"><a href="#cb5-228" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-229"><a href="#cb5-229" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb5-230"><a href="#cb5-230" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-231"><a href="#cb5-231" aria-hidden="true" tabindex="-1"></a>为什么推理一个 7B BF16 模型可能只需约 14 GB 参数显存，而使用 Adam 训练时静态状态可能达到 112 GB？请逐项说明多出来的内容。</span>
-<span id="cb5-232"><a href="#cb5-232" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-233"><a href="#cb5-233" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb5-165"><a href="#cb5-165" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-166"><a href="#cb5-166" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> estimate_adam_memory(</span>
+<span id="cb5-167"><a href="#cb5-167" aria-hidden="true" tabindex="-1"></a>    num_params: <span class="bu">int</span>,</span>
+<span id="cb5-168"><a href="#cb5-168" aria-hidden="true" tabindex="-1"></a>    use_fp32_grad_accum: <span class="bu">bool</span>,</span>
+<span id="cb5-169"><a href="#cb5-169" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> MemoryBreakdown:</span>
+<span id="cb5-170"><a href="#cb5-170" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb5-171"><a href="#cb5-171" aria-hidden="true" tabindex="-1"></a><span class="co">    估算 BF16 混合精度训练的静态显存。</span></span>
+<span id="cb5-172"><a href="#cb5-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-173"><a href="#cb5-173" aria-hidden="true" tabindex="-1"></a><span class="co">    假设：</span></span>
+<span id="cb5-174"><a href="#cb5-174" aria-hidden="true" tabindex="-1"></a><span class="co">    1. 前向、反向使用 BF16 参数和梯度。</span></span>
+<span id="cb5-175"><a href="#cb5-175" aria-hidden="true" tabindex="-1"></a><span class="co">    2. 保留 FP32 master weights。</span></span>
+<span id="cb5-176"><a href="#cb5-176" aria-hidden="true" tabindex="-1"></a><span class="co">    3. Adam 的一阶、二阶状态均为 FP32。</span></span>
+<span id="cb5-177"><a href="#cb5-177" aria-hidden="true" tabindex="-1"></a><span class="co">    4. 可选一个额外的 FP32 梯度累积缓冲区。</span></span>
+<span id="cb5-178"><a href="#cb5-178" aria-hidden="true" tabindex="-1"></a><span class="co">    5. 不包含激活、临时 buffer、CUDA context 和碎片。</span></span>
+<span id="cb5-179"><a href="#cb5-179" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb5-180"><a href="#cb5-180" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_params <span class="op">&lt;=</span> <span class="dv">0</span>:</span>
+<span id="cb5-181"><a href="#cb5-181" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"num_params must be positive"</span>)</span>
+<span id="cb5-182"><a href="#cb5-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-183"><a href="#cb5-183" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 BF16 数值占多少 byte？</span></span>
+<span id="cb5-184"><a href="#cb5-184" aria-hidden="true" tabindex="-1"></a>    bf16_bytes <span class="op">=</span> ______</span>
+<span id="cb5-185"><a href="#cb5-185" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-186"><a href="#cb5-186" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 FP32 数值占多少 byte？</span></span>
+<span id="cb5-187"><a href="#cb5-187" aria-hidden="true" tabindex="-1"></a>    fp32_bytes <span class="op">=</span> ______</span>
+<span id="cb5-188"><a href="#cb5-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-189"><a href="#cb5-189" aria-hidden="true" tabindex="-1"></a>    model_bf16 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
+<span id="cb5-190"><a href="#cb5-190" aria-hidden="true" tabindex="-1"></a>    grad_bf16 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
+<span id="cb5-191"><a href="#cb5-191" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-192"><a href="#cb5-192" aria-hidden="true" tabindex="-1"></a>    <span class="co"># master weights 是用于稳定更新的 FP32 参数副本。</span></span>
+<span id="cb5-193"><a href="#cb5-193" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
+<span id="cb5-194"><a href="#cb5-194" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-195"><a href="#cb5-195" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Adam 为每个参数分别维护一阶矩和二阶矩。</span></span>
+<span id="cb5-196"><a href="#cb5-196" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
+<span id="cb5-197"><a href="#cb5-197" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32 <span class="op">=</span> num_params <span class="op">*</span> ______</span>
+<span id="cb5-198"><a href="#cb5-198" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-199"><a href="#cb5-199" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 注意：这是额外缓冲区，不能拿它替代 BF16 梯度。</span></span>
+<span id="cb5-200"><a href="#cb5-200" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32 <span class="op">=</span> (</span>
+<span id="cb5-201"><a href="#cb5-201" aria-hidden="true" tabindex="-1"></a>        num_params <span class="op">*</span> ______ <span class="cf">if</span> use_fp32_grad_accum <span class="cf">else</span> <span class="dv">0</span></span>
+<span id="cb5-202"><a href="#cb5-202" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb5-203"><a href="#cb5-203" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-204"><a href="#cb5-204" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> MemoryBreakdown(</span>
+<span id="cb5-205"><a href="#cb5-205" aria-hidden="true" tabindex="-1"></a>        model_bf16<span class="op">=</span>model_bf16,</span>
+<span id="cb5-206"><a href="#cb5-206" aria-hidden="true" tabindex="-1"></a>        grad_bf16<span class="op">=</span>grad_bf16,</span>
+<span id="cb5-207"><a href="#cb5-207" aria-hidden="true" tabindex="-1"></a>        master_weights_fp32<span class="op">=</span>master_weights_fp32,</span>
+<span id="cb5-208"><a href="#cb5-208" aria-hidden="true" tabindex="-1"></a>        adam_m_fp32<span class="op">=</span>adam_m_fp32,</span>
+<span id="cb5-209"><a href="#cb5-209" aria-hidden="true" tabindex="-1"></a>        adam_v_fp32<span class="op">=</span>adam_v_fp32,</span>
+<span id="cb5-210"><a href="#cb5-210" aria-hidden="true" tabindex="-1"></a>        grad_accum_fp32<span class="op">=</span>grad_accum_fp32,</span>
+<span id="cb5-211"><a href="#cb5-211" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb5-212"><a href="#cb5-212" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-213"><a href="#cb5-213" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-214"><a href="#cb5-214" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gb(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb5-215"><a href="#cb5-215" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""十进制 GB，硬件和原文表格常使用这个单位。"""</span></span>
+<span id="cb5-216"><a href="#cb5-216" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> __________________</span>
+<span id="cb5-217"><a href="#cb5-217" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-218"><a href="#cb5-218" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-219"><a href="#cb5-219" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gib(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb5-220"><a href="#cb5-220" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""二进制 GiB；1 GiB = 1024^3 bytes。"""</span></span>
+<span id="cb5-221"><a href="#cb5-221" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> __________________</span>
+<span id="cb5-222"><a href="#cb5-222" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-223"><a href="#cb5-223" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-224"><a href="#cb5-224" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> size <span class="kw">in</span> (<span class="dv">1_000_000_000</span>, <span class="dv">7_000_000_000</span>):</span>
+<span id="cb5-225"><a href="#cb5-225" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> fp32_accum <span class="kw">in</span> (<span class="va">False</span>, <span class="va">True</span>):</span>
+<span id="cb5-226"><a href="#cb5-226" aria-hidden="true" tabindex="-1"></a>        result <span class="op">=</span> estimate_adam_memory(size, fp32_accum)</span>
+<span id="cb5-227"><a href="#cb5-227" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(</span>
+<span id="cb5-228"><a href="#cb5-228" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"params=</span><span class="sc">{</span>size <span class="op">/</span> <span class="fl">1e9</span><span class="sc">:.0f}</span><span class="ss">B, "</span></span>
+<span id="cb5-229"><a href="#cb5-229" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"fp32_grad_accum=</span><span class="sc">{</span>fp32_accum<span class="sc">}</span><span class="ss">, "</span></span>
+<span id="cb5-230"><a href="#cb5-230" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gb(result.total)<span class="sc">:.1f}</span><span class="ss"> GB, "</span></span>
+<span id="cb5-231"><a href="#cb5-231" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gib(result.total)<span class="sc">:.1f}</span><span class="ss"> GiB"</span></span>
+<span id="cb5-232"><a href="#cb5-232" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb5-233"><a href="#cb5-233" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb5-234"><a href="#cb5-234" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-235"><a href="#cb5-235" aria-hidden="true" tabindex="-1"></a>BF16 混合精度在本课账本中可能仍是每参数 16 bytes。既然静态总量没有下降，为什么训练系统仍广泛使用它？至少说明两个收益，并指出一个不能由此推出的错误结论。</span>
+<span id="cb5-235"><a href="#cb5-235" aria-hidden="true" tabindex="-1"></a><span class="fu">## 三个问答题</span></span>
 <span id="cb5-236"><a href="#cb5-236" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-237"><a href="#cb5-237" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb5-237"><a href="#cb5-237" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb5-238"><a href="#cb5-238" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-239"><a href="#cb5-239" aria-hidden="true" tabindex="-1"></a>某模型在第一轮 forward/backward 成功，但第一次 optimizer step 后，第二轮训练 OOM。请回答：</span>
+<span id="cb5-239"><a href="#cb5-239" aria-hidden="true" tabindex="-1"></a>为什么推理一个 7B BF16 模型可能只需约 14 GB 参数显存，而使用 Adam 训练时静态状态可能达到 112 GB？请逐项说明多出来的内容。</span>
 <span id="cb5-240"><a href="#cb5-240" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-241"><a href="#cb5-241" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>哪类显存状态可能是在第一次 optimizer step 附近才完整建立？</span>
-<span id="cb5-242"><a href="#cb5-242" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>为什么"第一轮成功"不能证明后续训练一定能运行？</span>
-<span id="cb5-243"><a href="#cb5-243" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>你至少还需要测量哪两类信息，才能给出可信诊断？</span>
+<span id="cb5-241"><a href="#cb5-241" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb5-242"><a href="#cb5-242" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-243"><a href="#cb5-243" aria-hidden="true" tabindex="-1"></a>BF16 混合精度在本课账本中可能仍是每参数 16 bytes。既然静态总量没有下降，为什么训练系统仍广泛使用它？至少说明两个收益，并指出一个不能由此推出的错误结论。</span>
 <span id="cb5-244"><a href="#cb5-244" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-245"><a href="#cb5-245" aria-hidden="true" tabindex="-1"></a><span class="fu">## 检查与通过标准</span></span>
+<span id="cb5-245"><a href="#cb5-245" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
 <span id="cb5-246"><a href="#cb5-246" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-247"><a href="#cb5-247" aria-hidden="true" tabindex="-1"></a>总分 10 分：</span>
+<span id="cb5-247"><a href="#cb5-247" aria-hidden="true" tabindex="-1"></a>某模型在第一轮 forward/backward 成功，但第一次 optimizer step 后，第二轮训练 OOM。请回答：</span>
 <span id="cb5-248"><a href="#cb5-248" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-249"><a href="#cb5-249" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码正确、分量无遗漏：4 分</span>
-<span id="cb5-250"><a href="#cb5-250" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问题：每题 2 分</span>
-<span id="cb5-251"><a href="#cb5-251" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>通过线：8 分</span>
+<span id="cb5-249"><a href="#cb5-249" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>哪类显存状态可能是在第一次 optimizer step 附近才完整建立？</span>
+<span id="cb5-250"><a href="#cb5-250" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>为什么"第一轮成功"不能证明后续训练一定能运行？</span>
+<span id="cb5-251"><a href="#cb5-251" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>你至少还需要测量哪两类信息，才能给出可信诊断？</span>
 <span id="cb5-252"><a href="#cb5-252" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-253"><a href="#cb5-253" aria-hidden="true" tabindex="-1"></a>即使总分达到 8 分，以下任一关键误解仍会导致暂不通过：</span>
+<span id="cb5-253"><a href="#cb5-253" aria-hidden="true" tabindex="-1"></a><span class="fu">## 检查与通过标准</span></span>
 <span id="cb5-254"><a href="#cb5-254" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-255"><a href="#cb5-255" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>混淆 GB 和 GiB。</span>
-<span id="cb5-256"><a href="#cb5-256" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>把静态账本称为峰值显存。</span>
-<span id="cb5-257"><a href="#cb5-257" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>遗漏 master weights 或 Adam 的某个状态。</span>
-<span id="cb5-258"><a href="#cb5-258" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>根据单一配置断言某模型"绝对无法训练"。</span>
-<span id="cb5-259"><a href="#cb5-259" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-255"><a href="#cb5-255" aria-hidden="true" tabindex="-1"></a>总分 10 分：</span>
+<span id="cb5-256"><a href="#cb5-256" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-257"><a href="#cb5-257" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码正确、分量无遗漏：4 分</span>
+<span id="cb5-258"><a href="#cb5-258" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问题：每题 2 分</span>
+<span id="cb5-259"><a href="#cb5-259" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>通过线：8 分</span>
 <span id="cb5-260"><a href="#cb5-260" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-261"><a href="#cb5-261" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb5-262"><a href="#cb5-262" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb5-263"><a href="#cb5-263" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-264"><a href="#cb5-264" aria-hidden="true" tabindex="-1"></a>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</span>
-<span id="cb5-265"><a href="#cb5-265" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-268"><a href="#cb5-268" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb5-269"><a href="#cb5-269" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb5-270"><a href="#cb5-270" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
+<span id="cb5-261"><a href="#cb5-261" aria-hidden="true" tabindex="-1"></a>即使总分达到 8 分，以下任一关键误解仍会导致暂不通过：</span>
+<span id="cb5-262"><a href="#cb5-262" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-263"><a href="#cb5-263" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>混淆 GB 和 GiB。</span>
+<span id="cb5-264"><a href="#cb5-264" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>把静态账本称为峰值显存。</span>
+<span id="cb5-265"><a href="#cb5-265" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>遗漏 master weights 或 Adam 的某个状态。</span>
+<span id="cb5-266"><a href="#cb5-266" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>根据单一配置断言某模型"绝对无法训练"。</span>
+<span id="cb5-267"><a href="#cb5-267" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-268"><a href="#cb5-268" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-269"><a href="#cb5-269" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb5-270"><a href="#cb5-270" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
 <span id="cb5-271"><a href="#cb5-271" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-272"><a href="#cb5-272" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-273"><a href="#cb5-273" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span>(frozen<span class="op">=</span><span class="va">True</span>)</span>
-<span id="cb5-274"><a href="#cb5-274" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemoryBreakdown:</span>
-<span id="cb5-275"><a href="#cb5-275" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""所有字段的单位都是 byte。"""</span></span>
-<span id="cb5-276"><a href="#cb5-276" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-277"><a href="#cb5-277" aria-hidden="true" tabindex="-1"></a>    model_bf16: <span class="bu">int</span></span>
-<span id="cb5-278"><a href="#cb5-278" aria-hidden="true" tabindex="-1"></a>    grad_bf16: <span class="bu">int</span></span>
-<span id="cb5-279"><a href="#cb5-279" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32: <span class="bu">int</span></span>
-<span id="cb5-280"><a href="#cb5-280" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32: <span class="bu">int</span></span>
-<span id="cb5-281"><a href="#cb5-281" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32: <span class="bu">int</span></span>
-<span id="cb5-282"><a href="#cb5-282" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32: <span class="bu">int</span></span>
-<span id="cb5-283"><a href="#cb5-283" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-284"><a href="#cb5-284" aria-hidden="true" tabindex="-1"></a>    <span class="at">@property</span></span>
-<span id="cb5-285"><a href="#cb5-285" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> total(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
-<span id="cb5-286"><a href="#cb5-286" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 不能手写"每参数共多少 byte"；</span></span>
-<span id="cb5-287"><a href="#cb5-287" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 应从各分量求和，以便检查每一项是否被重复或遗漏。</span></span>
-<span id="cb5-288"><a href="#cb5-288" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.model_bf16 <span class="op">+</span> <span class="va">self</span>.grad_bf16 <span class="op">+</span> <span class="va">self</span>.master_weights_fp32 <span class="op">+</span> <span class="va">self</span>.adam_m_fp32 <span class="op">+</span> <span class="va">self</span>.adam_v_fp32 <span class="op">+</span> <span class="va">self</span>.grad_accum_fp32</span>
-<span id="cb5-289"><a href="#cb5-289" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-290"><a href="#cb5-290" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-291"><a href="#cb5-291" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> estimate_adam_memory(</span>
-<span id="cb5-292"><a href="#cb5-292" aria-hidden="true" tabindex="-1"></a>    num_params: <span class="bu">int</span>,</span>
-<span id="cb5-293"><a href="#cb5-293" aria-hidden="true" tabindex="-1"></a>    use_fp32_grad_accum: <span class="bu">bool</span>,</span>
-<span id="cb5-294"><a href="#cb5-294" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> MemoryBreakdown:</span>
-<span id="cb5-295"><a href="#cb5-295" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
-<span id="cb5-296"><a href="#cb5-296" aria-hidden="true" tabindex="-1"></a><span class="co">    估算 BF16 混合精度训练的静态显存。</span></span>
+<span id="cb5-272"><a href="#cb5-272" aria-hidden="true" tabindex="-1"></a>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</span>
+<span id="cb5-273"><a href="#cb5-273" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-276"><a href="#cb5-276" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb5-277"><a href="#cb5-277" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb5-278"><a href="#cb5-278" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
+<span id="cb5-279"><a href="#cb5-279" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-280"><a href="#cb5-280" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-281"><a href="#cb5-281" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span>(frozen<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-282"><a href="#cb5-282" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemoryBreakdown:</span>
+<span id="cb5-283"><a href="#cb5-283" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""所有字段的单位都是 byte。"""</span></span>
+<span id="cb5-284"><a href="#cb5-284" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-285"><a href="#cb5-285" aria-hidden="true" tabindex="-1"></a>    model_bf16: <span class="bu">int</span></span>
+<span id="cb5-286"><a href="#cb5-286" aria-hidden="true" tabindex="-1"></a>    grad_bf16: <span class="bu">int</span></span>
+<span id="cb5-287"><a href="#cb5-287" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32: <span class="bu">int</span></span>
+<span id="cb5-288"><a href="#cb5-288" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32: <span class="bu">int</span></span>
+<span id="cb5-289"><a href="#cb5-289" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32: <span class="bu">int</span></span>
+<span id="cb5-290"><a href="#cb5-290" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32: <span class="bu">int</span></span>
+<span id="cb5-291"><a href="#cb5-291" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-292"><a href="#cb5-292" aria-hidden="true" tabindex="-1"></a>    <span class="at">@property</span></span>
+<span id="cb5-293"><a href="#cb5-293" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> total(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
+<span id="cb5-294"><a href="#cb5-294" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 不能手写"每参数共多少 byte"；</span></span>
+<span id="cb5-295"><a href="#cb5-295" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 应从各分量求和，以便检查每一项是否被重复或遗漏。</span></span>
+<span id="cb5-296"><a href="#cb5-296" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.model_bf16 <span class="op">+</span> <span class="va">self</span>.grad_bf16 <span class="op">+</span> <span class="va">self</span>.master_weights_fp32 <span class="op">+</span> <span class="va">self</span>.adam_m_fp32 <span class="op">+</span> <span class="va">self</span>.adam_v_fp32 <span class="op">+</span> <span class="va">self</span>.grad_accum_fp32</span>
 <span id="cb5-297"><a href="#cb5-297" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-298"><a href="#cb5-298" aria-hidden="true" tabindex="-1"></a><span class="co">    假设：</span></span>
-<span id="cb5-299"><a href="#cb5-299" aria-hidden="true" tabindex="-1"></a><span class="co">    1. 前向、反向使用 BF16 参数和梯度。</span></span>
-<span id="cb5-300"><a href="#cb5-300" aria-hidden="true" tabindex="-1"></a><span class="co">    2. 保留 FP32 master weights。</span></span>
-<span id="cb5-301"><a href="#cb5-301" aria-hidden="true" tabindex="-1"></a><span class="co">    3. Adam 的一阶、二阶状态均为 FP32。</span></span>
-<span id="cb5-302"><a href="#cb5-302" aria-hidden="true" tabindex="-1"></a><span class="co">    4. 可选一个额外的 FP32 梯度累积缓冲区。</span></span>
-<span id="cb5-303"><a href="#cb5-303" aria-hidden="true" tabindex="-1"></a><span class="co">    5. 不包含激活、临时 buffer、CUDA context 和碎片。</span></span>
-<span id="cb5-304"><a href="#cb5-304" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
-<span id="cb5-305"><a href="#cb5-305" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_params <span class="op">&lt;=</span> <span class="dv">0</span>:</span>
-<span id="cb5-306"><a href="#cb5-306" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"num_params must be positive"</span>)</span>
-<span id="cb5-307"><a href="#cb5-307" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-308"><a href="#cb5-308" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 BF16 数值占多少 byte？</span></span>
-<span id="cb5-309"><a href="#cb5-309" aria-hidden="true" tabindex="-1"></a>    bf16_bytes <span class="op">=</span> <span class="dv">2</span></span>
-<span id="cb5-310"><a href="#cb5-310" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-311"><a href="#cb5-311" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 FP32 数值占多少 byte？</span></span>
-<span id="cb5-312"><a href="#cb5-312" aria-hidden="true" tabindex="-1"></a>    fp32_bytes <span class="op">=</span> <span class="dv">4</span></span>
-<span id="cb5-313"><a href="#cb5-313" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-314"><a href="#cb5-314" aria-hidden="true" tabindex="-1"></a>    model_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
-<span id="cb5-315"><a href="#cb5-315" aria-hidden="true" tabindex="-1"></a>    grad_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
-<span id="cb5-316"><a href="#cb5-316" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-317"><a href="#cb5-317" aria-hidden="true" tabindex="-1"></a>    <span class="co"># master weights 是用于稳定更新的 FP32 参数副本。</span></span>
-<span id="cb5-318"><a href="#cb5-318" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
-<span id="cb5-319"><a href="#cb5-319" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-320"><a href="#cb5-320" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Adam 为每个参数分别维护一阶矩和二阶矩。</span></span>
-<span id="cb5-321"><a href="#cb5-321" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
-<span id="cb5-322"><a href="#cb5-322" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
-<span id="cb5-323"><a href="#cb5-323" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-324"><a href="#cb5-324" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 注意：这是额外缓冲区，不能拿它替代 BF16 梯度。</span></span>
-<span id="cb5-325"><a href="#cb5-325" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32 <span class="op">=</span> (</span>
-<span id="cb5-326"><a href="#cb5-326" aria-hidden="true" tabindex="-1"></a>        num_params <span class="op">*</span> fp32_bytes <span class="cf">if</span> use_fp32_grad_accum <span class="cf">else</span> <span class="dv">0</span></span>
-<span id="cb5-327"><a href="#cb5-327" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb5-328"><a href="#cb5-328" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-329"><a href="#cb5-329" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> MemoryBreakdown(</span>
-<span id="cb5-330"><a href="#cb5-330" aria-hidden="true" tabindex="-1"></a>        model_bf16<span class="op">=</span>model_bf16,</span>
-<span id="cb5-331"><a href="#cb5-331" aria-hidden="true" tabindex="-1"></a>        grad_bf16<span class="op">=</span>grad_bf16,</span>
-<span id="cb5-332"><a href="#cb5-332" aria-hidden="true" tabindex="-1"></a>        master_weights_fp32<span class="op">=</span>master_weights_fp32,</span>
-<span id="cb5-333"><a href="#cb5-333" aria-hidden="true" tabindex="-1"></a>        adam_m_fp32<span class="op">=</span>adam_m_fp32,</span>
-<span id="cb5-334"><a href="#cb5-334" aria-hidden="true" tabindex="-1"></a>        adam_v_fp32<span class="op">=</span>adam_v_fp32,</span>
-<span id="cb5-335"><a href="#cb5-335" aria-hidden="true" tabindex="-1"></a>        grad_accum_fp32<span class="op">=</span>grad_accum_fp32,</span>
-<span id="cb5-336"><a href="#cb5-336" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb5-337"><a href="#cb5-337" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-338"><a href="#cb5-338" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-339"><a href="#cb5-339" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gb(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
-<span id="cb5-340"><a href="#cb5-340" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""十进制 GB，硬件和原文表格常使用这个单位。"""</span></span>
-<span id="cb5-341"><a href="#cb5-341" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="fl">1e9</span></span>
-<span id="cb5-342"><a href="#cb5-342" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-343"><a href="#cb5-343" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-344"><a href="#cb5-344" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gib(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
-<span id="cb5-345"><a href="#cb5-345" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""二进制 GiB；1 GiB = 1024^3 bytes。"""</span></span>
-<span id="cb5-346"><a href="#cb5-346" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="dv">1024</span> <span class="op">**</span> <span class="dv">3</span></span>
-<span id="cb5-347"><a href="#cb5-347" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-348"><a href="#cb5-348" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-349"><a href="#cb5-349" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> size <span class="kw">in</span> (<span class="dv">1_000_000_000</span>, <span class="dv">7_000_000_000</span>):</span>
-<span id="cb5-350"><a href="#cb5-350" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> fp32_accum <span class="kw">in</span> (<span class="va">False</span>, <span class="va">True</span>):</span>
-<span id="cb5-351"><a href="#cb5-351" aria-hidden="true" tabindex="-1"></a>        result <span class="op">=</span> estimate_adam_memory(size, fp32_accum)</span>
-<span id="cb5-352"><a href="#cb5-352" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(</span>
-<span id="cb5-353"><a href="#cb5-353" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"params=</span><span class="sc">{</span>size <span class="op">/</span> <span class="fl">1e9</span><span class="sc">:.0f}</span><span class="ss">B, "</span></span>
-<span id="cb5-354"><a href="#cb5-354" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"fp32_grad_accum=</span><span class="sc">{</span>fp32_accum<span class="sc">}</span><span class="ss">, "</span></span>
-<span id="cb5-355"><a href="#cb5-355" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gb(result.total)<span class="sc">:.1f}</span><span class="ss"> GB, "</span></span>
-<span id="cb5-356"><a href="#cb5-356" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gib(result.total)<span class="sc">:.1f}</span><span class="ss"> GiB"</span></span>
-<span id="cb5-357"><a href="#cb5-357" aria-hidden="true" tabindex="-1"></a>        )</span>
-<span id="cb5-358"><a href="#cb5-358" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-359"><a href="#cb5-359" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-360"><a href="#cb5-360" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-361"><a href="#cb5-361" aria-hidden="true" tabindex="-1"></a><span class="fu">## 补全后的代码</span></span>
-<span id="cb5-362"><a href="#cb5-362" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-363"><a href="#cb5-363" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
-<span id="cb5-364"><a href="#cb5-364" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
-<span id="cb5-365"><a href="#cb5-365" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-366"><a href="#cb5-366" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-367"><a href="#cb5-367" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span>(frozen<span class="op">=</span><span class="va">True</span>)</span>
-<span id="cb5-368"><a href="#cb5-368" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemoryBreakdown:</span>
-<span id="cb5-369"><a href="#cb5-369" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""所有字段的单位都是 byte。"""</span></span>
+<span id="cb5-298"><a href="#cb5-298" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-299"><a href="#cb5-299" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> estimate_adam_memory(</span>
+<span id="cb5-300"><a href="#cb5-300" aria-hidden="true" tabindex="-1"></a>    num_params: <span class="bu">int</span>,</span>
+<span id="cb5-301"><a href="#cb5-301" aria-hidden="true" tabindex="-1"></a>    use_fp32_grad_accum: <span class="bu">bool</span>,</span>
+<span id="cb5-302"><a href="#cb5-302" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> MemoryBreakdown:</span>
+<span id="cb5-303"><a href="#cb5-303" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""</span></span>
+<span id="cb5-304"><a href="#cb5-304" aria-hidden="true" tabindex="-1"></a><span class="co">    估算 BF16 混合精度训练的静态显存。</span></span>
+<span id="cb5-305"><a href="#cb5-305" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-306"><a href="#cb5-306" aria-hidden="true" tabindex="-1"></a><span class="co">    假设：</span></span>
+<span id="cb5-307"><a href="#cb5-307" aria-hidden="true" tabindex="-1"></a><span class="co">    1. 前向、反向使用 BF16 参数和梯度。</span></span>
+<span id="cb5-308"><a href="#cb5-308" aria-hidden="true" tabindex="-1"></a><span class="co">    2. 保留 FP32 master weights。</span></span>
+<span id="cb5-309"><a href="#cb5-309" aria-hidden="true" tabindex="-1"></a><span class="co">    3. Adam 的一阶、二阶状态均为 FP32。</span></span>
+<span id="cb5-310"><a href="#cb5-310" aria-hidden="true" tabindex="-1"></a><span class="co">    4. 可选一个额外的 FP32 梯度累积缓冲区。</span></span>
+<span id="cb5-311"><a href="#cb5-311" aria-hidden="true" tabindex="-1"></a><span class="co">    5. 不包含激活、临时 buffer、CUDA context 和碎片。</span></span>
+<span id="cb5-312"><a href="#cb5-312" aria-hidden="true" tabindex="-1"></a><span class="co">    """</span></span>
+<span id="cb5-313"><a href="#cb5-313" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_params <span class="op">&lt;=</span> <span class="dv">0</span>:</span>
+<span id="cb5-314"><a href="#cb5-314" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"num_params must be positive"</span>)</span>
+<span id="cb5-315"><a href="#cb5-315" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-316"><a href="#cb5-316" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 BF16 数值占多少 byte？</span></span>
+<span id="cb5-317"><a href="#cb5-317" aria-hidden="true" tabindex="-1"></a>    bf16_bytes <span class="op">=</span> <span class="dv">2</span></span>
+<span id="cb5-318"><a href="#cb5-318" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-319"><a href="#cb5-319" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每个 FP32 数值占多少 byte？</span></span>
+<span id="cb5-320"><a href="#cb5-320" aria-hidden="true" tabindex="-1"></a>    fp32_bytes <span class="op">=</span> <span class="dv">4</span></span>
+<span id="cb5-321"><a href="#cb5-321" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-322"><a href="#cb5-322" aria-hidden="true" tabindex="-1"></a>    model_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
+<span id="cb5-323"><a href="#cb5-323" aria-hidden="true" tabindex="-1"></a>    grad_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
+<span id="cb5-324"><a href="#cb5-324" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-325"><a href="#cb5-325" aria-hidden="true" tabindex="-1"></a>    <span class="co"># master weights 是用于稳定更新的 FP32 参数副本。</span></span>
+<span id="cb5-326"><a href="#cb5-326" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
+<span id="cb5-327"><a href="#cb5-327" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-328"><a href="#cb5-328" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Adam 为每个参数分别维护一阶矩和二阶矩。</span></span>
+<span id="cb5-329"><a href="#cb5-329" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
+<span id="cb5-330"><a href="#cb5-330" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
+<span id="cb5-331"><a href="#cb5-331" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-332"><a href="#cb5-332" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 注意：这是额外缓冲区，不能拿它替代 BF16 梯度。</span></span>
+<span id="cb5-333"><a href="#cb5-333" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32 <span class="op">=</span> (</span>
+<span id="cb5-334"><a href="#cb5-334" aria-hidden="true" tabindex="-1"></a>        num_params <span class="op">*</span> fp32_bytes <span class="cf">if</span> use_fp32_grad_accum <span class="cf">else</span> <span class="dv">0</span></span>
+<span id="cb5-335"><a href="#cb5-335" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb5-336"><a href="#cb5-336" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-337"><a href="#cb5-337" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> MemoryBreakdown(</span>
+<span id="cb5-338"><a href="#cb5-338" aria-hidden="true" tabindex="-1"></a>        model_bf16<span class="op">=</span>model_bf16,</span>
+<span id="cb5-339"><a href="#cb5-339" aria-hidden="true" tabindex="-1"></a>        grad_bf16<span class="op">=</span>grad_bf16,</span>
+<span id="cb5-340"><a href="#cb5-340" aria-hidden="true" tabindex="-1"></a>        master_weights_fp32<span class="op">=</span>master_weights_fp32,</span>
+<span id="cb5-341"><a href="#cb5-341" aria-hidden="true" tabindex="-1"></a>        adam_m_fp32<span class="op">=</span>adam_m_fp32,</span>
+<span id="cb5-342"><a href="#cb5-342" aria-hidden="true" tabindex="-1"></a>        adam_v_fp32<span class="op">=</span>adam_v_fp32,</span>
+<span id="cb5-343"><a href="#cb5-343" aria-hidden="true" tabindex="-1"></a>        grad_accum_fp32<span class="op">=</span>grad_accum_fp32,</span>
+<span id="cb5-344"><a href="#cb5-344" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb5-345"><a href="#cb5-345" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-346"><a href="#cb5-346" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-347"><a href="#cb5-347" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gb(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb5-348"><a href="#cb5-348" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""十进制 GB，硬件和原文表格常使用这个单位。"""</span></span>
+<span id="cb5-349"><a href="#cb5-349" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="fl">1e9</span></span>
+<span id="cb5-350"><a href="#cb5-350" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-351"><a href="#cb5-351" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-352"><a href="#cb5-352" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gib(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb5-353"><a href="#cb5-353" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""二进制 GiB；1 GiB = 1024^3 bytes。"""</span></span>
+<span id="cb5-354"><a href="#cb5-354" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="dv">1024</span> <span class="op">**</span> <span class="dv">3</span></span>
+<span id="cb5-355"><a href="#cb5-355" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-356"><a href="#cb5-356" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-357"><a href="#cb5-357" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> size <span class="kw">in</span> (<span class="dv">1_000_000_000</span>, <span class="dv">7_000_000_000</span>):</span>
+<span id="cb5-358"><a href="#cb5-358" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> fp32_accum <span class="kw">in</span> (<span class="va">False</span>, <span class="va">True</span>):</span>
+<span id="cb5-359"><a href="#cb5-359" aria-hidden="true" tabindex="-1"></a>        result <span class="op">=</span> estimate_adam_memory(size, fp32_accum)</span>
+<span id="cb5-360"><a href="#cb5-360" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(</span>
+<span id="cb5-361"><a href="#cb5-361" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"params=</span><span class="sc">{</span>size <span class="op">/</span> <span class="fl">1e9</span><span class="sc">:.0f}</span><span class="ss">B, "</span></span>
+<span id="cb5-362"><a href="#cb5-362" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"fp32_grad_accum=</span><span class="sc">{</span>fp32_accum<span class="sc">}</span><span class="ss">, "</span></span>
+<span id="cb5-363"><a href="#cb5-363" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gb(result.total)<span class="sc">:.1f}</span><span class="ss"> GB, "</span></span>
+<span id="cb5-364"><a href="#cb5-364" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f"</span><span class="sc">{</span>bytes_to_gib(result.total)<span class="sc">:.1f}</span><span class="ss"> GiB"</span></span>
+<span id="cb5-365"><a href="#cb5-365" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb5-366"><a href="#cb5-366" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-367"><a href="#cb5-367" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-368"><a href="#cb5-368" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-369"><a href="#cb5-369" aria-hidden="true" tabindex="-1"></a><span class="fu">## 补全后的代码</span></span>
 <span id="cb5-370"><a href="#cb5-370" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-371"><a href="#cb5-371" aria-hidden="true" tabindex="-1"></a>    model_bf16: <span class="bu">int</span></span>
-<span id="cb5-372"><a href="#cb5-372" aria-hidden="true" tabindex="-1"></a>    grad_bf16: <span class="bu">int</span></span>
-<span id="cb5-373"><a href="#cb5-373" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32: <span class="bu">int</span></span>
-<span id="cb5-374"><a href="#cb5-374" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32: <span class="bu">int</span></span>
-<span id="cb5-375"><a href="#cb5-375" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32: <span class="bu">int</span></span>
-<span id="cb5-376"><a href="#cb5-376" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32: <span class="bu">int</span></span>
-<span id="cb5-377"><a href="#cb5-377" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-378"><a href="#cb5-378" aria-hidden="true" tabindex="-1"></a>    <span class="at">@property</span></span>
-<span id="cb5-379"><a href="#cb5-379" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> total(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
-<span id="cb5-380"><a href="#cb5-380" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 从各分量求和，避免手写常数导致某项被重复或遗漏</span></span>
-<span id="cb5-381"><a href="#cb5-381" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> (</span>
-<span id="cb5-382"><a href="#cb5-382" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.model_bf16</span>
-<span id="cb5-383"><a href="#cb5-383" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.grad_bf16</span>
-<span id="cb5-384"><a href="#cb5-384" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.master_weights_fp32</span>
-<span id="cb5-385"><a href="#cb5-385" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.adam_m_fp32</span>
-<span id="cb5-386"><a href="#cb5-386" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.adam_v_fp32</span>
-<span id="cb5-387"><a href="#cb5-387" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.grad_accum_fp32</span>
-<span id="cb5-388"><a href="#cb5-388" aria-hidden="true" tabindex="-1"></a>        )</span>
-<span id="cb5-389"><a href="#cb5-389" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-390"><a href="#cb5-390" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-391"><a href="#cb5-391" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> estimate_adam_memory(num_params, use_fp32_grad_accum):</span>
-<span id="cb5-392"><a href="#cb5-392" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_params <span class="op">&lt;=</span> <span class="dv">0</span>:</span>
-<span id="cb5-393"><a href="#cb5-393" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"num_params must be positive"</span>)</span>
-<span id="cb5-394"><a href="#cb5-394" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-395"><a href="#cb5-395" aria-hidden="true" tabindex="-1"></a>    bf16_bytes <span class="op">=</span> <span class="dv">2</span></span>
-<span id="cb5-396"><a href="#cb5-396" aria-hidden="true" tabindex="-1"></a>    fp32_bytes <span class="op">=</span> <span class="dv">4</span></span>
+<span id="cb5-371"><a href="#cb5-371" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
+<span id="cb5-372"><a href="#cb5-372" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
+<span id="cb5-373"><a href="#cb5-373" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-374"><a href="#cb5-374" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-375"><a href="#cb5-375" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span>(frozen<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb5-376"><a href="#cb5-376" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemoryBreakdown:</span>
+<span id="cb5-377"><a href="#cb5-377" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""所有字段的单位都是 byte。"""</span></span>
+<span id="cb5-378"><a href="#cb5-378" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-379"><a href="#cb5-379" aria-hidden="true" tabindex="-1"></a>    model_bf16: <span class="bu">int</span></span>
+<span id="cb5-380"><a href="#cb5-380" aria-hidden="true" tabindex="-1"></a>    grad_bf16: <span class="bu">int</span></span>
+<span id="cb5-381"><a href="#cb5-381" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32: <span class="bu">int</span></span>
+<span id="cb5-382"><a href="#cb5-382" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32: <span class="bu">int</span></span>
+<span id="cb5-383"><a href="#cb5-383" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32: <span class="bu">int</span></span>
+<span id="cb5-384"><a href="#cb5-384" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32: <span class="bu">int</span></span>
+<span id="cb5-385"><a href="#cb5-385" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-386"><a href="#cb5-386" aria-hidden="true" tabindex="-1"></a>    <span class="at">@property</span></span>
+<span id="cb5-387"><a href="#cb5-387" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> total(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
+<span id="cb5-388"><a href="#cb5-388" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 从各分量求和，避免手写常数导致某项被重复或遗漏</span></span>
+<span id="cb5-389"><a href="#cb5-389" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> (</span>
+<span id="cb5-390"><a href="#cb5-390" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.model_bf16</span>
+<span id="cb5-391"><a href="#cb5-391" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.grad_bf16</span>
+<span id="cb5-392"><a href="#cb5-392" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.master_weights_fp32</span>
+<span id="cb5-393"><a href="#cb5-393" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.adam_m_fp32</span>
+<span id="cb5-394"><a href="#cb5-394" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.adam_v_fp32</span>
+<span id="cb5-395"><a href="#cb5-395" aria-hidden="true" tabindex="-1"></a>            <span class="op">+</span> <span class="va">self</span>.grad_accum_fp32</span>
+<span id="cb5-396"><a href="#cb5-396" aria-hidden="true" tabindex="-1"></a>        )</span>
 <span id="cb5-397"><a href="#cb5-397" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-398"><a href="#cb5-398" aria-hidden="true" tabindex="-1"></a>    model_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
-<span id="cb5-399"><a href="#cb5-399" aria-hidden="true" tabindex="-1"></a>    grad_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
-<span id="cb5-400"><a href="#cb5-400" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
-<span id="cb5-401"><a href="#cb5-401" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
-<span id="cb5-402"><a href="#cb5-402" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
-<span id="cb5-403"><a href="#cb5-403" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes <span class="cf">if</span> use_fp32_grad_accum <span class="cf">else</span> <span class="dv">0</span></span>
-<span id="cb5-404"><a href="#cb5-404" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-405"><a href="#cb5-405" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> MemoryBreakdown(</span>
-<span id="cb5-406"><a href="#cb5-406" aria-hidden="true" tabindex="-1"></a>        model_bf16<span class="op">=</span>model_bf16,</span>
-<span id="cb5-407"><a href="#cb5-407" aria-hidden="true" tabindex="-1"></a>        grad_bf16<span class="op">=</span>grad_bf16,</span>
-<span id="cb5-408"><a href="#cb5-408" aria-hidden="true" tabindex="-1"></a>        master_weights_fp32<span class="op">=</span>master_weights_fp32,</span>
-<span id="cb5-409"><a href="#cb5-409" aria-hidden="true" tabindex="-1"></a>        adam_m_fp32<span class="op">=</span>adam_m_fp32,</span>
-<span id="cb5-410"><a href="#cb5-410" aria-hidden="true" tabindex="-1"></a>        adam_v_fp32<span class="op">=</span>adam_v_fp32,</span>
-<span id="cb5-411"><a href="#cb5-411" aria-hidden="true" tabindex="-1"></a>        grad_accum_fp32<span class="op">=</span>grad_accum_fp32,</span>
-<span id="cb5-412"><a href="#cb5-412" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb5-413"><a href="#cb5-413" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-414"><a href="#cb5-414" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-415"><a href="#cb5-415" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gb(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
-<span id="cb5-416"><a href="#cb5-416" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="fl">1e9</span></span>
-<span id="cb5-417"><a href="#cb5-417" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-418"><a href="#cb5-418" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-419"><a href="#cb5-419" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gib(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
-<span id="cb5-420"><a href="#cb5-420" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="dv">1024</span> <span class="op">**</span> <span class="dv">3</span></span>
-<span id="cb5-421"><a href="#cb5-421" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-398"><a href="#cb5-398" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-399"><a href="#cb5-399" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> estimate_adam_memory(num_params, use_fp32_grad_accum):</span>
+<span id="cb5-400"><a href="#cb5-400" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_params <span class="op">&lt;=</span> <span class="dv">0</span>:</span>
+<span id="cb5-401"><a href="#cb5-401" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"num_params must be positive"</span>)</span>
+<span id="cb5-402"><a href="#cb5-402" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-403"><a href="#cb5-403" aria-hidden="true" tabindex="-1"></a>    bf16_bytes <span class="op">=</span> <span class="dv">2</span></span>
+<span id="cb5-404"><a href="#cb5-404" aria-hidden="true" tabindex="-1"></a>    fp32_bytes <span class="op">=</span> <span class="dv">4</span></span>
+<span id="cb5-405"><a href="#cb5-405" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-406"><a href="#cb5-406" aria-hidden="true" tabindex="-1"></a>    model_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
+<span id="cb5-407"><a href="#cb5-407" aria-hidden="true" tabindex="-1"></a>    grad_bf16 <span class="op">=</span> num_params <span class="op">*</span> bf16_bytes</span>
+<span id="cb5-408"><a href="#cb5-408" aria-hidden="true" tabindex="-1"></a>    master_weights_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
+<span id="cb5-409"><a href="#cb5-409" aria-hidden="true" tabindex="-1"></a>    adam_m_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
+<span id="cb5-410"><a href="#cb5-410" aria-hidden="true" tabindex="-1"></a>    adam_v_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes</span>
+<span id="cb5-411"><a href="#cb5-411" aria-hidden="true" tabindex="-1"></a>    grad_accum_fp32 <span class="op">=</span> num_params <span class="op">*</span> fp32_bytes <span class="cf">if</span> use_fp32_grad_accum <span class="cf">else</span> <span class="dv">0</span></span>
+<span id="cb5-412"><a href="#cb5-412" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-413"><a href="#cb5-413" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> MemoryBreakdown(</span>
+<span id="cb5-414"><a href="#cb5-414" aria-hidden="true" tabindex="-1"></a>        model_bf16<span class="op">=</span>model_bf16,</span>
+<span id="cb5-415"><a href="#cb5-415" aria-hidden="true" tabindex="-1"></a>        grad_bf16<span class="op">=</span>grad_bf16,</span>
+<span id="cb5-416"><a href="#cb5-416" aria-hidden="true" tabindex="-1"></a>        master_weights_fp32<span class="op">=</span>master_weights_fp32,</span>
+<span id="cb5-417"><a href="#cb5-417" aria-hidden="true" tabindex="-1"></a>        adam_m_fp32<span class="op">=</span>adam_m_fp32,</span>
+<span id="cb5-418"><a href="#cb5-418" aria-hidden="true" tabindex="-1"></a>        adam_v_fp32<span class="op">=</span>adam_v_fp32,</span>
+<span id="cb5-419"><a href="#cb5-419" aria-hidden="true" tabindex="-1"></a>        grad_accum_fp32<span class="op">=</span>grad_accum_fp32,</span>
+<span id="cb5-420"><a href="#cb5-420" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb5-421"><a href="#cb5-421" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-422"><a href="#cb5-422" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-423"><a href="#cb5-423" aria-hidden="true" tabindex="-1"></a><span class="fu">## 程序输出</span></span>
-<span id="cb5-424"><a href="#cb5-424" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-425"><a href="#cb5-425" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
-<span id="cb5-426"><a href="#cb5-426" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">1</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">False</span>, <span class="fl">16.0</span> GB, <span class="fl">14.9</span> GiB</span>
-<span id="cb5-427"><a href="#cb5-427" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">1</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">True</span>, <span class="fl">20.0</span> GB, <span class="fl">18.6</span> GiB</span>
-<span id="cb5-428"><a href="#cb5-428" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">7</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">False</span>, <span class="fl">112.0</span> GB, <span class="fl">104.3</span> GiB</span>
-<span id="cb5-429"><a href="#cb5-429" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">7</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">True</span>, <span class="fl">140.0</span> GB, <span class="fl">130.4</span> GiB</span>
-<span id="cb5-430"><a href="#cb5-430" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-431"><a href="#cb5-431" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-432"><a href="#cb5-432" aria-hidden="true" tabindex="-1"></a><span class="fu">## Q1</span></span>
-<span id="cb5-433"><a href="#cb5-433" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-434"><a href="#cb5-434" aria-hidden="true" tabindex="-1"></a>推理只需 BF16 参数：7B × 2 B = 14 GB。训练（BF16 混合精度 + Adam，无 FP32 梯度累积）多出：</span>
-<span id="cb5-435"><a href="#cb5-435" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-436"><a href="#cb5-436" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>BF16 梯度：14 GB（前向/反向都要它）；</span>
-<span id="cb5-437"><a href="#cb5-437" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>FP32 master weights：28 GB（低精度权重更新会丢精度/被 ulp 吸收，需要 FP32 副本记账）；</span>
-<span id="cb5-438"><a href="#cb5-438" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Adam 一阶矩 m：28 GB；</span>
-<span id="cb5-439"><a href="#cb5-439" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Adam 二阶矩 v：28 GB。</span>
-<span id="cb5-440"><a href="#cb5-440" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-441"><a href="#cb5-441" aria-hidden="true" tabindex="-1"></a>合计 14+14+28+28+28 = 112 GB。若再加 FP32 梯度累积缓冲区则为 140 GB。此账本不含激活与运行时开销。</span>
-<span id="cb5-442"><a href="#cb5-442" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-443"><a href="#cb5-443" aria-hidden="true" tabindex="-1"></a><span class="fu">## Q2</span></span>
-<span id="cb5-444"><a href="#cb5-444" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-445"><a href="#cb5-445" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>收益 1：前向/反向用低精度（BF16）计算路径，GPU 吞吐更高（Tensor Core 等）；</span>
-<span id="cb5-446"><a href="#cb5-446" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>收益 2：激活每个元素只占 2 字节（FP32 的一半），大幅降低激活显存——长序列下激活是最大头；</span>
-<span id="cb5-447"><a href="#cb5-447" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>收益 3（可选）：低精度访存量减半，缓解 memory-bound。</span>
-<span id="cb5-448"><a href="#cb5-448" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>不能推出的错误结论：不能因"BF16 混合精度"就断言训练峰值显存下降或一定放得进单卡——master weights、Adam 状态（甚至 FP32 梯度累积）加起来仍是 16–20 N bytes；激活以外的静态账本不变甚至增加。</span>
-<span id="cb5-449"><a href="#cb5-449" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-450"><a href="#cb5-450" aria-hidden="true" tabindex="-1"></a><span class="fu">## Q3</span></span>
-<span id="cb5-451"><a href="#cb5-451" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-452"><a href="#cb5-452" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>最可能是 Adam 的优化器状态（m、v，以及 master weights 的首次完整建立）——第一轮 optimizer step 前它们要么未分配、要么尚未占据显存；第一轮的 profile 与后续不同还有 caching allocator 预热的原因。</span>
-<span id="cb5-453"><a href="#cb5-453" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>"第一轮成功"只证明该时刻的显存占用 &lt; 上限；显存是动态的（激活/梯度/优化器状态在不同阶段交替），峰值可能出现在 step 2 及以后（优化器状态常驻 + 缓存碎片累积）。</span>
-<span id="cb5-454"><a href="#cb5-454" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>至少测量：a) 每轮峰值显存（torch.cuda.max_memory_allocated 与 reserved）；b) 内存 profile 曲线（哪些阶段、哪类张量占用）。必要时再看分配器碎片与 CUDA context。</span>
-<span id="cb5-455"><a href="#cb5-455" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-456"><a href="#cb5-456" aria-hidden="true" tabindex="-1"></a><span class="fu">## 通过要点</span></span>
+<span id="cb5-423"><a href="#cb5-423" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gb(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb5-424"><a href="#cb5-424" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="fl">1e9</span></span>
+<span id="cb5-425"><a href="#cb5-425" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-426"><a href="#cb5-426" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-427"><a href="#cb5-427" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> bytes_to_gib(num_bytes: <span class="bu">int</span>) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb5-428"><a href="#cb5-428" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_bytes <span class="op">/</span> <span class="dv">1024</span> <span class="op">**</span> <span class="dv">3</span></span>
+<span id="cb5-429"><a href="#cb5-429" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-430"><a href="#cb5-430" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-431"><a href="#cb5-431" aria-hidden="true" tabindex="-1"></a><span class="fu">## 程序输出</span></span>
+<span id="cb5-432"><a href="#cb5-432" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-433"><a href="#cb5-433" aria-hidden="true" tabindex="-1"></a><span class="in">```python</span></span>
+<span id="cb5-434"><a href="#cb5-434" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">1</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">False</span>, <span class="fl">16.0</span> GB, <span class="fl">14.9</span> GiB</span>
+<span id="cb5-435"><a href="#cb5-435" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">1</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">True</span>, <span class="fl">20.0</span> GB, <span class="fl">18.6</span> GiB</span>
+<span id="cb5-436"><a href="#cb5-436" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">7</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">False</span>, <span class="fl">112.0</span> GB, <span class="fl">104.3</span> GiB</span>
+<span id="cb5-437"><a href="#cb5-437" aria-hidden="true" tabindex="-1"></a>params<span class="op">=</span><span class="dv">7</span><span class="er">B</span>, fp32_grad_accum<span class="op">=</span><span class="va">True</span>, <span class="fl">140.0</span> GB, <span class="fl">130.4</span> GiB</span>
+<span id="cb5-438"><a href="#cb5-438" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-439"><a href="#cb5-439" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-440"><a href="#cb5-440" aria-hidden="true" tabindex="-1"></a><span class="fu">## Q1</span></span>
+<span id="cb5-441"><a href="#cb5-441" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-442"><a href="#cb5-442" aria-hidden="true" tabindex="-1"></a>推理只需 BF16 参数：7B × 2 B = 14 GB。训练（BF16 混合精度 + Adam，无 FP32 梯度累积）多出：</span>
+<span id="cb5-443"><a href="#cb5-443" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-444"><a href="#cb5-444" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>BF16 梯度：14 GB（前向/反向都要它）；</span>
+<span id="cb5-445"><a href="#cb5-445" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>FP32 master weights：28 GB（低精度权重更新会丢精度/被 ulp 吸收，需要 FP32 副本记账）；</span>
+<span id="cb5-446"><a href="#cb5-446" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Adam 一阶矩 m：28 GB；</span>
+<span id="cb5-447"><a href="#cb5-447" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Adam 二阶矩 v：28 GB。</span>
+<span id="cb5-448"><a href="#cb5-448" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-449"><a href="#cb5-449" aria-hidden="true" tabindex="-1"></a>合计 14+14+28+28+28 = 112 GB。若再加 FP32 梯度累积缓冲区则为 140 GB。此账本不含激活与运行时开销。</span>
+<span id="cb5-450"><a href="#cb5-450" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-451"><a href="#cb5-451" aria-hidden="true" tabindex="-1"></a><span class="fu">## Q2</span></span>
+<span id="cb5-452"><a href="#cb5-452" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-453"><a href="#cb5-453" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>收益 1：前向/反向用低精度（BF16）计算路径，GPU 吞吐更高（Tensor Core 等）；</span>
+<span id="cb5-454"><a href="#cb5-454" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>收益 2：激活每个元素只占 2 字节（FP32 的一半），大幅降低激活显存——长序列下激活是最大头；</span>
+<span id="cb5-455"><a href="#cb5-455" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>收益 3（可选）：低精度访存量减半，缓解 memory-bound。</span>
+<span id="cb5-456"><a href="#cb5-456" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>不能推出的错误结论：不能因"BF16 混合精度"就断言训练峰值显存下降或一定放得进单卡——master weights、Adam 状态（甚至 FP32 梯度累积）加起来仍是 16–20 N bytes；激活以外的静态账本不变甚至增加。</span>
 <span id="cb5-457"><a href="#cb5-457" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-458"><a href="#cb5-458" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>GB（1e9）与 GiB（1024³）分开处理；112 GB ≈ 104.3 GiB。</span>
-<span id="cb5-459"><a href="#cb5-459" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>静态账本 ≠ 峰值显存（不含激活/CUDA context/临时 buffer/碎片/通信缓冲区）。</span>
-<span id="cb5-460"><a href="#cb5-460" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>结论限定前提："标准、未切分、未卸载的配置放不进 80 GB 卡"；不能说"7B 绝对无法训练"（ZeRO/TP/量化/卸载/冻结都可改变前提）。</span>
-<span id="cb5-461"><a href="#cb5-461" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-462"><a href="#cb5-462" aria-hidden="true" tabindex="-1"></a><span class="fu">## 官方主参考</span></span>
+<span id="cb5-458"><a href="#cb5-458" aria-hidden="true" tabindex="-1"></a><span class="fu">## Q3</span></span>
+<span id="cb5-459"><a href="#cb5-459" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-460"><a href="#cb5-460" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>最可能是 Adam 的优化器状态（m、v，以及 master weights 的首次完整建立）——第一轮 optimizer step 前它们要么未分配、要么尚未占据显存；第一轮的 profile 与后续不同还有 caching allocator 预热的原因。</span>
+<span id="cb5-461"><a href="#cb5-461" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>"第一轮成功"只证明该时刻的显存占用 &lt; 上限；显存是动态的（激活/梯度/优化器状态在不同阶段交替），峰值可能出现在 step 2 及以后（优化器状态常驻 + 缓存碎片累积）。</span>
+<span id="cb5-462"><a href="#cb5-462" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>至少测量：a) 每轮峰值显存（torch.cuda.max_memory_allocated 与 reserved）；b) 内存 profile 曲线（哪些阶段、哪类张量占用）。必要时再看分配器碎片与 CUDA context。</span>
 <span id="cb5-463"><a href="#cb5-463" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-464"><a href="#cb5-464" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Ultra-Scale Playbook</span><span class="co">](https://huggingface.co/spaces/nanotron/ultrascale-playbook)</span></span>
-<span id="cb5-465"><a href="#cb5-465" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">PyTorch distributed documentation</span><span class="co">](https://pytorch.org/docs/stable/distributed.html)</span></span>
-<span id="cb5-466"><a href="#cb5-466" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-464"><a href="#cb5-464" aria-hidden="true" tabindex="-1"></a><span class="fu">## 通过要点</span></span>
+<span id="cb5-465"><a href="#cb5-465" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-466"><a href="#cb5-466" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>GB（1e9）与 GiB（1024³）分开处理；112 GB ≈ 104.3 GiB。</span>
+<span id="cb5-467"><a href="#cb5-467" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>静态账本 ≠ 峰值显存（不含激活/CUDA context/临时 buffer/碎片/通信缓冲区）。</span>
+<span id="cb5-468"><a href="#cb5-468" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>结论限定前提："标准、未切分、未卸载的配置放不进 80 GB 卡"；不能说"7B 绝对无法训练"（ZeRO/TP/量化/卸载/冻结都可改变前提）。</span>
+<span id="cb5-469"><a href="#cb5-469" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-470"><a href="#cb5-470" aria-hidden="true" tabindex="-1"></a><span class="fu">## 官方主参考</span></span>
+<span id="cb5-471"><a href="#cb5-471" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-472"><a href="#cb5-472" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">Ultra-Scale Playbook</span><span class="co">](https://huggingface.co/spaces/nanotron/ultrascale-playbook)</span></span>
+<span id="cb5-473"><a href="#cb5-473" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">PyTorch distributed documentation</span><span class="co">](https://pytorch.org/docs/stable/distributed.html)</span></span>
+<span id="cb5-474"><a href="#cb5-474" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->
