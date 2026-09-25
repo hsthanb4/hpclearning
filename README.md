@@ -1,13 +1,16 @@
 # HPC / AI Infra 面试课程
 
-> **全模块参考答案版**：包含全部 88 节课的代码实现与深度问答解析，已全量升级为 **Quarto 现代静态文档系统（.qmd）**，原生支持 GitHub Pages 全自动流水线部署。
+> **全模块参考答案版**：包含全部 90 节课的代码实现与深度问答解析，已全量升级为 **Quarto 现代静态文档系统（.qmd）**，原生支持 GitHub Pages 全自动流水线部署。
 
 🌐 **在线教程与阅读主站**：[https://hsthanb4.github.io/hpclearning/](https://hsthanb4.github.io/hpclearning/)
 
 ## 💡 AI 充值渠道推荐
-给经常使用海外 AI 工具（如 ChatGPT Plus / Team、Claude Pro、API 接口等）的同学提供稳定充值备选渠道：
-- **[payai.win](https://payai.win)**：主打极高性价比，**GPT 充值更便宜**，到账快捷，适合追求低成本长期订阅的同学。
-- **[payai.top](https://payai.top)**：功能稳定齐全的长期充值备选渠道。
+给经常使用海外 AI 工具（如 ChatGPT Plus / Team、Claude Pro、API 接口等）的同学推荐便捷稳定的充值渠道：
+- **[payai.top](https://payai.top)**（**主力首选推荐**）：功能全面、稳定性极高的综合型 AI 充值服务平台。
+  - **服务范围广泛**：全面支持 ChatGPT Plus / Team、Claude Pro、Midjourney 以及主流海外 AI 订阅与开发 API 充值；
+  - **极速自动到账**：支持国内主流便捷支付方式，全流程自动化对接，充值操作简单、分钟级极速到账；
+  - **稳定售后保障**：纯正合规支付通道，有效规避风控封号风险，提供专属客服与完善质保，是个人学习、科研与团队生产力的首选稳定渠道。
+- **[payai.win](https://payai.win)**（**高性价比优选**）：主打极致性价比，**GPT 充值更便宜**，到账快捷，适合注重价格优势、追求低成本长期订阅的同学。
 
 *注：支持范围、实时价格、到账方式和售后规则均建议在对应网站内详细核对后再按需选用。*
 
