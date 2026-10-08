@@ -520,7 +520,7 @@ window.Quarto = {
   <ul class="collapse">
   <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#矩阵-向量乘gemv在大模型推理中的地位与算术强度瓶颈" id="toc-矩阵-向量乘gemv在大模型推理中的地位与算术强度瓶颈" class="nav-link" data-scroll-target="#矩阵-向量乘gemv在大模型推理中的地位与算术强度瓶颈">1. 矩阵-向量乘（GEMV）在大模型推理中的地位与算术强度瓶颈</a></li>
-  <li><a href="#行级并行与-block-映射架构如图-3-1-与图-3-2-所示" id="toc-行级并行与-block-映射架构如图-3-1-与图-3-2-所示" class="nav-link" data-scroll-target="#行级并行与-block-映射架构如图-3-1-与图-3-2-所示">2. 行级并行与 Block 映射架构（如<strong>图 3-1</strong> 与<strong>图 3-2</strong> 所示）</a></li>
+  <li><a href="#行级并行与-block-映射架构如图-3-1-至图-3-3-所示" id="toc-行级并行与-block-映射架构如图-3-1-至图-3-3-所示" class="nav-link" data-scroll-target="#行级并行与-block-映射架构如图-3-1-至图-3-3-所示">2. 行级并行与 Block 映射架构（如<strong>图 3-1 至图 3-3</strong> 所示）</a></li>
   <li><a href="#正确性边界与指针安全性" id="toc-正确性边界与指针安全性" class="nav-link" data-scroll-target="#正确性边界与指针安全性">3. 正确性边界与指针安全性</a></li>
   <li><a href="#性能与工程权舍何时从-gemv-转向-gemm" id="toc-性能与工程权舍何时从-gemv-转向-gemm" class="nav-link" data-scroll-target="#性能与工程权舍何时从-gemv-转向-gemm">4. 性能与工程权舍：何时从 GEMV 转向 GEMM？</a></li>
   </ul></li>
@@ -591,6 +591,12 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
 <section id="核心操作与执行流程图解" class="level3">
 <h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<div class="img-card">
+<img src="assets/figs/cuda_roofline.png" class="img-fluid" style="width:85.0%">
+<p class="caption">
+图 3-1：NVIDIA H100 Roofline 性能模型与 GEMV 极低算术强度受限区分析（基于 scientific-figure-making 绘制）
+</p>
+</div>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -620,7 +626,7 @@ window.Quarto = {
 </div>
 </div>
 <p class="caption" align="center">
-<em>图 3-1：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em>
+<em>图 3-2：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em>
 </p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
@@ -638,28 +644,55 @@ window.Quarto = {
 </div>
 </div>
 <p class="caption" align="center">
-<em>图 3-2：GEMV 单行点积累加与 Warp 归约执行流水</em>
+<em>图 3-3：GEMV 单行点积累加与 Warp 归约执行流水</em>
 </p>
 </section>
 <section id="矩阵-向量乘gemv在大模型推理中的地位与算术强度瓶颈" class="level3">
 <h3 class="anchored" data-anchor-id="矩阵-向量乘gemv在大模型推理中的地位与算术强度瓶颈">1. 矩阵-向量乘（GEMV）在大模型推理中的地位与算术强度瓶颈</h3>
-<p>通用矩阵-向量乘（General Matrix-Vector Multiplication, GEMV: <span class="math inline">\(y = A x + \text{bias}\)</span>）是线性代数与深度学习中的基础算子。 尤其在大语言模型（LLM）的<strong>自回归解码生成阶段（Decode Phase）</strong>中，每生成一个新 Token，KV Cache 投影以及 MLP 投影都是以单个 Token（即批次维度 <span class="math inline">\(\text{Batch}=1\)</span>）输入线性层。此时通用的矩阵乘（GEMM: <span class="math inline">\([M, K] \times [K, N]\)</span>）必然退化为矩阵-向量乘（GEMV: <span class="math inline">\([M, N] \times [N, 1] \to [M, 1]\)</span>）： - <strong>极低的算术强度（Memory-Bound 典型代表）</strong>： 设矩阵 <span class="math inline">\(A \in \mathbb{R}^{M \times N}\)</span>，向量 <span class="math inline">\(x \in \mathbb{R}^N\)</span>。 - 理论计算量：每个元素需要 1 次乘法和 1 次加法，总浮点运算量为 <span class="math inline">\(2 M N\text{ FLOPs}\)</span>； - 显存访存量：必须从全局内存中加载整个权重矩阵 <span class="math inline">\(A\)</span>（<span class="math inline">\(4MN\)</span> 字节），读取向量 <span class="math inline">\(x\)</span>（<span class="math inline">\(4N\)</span> 字节），并写回结果 <span class="math inline">\(y\)</span>（<span class="math inline">\(4M\)</span> 字节）。 - 其算术强度上限仅为： <span class="math display">\[I = \frac{2 M N}{4 M N + 4 N + 4 M} \approx \frac{2 M N}{4 M N} = 0.5 \text{ FLOPs/Byte}\]</span> 在标称带宽 <span class="math inline">\(3.35\text{ TB/s}\)</span> 的 H100 GPU 上，GEMV 的理论算力上限只有 <span class="math inline">\(\approx 1.67\text{ TFLOPS}\)</span>（远低于硬件 <span class="math inline">\(1000\text{ TFLOPS}\)</span> 峰值）。 因此，GEMV 的优化哲学在于：<strong>极致榨干全局显存读取带宽，确保权重矩阵 <span class="math inline">\(A\)</span> 的合并访存，并最大化向量 <span class="math inline">\(x\)</span> 在 L1/L2 缓存中的数据复用</strong>。</p>
+<p>通用矩阵-向量乘（General Matrix-Vector Multiplication, GEMV: <span class="math inline">\(y = A x + \text{bias}\)</span>）是线性代数与深度学习中的基础算子。 尤其在大语言模型（LLM）的<strong>自回归解码生成阶段（Decode Phase）</strong>中，每生成一个新 Token，KV Cache 投影以及 MLP 投影都是以单个 Token（即批次维度 <span class="math inline">\(\text{Batch}=1\)</span>）输入线性层。此时通用的矩阵乘（GEMM: <span class="math inline">\([M, K] \times [K, N]\)</span>）必然退化为矩阵-向量乘（GEMV: <span class="math inline">\([M, N] \times [N, 1] \to [M, 1]\)</span>）：</p>
+<ul>
+<li><strong>极低的算术强度（Memory-Bound 典型代表，结合图 3-1 Roofline 模型）</strong>： 设矩阵 <span class="math inline">\(A \in \mathbb{R}^{M \times N}\)</span>，向量 <span class="math inline">\(x \in \mathbb{R}^N\)</span>。
+<ul>
+<li>理论计算量：每个元素需要 1 次乘法和 1 次加法，总浮点运算量为 <span class="math inline">\(2 M N\text{ FLOPs}\)</span>；</li>
+<li>显存访存量：必须从全局内存中加载整个权重矩阵 <span class="math inline">\(A\)</span>（<span class="math inline">\(4MN\)</span> 字节），读取向量 <span class="math inline">\(x\)</span>（<span class="math inline">\(4N\)</span> 字节），并写回结果 <span class="math inline">\(y\)</span>（<span class="math inline">\(4M\)</span> 字节）。</li>
+<li>其算术强度上限仅为： <span class="math display">\[I = \frac{2 M N}{4 M N + 4 N + 4 M} \approx \frac{2 M N}{4 M N} = 0.5 \text{ FLOPs/Byte}\]</span> 在标称带宽 <span class="math inline">\(3.35\text{ TB/s}\)</span> 的 H100 GPU 上，GEMV 的理论算力上限只有 <span class="math inline">\(\approx 1.67\text{ TFLOPS}\)</span>（远低于硬件 <span class="math inline">\(1000\text{ TFLOPS}\)</span> 峰值）。 因此，GEMV 的优化哲学在于：<strong>极致榨干全局显存读取带宽，确保权重矩阵 <span class="math inline">\(A\)</span> 的合并访存，并最大化向量 <span class="math inline">\(x\)</span> 在 L1/L2 缓存中的数据复用</strong>。</li>
+</ul></li>
+</ul>
 </section>
-<section id="行级并行与-block-映射架构如图-3-1-与图-3-2-所示" class="level3">
-<h3 class="anchored" data-anchor-id="行级并行与-block-映射架构如图-3-1-与图-3-2-所示">2. 行级并行与 Block 映射架构（如<strong>图 3-1</strong> 与<strong>图 3-2</strong> 所示）</h3>
+<section id="行级并行与-block-映射架构如图-3-1-至图-3-3-所示" class="level3">
+<h3 class="anchored" data-anchor-id="行级并行与-block-映射架构如图-3-1-至图-3-3-所示">2. 行级并行与 Block 映射架构（如<strong>图 3-1 至图 3-3</strong> 所示）</h3>
 <p>在行优先（Row-Major）存储格式下，矩阵 <span class="math inline">\(A\)</span> 的同一行元素在物理内存地址中是严格连续排列的。</p>
 <section id="a.-为什么必须采用一个-block-负责一行block-per-row" class="level4">
 <h4 class="anchored" data-anchor-id="a.-为什么必须采用一个-block-负责一行block-per-row">A. 为什么必须采用“一个 Block 负责一行（Block-per-Row）”？</h4>
-<p>如果在初学者代码中采用朴素的“一个线程负责一行（Thread-per-Row）”： - 线程 0 计算第 0 行，线程 1 计算第 1 行…… - 同一个 Warp 内的 32 个线程在同一时刻读取各自行的第 0 列元素：<code>A[0, 0], A[1, 0], A[2, 0], ...</code>； - 由于是行优先存储，相邻两个元素的内存地址相隔整整 <span class="math inline">\(N \times 4\)</span> 字节！ - <strong>访存灾难</strong>：32 个线程的访存完全离散，硬件无法执行合并访存，被迫拆分为 32 次独立的内存事务，总线有效利用率暴跌至不足 5%！</p>
-<p>工业级标准设计采用如<strong>图 3-1</strong> 所示的 <strong>Block-per-Row（一个线程块负责一行矩阵-向量点积）</strong>： - 每个 Thread Block（例如 <code>BLOCK_SIZE = 256</code>）专职负责输出向量的一个分量 <span class="math inline">\(y[\text{row}]\)</span>，即计算第 <code>row = blockIdx.x</code> 行与向量 <span class="math inline">\(x\)</span> 的内积。 - Block 内的 256 个线程沿着列维度以网格跨步循环前移： <code>cuda   for (int col = tid; col &lt; N; col += BLOCK_SIZE) {       local_sum += row_A[col] * x[col];   }</code> - <strong>完美访存合并</strong>：Warp 内的线程 0 至 31 访问的地址是 <code>row_A[0], row_A[1], ..., row_A[31]</code>，在物理内存上<strong>完全连续且天然 128 字节对齐</strong>！</p>
+<p>如果在初学者代码中采用朴素的“一个线程负责一行（Thread-per-Row）”：</p>
+<ul>
+<li>线程 0 计算第 0 行，线程 1 计算第 1 行……</li>
+<li>同一个 Warp 内的 32 个线程在同一时刻读取各自行的第 0 列元素：<code>A[0, 0], A[1, 0], A[2, 0], ...</code>；</li>
+<li>由于是行优先存储，相邻两个元素的内存地址相隔整整 <span class="math inline">\(N \times 4\)</span> 字节！</li>
+<li><strong>访存灾难</strong>：32 个线程的访存完全离散，硬件无法执行合并访存，被迫拆分为 32 次独立的内存事务，总线有效利用率暴跌至不足 5%！</li>
+</ul>
+<p>工业级标准设计采用如<strong>图 3-2</strong> 所示的 <strong>Block-per-Row（一个线程块负责一行矩阵-向量点积）</strong>：</p>
+<ul>
+<li><p>每个 Thread Block（例如 <code>BLOCK_SIZE = 256</code>）专职负责输出向量的一个分量 <span class="math inline">\(y[\text{row}]\)</span>，即计算第 <code>row = blockIdx.x</code> 行与向量 <span class="math inline">\(x\)</span> 的内积。</p></li>
+<li><p>Block 内的 256 个线程沿着列维度以网格跨步循环前移：</p>
+<pre class="cuda"><code>for (int col = tid; col &lt; N; col += BLOCK_SIZE) {
+    local_sum += row_A[col] * x[col];
+}</code></pre></li>
+<li><p><strong>完美访存合并</strong>：Warp 内的线程 0 至 31 访问的地址是 <code>row_A[0], row_A[1], ..., row_A[31]</code>，在物理内存上<strong>完全连续且天然 128 字节对齐</strong>！</p></li>
+</ul>
 </section>
 <section id="b.-向量-x-的高速片上缓存复用" class="level4">
 <h4 class="anchored" data-anchor-id="b.-向量-x-的高速片上缓存复用">B. 向量 <span class="math inline">\(x\)</span> 的高速片上缓存复用</h4>
 <p>在计算过程中，所有的 Block（共 <span class="math inline">\(M\)</span> 个）都需要与同一个向量 <span class="math inline">\(x\)</span> 相乘。 虽然每个 Block 都从显存中逻辑读取 <span class="math inline">\(x\)</span>，但由于硬件 L1 Data Cache 和 L2 Cache（几十 MB）的巨大容量，向量 <span class="math inline">\(x\)</span> 在首个 Block 读取后便大概率常驻在高速片上缓存中，后续各个 Block 读取 <span class="math inline">\(x\)</span> 几乎全部命中 L2 缓存，极大缓解了显存带宽压力。</p>
 </section>
-<section id="c.-点积规约与原子写入解耦图-3-2" class="level4">
-<h4 class="anchored" data-anchor-id="c.-点积规约与原子写入解耦图-3-2">C. 点积规约与原子写入解耦（图 3-2）</h4>
-<p>当 Block 内每个线程完成各自负责列的局部乘累加后，调用第 2 课所学的 <code>block_reduce_sum</code>： 1. Warp 内通过 <code>__shfl_down_sync</code> 快速树状折叠； 2. 跨 Warp 通过 Shared Memory 汇聚为单一标量 <code>sum</code>； 3. 仅由 <code>tid == 0</code> 的单线程将偏置 <code>bias[row]</code> 加上，直接写回全局内存 <code>y[row]</code>。全程<strong>无任何原子操作（Atomic-Free）</strong>，消除了内存争用。</p>
+<section id="c.-点积规约与原子写入解耦图-3-3" class="level4">
+<h4 class="anchored" data-anchor-id="c.-点积规约与原子写入解耦图-3-3">C. 点积规约与原子写入解耦（图 3-3）</h4>
+<p>当 Block 内每个线程完成各自负责列的局部乘累加后，调用第 2 课所学的 <code>block_reduce_sum</code>：</p>
+<ol type="1">
+<li><p>Warp 内通过 <code>__shfl_down_sync</code> 快速树状折叠；</p></li>
+<li><p>跨 Warp 通过 Shared Memory 汇聚为单一标量 <code>sum</code>；</p></li>
+<li><p>仅由 <code>tid == 0</code> 的单线程将偏置 <code>bias[row]</code> 加上，直接写回全局内存 <code>y[row]</code>。全程<strong>无任何原子操作（Atomic-Free）</strong>，消除了内存争用。</p></li>
+</ol>
 </section>
 </section>
 <section id="正确性边界与指针安全性" class="level3">
@@ -719,155 +752,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐局部点积更新。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="ad5d27f8" class="cell" data-course_role="exercise">
-<details open="" class="code-fold">
-<summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>namespace {</span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV 的核心是 dot product，因此 <span class="bu">reduce</span> 是主要优化点。</span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
-<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
-<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 把一个 block 内所有线程的局部 dot partial <span class="bu">sum</span> 合并成一个 sum。</span>
-<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
-<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
-<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">%</span> <span class="dv">32</span></span>
-<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">/</span> <span class="dv">32</span></span>
-<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
-<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb1-35"><a href="#cb1-35" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-36"><a href="#cb1-36" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-37"><a href="#cb1-37" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb1-38"><a href="#cb1-38" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb1-39"><a href="#cb1-39" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb1-40"><a href="#cb1-40" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-41"><a href="#cb1-41" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV: y <span class="op">=</span> A <span class="op">*</span> x <span class="op">+</span> bias</span>
-<span id="cb1-42"><a href="#cb1-42" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> A: [M, N] row<span class="op">-</span>major</span>
-<span id="cb1-43"><a href="#cb1-43" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x: [N]</span>
-<span id="cb1-44"><a href="#cb1-44" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y<span class="op">/</span>bias: [M]</span>
-<span id="cb1-45"><a href="#cb1-45" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb1-46"><a href="#cb1-46" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 简化优化版本：</span>
-<span id="cb1-47"><a href="#cb1-47" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 一个 block 负责 A 的一行，block 内线程并行做 dot product。</span>
-<span id="cb1-48"><a href="#cb1-48" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 这适合面试讲清楚线程映射、coalesced load、block reduce。</span>
-<span id="cb1-49"><a href="#cb1-49" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb1-50"><a href="#cb1-50" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 局限：</span>
-<span id="cb1-51"><a href="#cb1-51" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x 会被每一行重复读取。更进一步的优化可以把 x 分块缓存到 shared memory，</span>
-<span id="cb1-52"><a href="#cb1-52" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 或者多个 row<span class="op">/</span>block 复用 x tile，但代码会复杂很多。</span>
-<span id="cb1-53"><a href="#cb1-53" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb1-54"><a href="#cb1-54" aria-hidden="true" tabindex="-1"></a>__global__ void gemv_kernel(</span>
-<span id="cb1-55"><a href="#cb1-55" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ A,</span>
-<span id="cb1-56"><a href="#cb1-56" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ x,</span>
-<span id="cb1-57"><a href="#cb1-57" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ bias,</span>
-<span id="cb1-58"><a href="#cb1-58" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ y,</span>
-<span id="cb1-59"><a href="#cb1-59" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb1-60"><a href="#cb1-60" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N</span>
-<span id="cb1-61"><a href="#cb1-61" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb1-62"><a href="#cb1-62" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
-<span id="cb1-63"><a href="#cb1-63" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
-<span id="cb1-64"><a href="#cb1-64" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
-<span id="cb1-65"><a href="#cb1-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-66"><a href="#cb1-66" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_A <span class="op">=</span> A <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
-<span id="cb1-67"><a href="#cb1-67" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb1-68"><a href="#cb1-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-69"><a href="#cb1-69" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程负责这一行里的若干列。</span>
-<span id="cb1-70"><a href="#cb1-70" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
-<span id="cb1-71"><a href="#cb1-71" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
-<span id="cb1-72"><a href="#cb1-72" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb1-73"><a href="#cb1-73" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> ______<span class="op">;</span>  <span class="op">//</span> TODO: 当前列的乘积</span>
-<span id="cb1-74"><a href="#cb1-74" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-75"><a href="#cb1-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-76"><a href="#cb1-76" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
-<span id="cb1-77"><a href="#cb1-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-78"><a href="#cb1-78" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> <span class="bu">reduce</span> 完后，只有一个线程写 y[row]，避免写冲突。</span>
-<span id="cb1-79"><a href="#cb1-79" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb1-80"><a href="#cb1-80" aria-hidden="true" tabindex="-1"></a>        y[row] <span class="op">=</span> <span class="bu">sum</span> <span class="op">+</span> (bias ? bias[row] : <span class="fl">0.0</span><span class="er">f</span>)<span class="op">;</span></span>
-<span id="cb1-81"><a href="#cb1-81" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-82"><a href="#cb1-82" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb1-83"><a href="#cb1-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-84"><a href="#cb1-84" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
-<span id="cb1-85"><a href="#cb1-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-86"><a href="#cb1-86" aria-hidden="true" tabindex="-1"></a>void launch_gemv(</span>
-<span id="cb1-87"><a href="#cb1-87" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> A,</span>
-<span id="cb1-88"><a href="#cb1-88" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> x,</span>
-<span id="cb1-89"><a href="#cb1-89" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> bias,</span>
-<span id="cb1-90"><a href="#cb1-90" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> y,</span>
-<span id="cb1-91"><a href="#cb1-91" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb1-92"><a href="#cb1-92" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb1-93"><a href="#cb1-93" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
-<span id="cb1-94"><a href="#cb1-94" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb1-95"><a href="#cb1-95" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
-<span id="cb1-96"><a href="#cb1-96" aria-hidden="true" tabindex="-1"></a>    gemv_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
-<span id="cb1-97"><a href="#cb1-97" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
-<span id="cb1-98"><a href="#cb1-98" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
-<span id="cb1-99"><a href="#cb1-99" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-</details>
-</div>
-<section id="检查方法" class="level3">
-<h3 class="anchored" data-anchor-id="检查方法">检查方法</h3>
-<p>有 CUDA 环境时执行 <code>nvcc -std=c++17 -c /tmp/03_gemv.cu -o /tmp/03_gemv.cu.o</code>；无 CUDA 环境时只做静态审查并登记待验证。</p>
-<p>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</p>
-</section>
-<section id="q1" class="level3">
-<h3 class="anchored" data-anchor-id="q1">Q1</h3>
-<p>不要背定义：请从输入、状态变化和输出三个阶段解释“GEMV 与行级并行”的工作机制。</p>
-<p><strong>你的答案：</strong></p>
-</section>
-<section id="q2" class="level3">
-<h3 class="anchored" data-anchor-id="q2">Q2</h3>
-<p>把一个 thread 映射一整行与一个 block 映射一行相比，瓶颈有何不同？</p>
-<p><strong>你的答案：</strong></p>
-</section>
-<section id="q3" class="level3">
-<h3 class="anchored" data-anchor-id="q3">Q3</h3>
-<p>当 batch 中矩阵数量增加时，何时应转向 GEMM？</p>
-<p><strong>你的答案：</strong></p>
-</section>
-</section>
-<section id="评分与通过规则" class="level2">
-<h2 class="anchored" data-anchor-id="评分与通过规则">评分与通过规则</h2>
-<ul>
-<li>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</li>
-<li>Q1～Q3 各 2 分；</li>
-<li>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</li>
-</ul>
-<p>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</p>
-<div class="callout callout-style-default callout-tip no-icon callout-titled" title="💡 点击展开参考答案与详细代码实现">
-<div class="callout-header d-flex align-content-center collapsed" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="false" aria-label="Toggle callout">
-<div class="callout-icon-container">
-<i class="callout-icon no-icon"></i>
-</div>
-<div class="callout-title-container flex-fill">
-<span class="screen-reader-only">Tip</span>💡 点击展开参考答案与详细代码实现
-</div>
-<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
-</div>
-<div id="callout-1" class="callout-1-contents callout-collapse collapse">
-<div class="callout-body-container callout-body">
-<section id="参考答案仅-answer-分支" class="level2">
-<h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
-<p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="73cce735" class="cell" data-course_role="solution">
+<div id="d4a9f003" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
@@ -942,7 +827,7 @@ window.Quarto = {
 <span id="cb2-70"><a href="#cb2-70" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
 <span id="cb2-71"><a href="#cb2-71" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
 <span id="cb2-72"><a href="#cb2-72" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb2-73"><a href="#cb2-73" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> row_A[col] <span class="op">*</span> x[col]<span class="op">;</span></span>
+<span id="cb2-73"><a href="#cb2-73" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> ______<span class="op">;</span>  <span class="op">//</span> TODO: 当前列的乘积</span>
 <span id="cb2-74"><a href="#cb2-74" aria-hidden="true" tabindex="-1"></a>    }</span>
 <span id="cb2-75"><a href="#cb2-75" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-76"><a href="#cb2-76" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
@@ -969,6 +854,154 @@ window.Quarto = {
 <span id="cb2-97"><a href="#cb2-97" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
 <span id="cb2-98"><a href="#cb2-98" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
 <span id="cb2-99"><a href="#cb2-99" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+</div>
+<section id="检查方法" class="level3">
+<h3 class="anchored" data-anchor-id="检查方法">检查方法</h3>
+<p>有 CUDA 环境时执行 <code>nvcc -std=c++17 -c /tmp/03_gemv.cu -o /tmp/03_gemv.cu.o</code>；无 CUDA 环境时只做静态审查并登记待验证。</p>
+<p>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</p>
+</section>
+<section id="q1" class="level3">
+<h3 class="anchored" data-anchor-id="q1">Q1</h3>
+<p>不要背定义：请从输入、状态变化和输出三个阶段解释“GEMV 与行级并行”的工作机制。</p>
+<p><strong>你的答案：</strong></p>
+</section>
+<section id="q2" class="level3">
+<h3 class="anchored" data-anchor-id="q2">Q2</h3>
+<p>把一个 thread 映射一整行与一个 block 映射一行相比，瓶颈有何不同？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+<section id="q3" class="level3">
+<h3 class="anchored" data-anchor-id="q3">Q3</h3>
+<p>当 batch 中矩阵数量增加时，何时应转向 GEMM？</p>
+<p><strong>你的答案：</strong></p>
+</section>
+</section>
+<section id="评分与通过规则" class="level2">
+<h2 class="anchored" data-anchor-id="评分与通过规则">评分与通过规则</h2>
+<ul>
+<li>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</li>
+<li>Q1～Q3 各 2 分；</li>
+<li>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</li>
+</ul>
+<p>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</p>
+<div class="callout callout-style-default callout-tip no-icon callout-titled" title="💡 点击展开参考答案与详细代码实现">
+<div class="callout-header d-flex align-content-center collapsed" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon no-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>💡 点击展开参考答案与详细代码实现
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-1" class="callout-1-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<section id="参考答案仅-answer-分支" class="level2">
+<h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
+<p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
+<div id="ef5c82a2" class="cell" data-course_role="solution">
+<details open="" class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>namespace {</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV 的核心是 dot product，因此 <span class="bu">reduce</span> 是主要优化点。</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 把一个 block 内所有线程的局部 dot partial <span class="bu">sum</span> 合并成一个 sum。</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">%</span> <span class="dv">32</span></span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">/</span> <span class="dv">32</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV: y <span class="op">=</span> A <span class="op">*</span> x <span class="op">+</span> bias</span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> A: [M, N] row<span class="op">-</span>major</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x: [N]</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y<span class="op">/</span>bias: [M]</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 简化优化版本：</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 一个 block 负责 A 的一行，block 内线程并行做 dot product。</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 这适合面试讲清楚线程映射、coalesced load、block reduce。</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 局限：</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x 会被每一行重复读取。更进一步的优化可以把 x 分块缓存到 shared memory，</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 或者多个 row<span class="op">/</span>block 复用 x tile，但代码会复杂很多。</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>__global__ void gemv_kernel(</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ A,</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ x,</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ bias,</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ y,</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_A <span class="op">=</span> A <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程负责这一行里的若干列。</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> row_A[col] <span class="op">*</span> x[col]<span class="op">;</span></span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> <span class="bu">reduce</span> 完后，只有一个线程写 y[row]，避免写冲突。</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>        y[row] <span class="op">=</span> <span class="bu">sum</span> <span class="op">+</span> (bias ? bias[row] : <span class="fl">0.0</span><span class="er">f</span>)<span class="op">;</span></span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>void launch_gemv(</span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> A,</span>
+<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> x,</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> bias,</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> y,</span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    gemv_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
 <section id="q1-参考答案" class="level3">
@@ -1495,433 +1528,441 @@ window.Quarto = {
     }
   });
   </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 3 课：GEMV 与行级并行"</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
-<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：把矩阵行映射到 block，复用 block reduce 完成点积并分析带宽瓶颈。</span>
-<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
-<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
-<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
-<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
-<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
-<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：C/C++、线性代数、基本并行编程</span>
-<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：GEMV 每个输出是矩阵一行与向量的点积，算术强度低，通常受内存带宽限制。</span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    subgraph Matrix[<span class="ot">"</span><span class="st">矩阵 A (M × K)</span><span class="ot">"</span>]</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>        Row0[<span class="ot">"</span><span class="st">Row 0 ➔ 分配给 Warp 0</span><span class="ot">"</span>]</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>        Row1[<span class="ot">"</span><span class="st">Row 1 ➔ 分配给 Warp 1</span><span class="ot">"</span>]</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>        RowM[<span class="ot">"</span><span class="st">Row M ➔ 分配给 Warp M</span><span class="ot">"</span>]</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    subgraph Vector[<span class="ot">"</span><span class="st">向量 x (K × 1)</span><span class="ot">"</span>]</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>        Vx[<span class="ot">"</span><span class="st">常驻 L1/L2 Cache 广播读取</span><span class="ot">"</span>]</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    subgraph Out[<span class="ot">"</span><span class="st">输出 y (M × 1)</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>        Y0[<span class="ot">"</span><span class="st">y[0]</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>        Y1[<span class="ot">"</span><span class="st">y[1]</span><span class="ot">"</span>]</span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>        YM[<span class="ot">"</span><span class="st">y[M]</span><span class="ot">"</span>]</span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>    Row0 &amp; Vx --&gt; Y0</span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    Row1 &amp; Vx --&gt; Y1</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    RowM &amp; Vx --&gt; YM</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：GEMV 矩阵-向量乘行级映射与数据复用拓扑<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>    Init[<span class="ot">"</span><span class="st">Warp 绑定矩阵第 row 行</span><span class="ot">"</span>] --&gt; Loop[<span class="ot">"</span><span class="st">Warp 内各线程跨步读取 A[row, c] 并与 x[c] 做乘积累加</span><span class="ot">"</span>]</span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>    Loop --&gt; Reduce[<span class="ot">"</span><span class="st">Warp 内执行 Shuffle 求和归约</span><span class="ot">"</span>]</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>    Reduce --&gt; Write[<span class="ot">"</span><span class="st">Lane 0 将点积和加上偏置写回全局内存 y[row]</span><span class="ot">"</span>]</span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：GEMV 单行点积累加与 Warp 归约执行流水<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 矩阵-向量乘（GEMV）在大模型推理中的地位与算术强度瓶颈</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>通用矩阵-向量乘（General Matrix-Vector Multiplication, GEMV: $y = A x + \text{bias}$）是线性代数与深度学习中的基础算子。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>尤其在大语言模型（LLM）的**自回归解码生成阶段（Decode Phase）**中，每生成一个新 Token，KV Cache 投影以及 MLP 投影都是以单个 Token（即批次维度 $\text{Batch}=1$）输入线性层。此时通用的矩阵乘（GEMM: $<span class="co">[</span><span class="ot">M, K</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">K, N</span><span class="co">]</span>$）必然退化为矩阵-向量乘（GEMV: $<span class="co">[</span><span class="ot">M, N</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">N, 1</span><span class="co">]</span> \to <span class="co">[</span><span class="ot">M, 1</span><span class="co">]</span>$）：</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**极低的算术强度（Memory-Bound 典型代表）**：</span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>  设矩阵 $A \in \mathbb{R}^{M \times N}$，向量 $x \in \mathbb{R}^N$。</span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>理论计算量：每个元素需要 1 次乘法和 1 次加法，总浮点运算量为 $2 M N\text{ FLOPs}$；</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>显存访存量：必须从全局内存中加载整个权重矩阵 $A$（$4MN$ 字节），读取向量 $x$（$4N$ 字节），并写回结果 $y$（$4M$ 字节）。</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>其算术强度上限仅为：</span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>    $$I = \frac{2 M N}{4 M N + 4 N + 4 M} \approx \frac{2 M N}{4 M N} = 0.5 \text{ FLOPs/Byte}$$</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>  在标称带宽 $3.35\text{ TB/s}$ 的 H100 GPU 上，GEMV 的理论算力上限只有 $\approx 1.67\text{ TFLOPS}$（远低于硬件 $1000\text{ TFLOPS}$ 峰值）。</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>  因此，GEMV 的优化哲学在于：**极致榨干全局显存读取带宽，确保权重矩阵 $A$ 的合并访存，并最大化向量 $x$ 在 L1/L2 缓存中的数据复用**。</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 行级并行与 Block 映射架构（如**图 3-1** 与**图 3-2** 所示）</span></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>在行优先（Row-Major）存储格式下，矩阵 $A$ 的同一行元素在物理内存地址中是严格连续排列的。</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. 为什么必须采用“一个 Block 负责一行（Block-per-Row）”？</span></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>如果在初学者代码中采用朴素的“一个线程负责一行（Thread-per-Row）”：</span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>线程 0 计算第 0 行，线程 1 计算第 1 行……</span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>同一个 Warp 内的 32 个线程在同一时刻读取各自行的第 0 列元素：<span class="in">`A[0, 0], A[1, 0], A[2, 0], ...`</span>；</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>由于是行优先存储，相邻两个元素的内存地址相隔整整 $N \times 4$ 字节！</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**访存灾难**：32 个线程的访存完全离散，硬件无法执行合并访存，被迫拆分为 32 次独立的内存事务，总线有效利用率暴跌至不足 5%！</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>工业级标准设计采用如**图 3-1** 所示的 **Block-per-Row（一个线程块负责一行矩阵-向量点积）**：</span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每个 Thread Block（例如 <span class="in">`BLOCK_SIZE = 256`</span>）专职负责输出向量的一个分量 $y<span class="co">[</span><span class="ot">\text{row}</span><span class="co">]</span>$，即计算第 <span class="in">`row = blockIdx.x`</span> 行与向量 $x$ 的内积。</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Block 内的 256 个线程沿着列维度以网格跨步循环前移：</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>  <span class="in">```cuda</span></span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="dt">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE<span class="op">)</span> <span class="op">{</span></span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>      local_sum <span class="op">+=</span> row_A<span class="op">[</span>col<span class="op">]</span> <span class="op">*</span> x<span class="op">[</span>col<span class="op">];</span></span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>  <span class="in">```</span></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**完美访存合并**：Warp 内的线程 0 至 31 访问的地址是 `row_A[0], row_A[1], ..., row_A[31]`，在物理内存上**完全连续且天然 128 字节对齐**！</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 向量 $x$ 的高速片上缓存复用</span></span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>在计算过程中，所有的 Block（共 $M$ 个）都需要与同一个向量 $x$ 相乘。</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>虽然每个 Block 都从显存中逻辑读取 $x$，但由于硬件 L1 Data Cache 和 L2 Cache（几十 MB）的巨大容量，向量 $x$ 在首个 Block 读取后便大概率常驻在高速片上缓存中，后续各个 Block 读取 $x$ 几乎全部命中 L2 缓存，极大缓解了显存带宽压力。</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="fu">#### C. 点积规约与原子写入解耦（图 3-2）</span></span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a>当 Block 内每个线程完成各自负责列的局部乘累加后，调用第 2 课所学的 <span class="in">`block_reduce_sum`</span>：</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>Warp 内通过 <span class="in">`__shfl_down_sync`</span> 快速树状折叠；</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>跨 Warp 通过 Shared Memory 汇聚为单一标量 <span class="in">`sum`</span>；</span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>仅由 <span class="in">`tid == 0`</span> 的单线程将偏置 <span class="in">`bias[row]`</span> 加上，直接写回全局内存 <span class="in">`y[row]`</span>。全程**无任何原子操作（Atomic-Free）**，消除了内存争用。</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性边界与指针安全性</span></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**偏置指针解引用保护**：</span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>线性层并非全部带有偏置项（例如现代 LLaMA 架构完全移除了偏置）。</span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>内核代码必须支持 <span class="in">`bias == nullptr`</span> 的情况：<span class="in">`y[row] = sum + (bias ? bias[row] : 0.0f);`</span>，严禁无防护直接解引用空指针。</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**矩阵维度跨步安全**：</span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当矩阵的行数 $M$ 大于启动的 Block 数量时，必须依赖网格跨步或确保启动网格充足；</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>越界检查 <span class="in">`if (row &gt;= M) return;`</span> 必须放在进入行指针计算的最前端。</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程权舍：何时从 GEMV 转向 GEMM？</span></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Block 大小的平衡点**：</span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>若列数 $N$ 较小（例如 $N=128$），分配 256 线程会导致一半的线程闲置；</span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>工业级高性能库（如 cuBLAS）会根据 $N$ 的大小动态调整：当 $N \le 64$ 时采用 Warp-per-Row（一个 Warp 负责一行），当 $N \ge 1024$ 时采用 Block-per-Row。</span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**转入 GEMM 的临界点（Prefill vs Decode）**：</span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>当并发请求增多，或者进入长 Prompt 预填充阶段（Prefill Phase）时，批次或序列维度 $B \ge 16 \sim 32$。</span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>矩阵计算变为 $<span class="co">[</span><span class="ot">M, K</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">K, B</span><span class="co">]</span>$。其算术强度随着 $B$ 线性提升：$I \approx \frac{2 M K B}{4(M K + K B + M B)} \gg 10\text{ FLOPs/Byte}$。</span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>此时内核从访存瓶颈蜕变为算力密集型，必须立即切换为 Tensor Core 驱动的 GEMM 内核（如 CUTLASS / cuBLAS）。</span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示与数值推演</span></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a>设矩阵 $A$ 维度为 $M = 3$ 行、$N = 1024$ 列，配置 <span class="in">`BLOCK_SIZE = 256`</span>，启动发射网格为 <span class="in">`&lt;&lt;&lt;3, 256&gt;&gt;&gt;`</span>：</span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**硬件映射布局**：</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>系统启动 3 个 Thread Block（Block 0, 1, 2 分别绑定处理 Row 0, 1, 2）。</span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>每个 Block 内驻留 256 个线程（分为 8 个 Warp）。</span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**执行推演（以 Block 0 计算 Row 0 为例）**：</span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>单行包含 1024 个列元素，Block 内 256 个线程只需执行 $\frac{1024}{256} = 4$ 轮循环；</span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>**第 1 轮（`col = 0 ... 255`）**：256 个线程合并读取 $A<span class="co">[</span><span class="ot">0, 0\dots 255</span><span class="co">]</span>$ 与 $x<span class="co">[</span><span class="ot">0\dots 255</span><span class="co">]</span>$，在寄存器中计算乘积并累加；</span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>**第 2~4 轮**：线程每次列索引递增 256，继续以连续事务吞吐剩余元素；</span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>4 轮循环结束后，每个线程的私有寄存器 <span class="in">`local_sum`</span> 中均存有 4 个元素的局部点积和；</span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>调用 <span class="in">`block_reduce_sum`</span> 进行 256 选 1 的快速折叠，耗时仅几十纳秒；</span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span><span class="in">`threadIdx.x == 0`</span> 线程加上 <span class="in">`bias[0]`</span>，单次写回 <span class="in">`y[0]`</span>。</span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**全流程收益**：矩阵 $A$ 的读取 100% 达成 128 字节对齐合并访存，3 行独立输出并行落地。</span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a>补齐局部点积更新。</span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>namespace {</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV 的核心是 dot product，因此 <span class="bu">reduce</span> 是主要优化点。</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 把一个 block 内所有线程的局部 dot partial <span class="bu">sum</span> 合并成一个 sum。</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">%</span> <span class="dv">32</span></span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">/</span> <span class="dv">32</span></span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV: y <span class="op">=</span> A <span class="op">*</span> x <span class="op">+</span> bias</span>
-<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> A: [M, N] row<span class="op">-</span>major</span>
-<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x: [N]</span>
-<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y<span class="op">/</span>bias: [M]</span>
-<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 简化优化版本：</span>
-<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 一个 block 负责 A 的一行，block 内线程并行做 dot product。</span>
-<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 这适合面试讲清楚线程映射、coalesced load、block reduce。</span>
-<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 局限：</span>
-<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x 会被每一行重复读取。更进一步的优化可以把 x 分块缓存到 shared memory，</span>
-<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 或者多个 row<span class="op">/</span>block 复用 x tile，但代码会复杂很多。</span>
-<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a>__global__ void gemv_kernel(</span>
-<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ A,</span>
-<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ x,</span>
-<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ bias,</span>
-<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ y,</span>
-<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N</span>
-<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
-<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
-<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
-<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_A <span class="op">=</span> A <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
-<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程负责这一行里的若干列。</span>
-<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
-<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
-<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> ______<span class="op">;</span>  <span class="op">//</span> TODO: 当前列的乘积</span>
-<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
-<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> <span class="bu">reduce</span> 完后，只有一个线程写 y[row]，避免写冲突。</span>
-<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a>        y[row] <span class="op">=</span> <span class="bu">sum</span> <span class="op">+</span> (bias ? bias[row] : <span class="fl">0.0</span><span class="er">f</span>)<span class="op">;</span></span>
-<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
-<span id="cb3-241"><a href="#cb3-241" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-242"><a href="#cb3-242" aria-hidden="true" tabindex="-1"></a>void launch_gemv(</span>
-<span id="cb3-243"><a href="#cb3-243" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> A,</span>
-<span id="cb3-244"><a href="#cb3-244" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> x,</span>
-<span id="cb3-245"><a href="#cb3-245" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> bias,</span>
-<span id="cb3-246"><a href="#cb3-246" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> y,</span>
-<span id="cb3-247"><a href="#cb3-247" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb3-248"><a href="#cb3-248" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb3-249"><a href="#cb3-249" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
-<span id="cb3-250"><a href="#cb3-250" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb3-251"><a href="#cb3-251" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
-<span id="cb3-252"><a href="#cb3-252" aria-hidden="true" tabindex="-1"></a>    gemv_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
-<span id="cb3-253"><a href="#cb3-253" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
-<span id="cb3-254"><a href="#cb3-254" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
-<span id="cb3-255"><a href="#cb3-255" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-256"><a href="#cb3-256" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-257"><a href="#cb3-257" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-258"><a href="#cb3-258" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-259"><a href="#cb3-259" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-260"><a href="#cb3-260" aria-hidden="true" tabindex="-1"></a>有 CUDA 环境时执行 <span class="in">`nvcc -std=c++17 -c /tmp/03_gemv.cu -o /tmp/03_gemv.cu.o`</span>；无 CUDA 环境时只做静态审查并登记待验证。</span>
-<span id="cb3-261"><a href="#cb3-261" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-262"><a href="#cb3-262" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-263"><a href="#cb3-263" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-264"><a href="#cb3-264" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-265"><a href="#cb3-265" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-266"><a href="#cb3-266" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“GEMV 与行级并行”的工作机制。</span>
-<span id="cb3-267"><a href="#cb3-267" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-268"><a href="#cb3-268" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-269"><a href="#cb3-269" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-270"><a href="#cb3-270" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-271"><a href="#cb3-271" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-272"><a href="#cb3-272" aria-hidden="true" tabindex="-1"></a>把一个 thread 映射一整行与一个 block 映射一行相比，瓶颈有何不同？</span>
-<span id="cb3-273"><a href="#cb3-273" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-274"><a href="#cb3-274" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-275"><a href="#cb3-275" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-276"><a href="#cb3-276" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-277"><a href="#cb3-277" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-278"><a href="#cb3-278" aria-hidden="true" tabindex="-1"></a>当 batch 中矩阵数量增加时，何时应转向 GEMM？</span>
-<span id="cb3-279"><a href="#cb3-279" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-280"><a href="#cb3-280" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-281"><a href="#cb3-281" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-282"><a href="#cb3-282" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-283"><a href="#cb3-283" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-284"><a href="#cb3-284" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-285"><a href="#cb3-285" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-286"><a href="#cb3-286" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-287"><a href="#cb3-287" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-288"><a href="#cb3-288" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-289"><a href="#cb3-289" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-290"><a href="#cb3-290" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-291"><a href="#cb3-291" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-292"><a href="#cb3-292" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-293"><a href="#cb3-293" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-294"><a href="#cb3-294" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-295"><a href="#cb3-295" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-298"><a href="#cb3-298" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-299"><a href="#cb3-299" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-300"><a href="#cb3-300" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
-<span id="cb3-301"><a href="#cb3-301" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
-<span id="cb3-302"><a href="#cb3-302" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-303"><a href="#cb3-303" aria-hidden="true" tabindex="-1"></a>namespace {</span>
-<span id="cb3-304"><a href="#cb3-304" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-305"><a href="#cb3-305" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV 的核心是 dot product，因此 <span class="bu">reduce</span> 是主要优化点。</span>
-<span id="cb3-306"><a href="#cb3-306" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb3-307"><a href="#cb3-307" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb3-308"><a href="#cb3-308" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
-<span id="cb3-309"><a href="#cb3-309" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
-<span id="cb3-310"><a href="#cb3-310" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
-<span id="cb3-311"><a href="#cb3-311" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-312"><a href="#cb3-312" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb3-313"><a href="#cb3-313" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-314"><a href="#cb3-314" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-315"><a href="#cb3-315" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 把一个 block 内所有线程的局部 dot partial <span class="bu">sum</span> 合并成一个 sum。</span>
-<span id="cb3-316"><a href="#cb3-316" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb3-317"><a href="#cb3-317" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb3-318"><a href="#cb3-318" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
-<span id="cb3-319"><a href="#cb3-319" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
-<span id="cb3-320"><a href="#cb3-320" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-321"><a href="#cb3-321" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">%</span> <span class="dv">32</span></span>
-<span id="cb3-322"><a href="#cb3-322" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">/</span> <span class="dv">32</span></span>
-<span id="cb3-323"><a href="#cb3-323" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-324"><a href="#cb3-324" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb3-325"><a href="#cb3-325" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-326"><a href="#cb3-326" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb3-327"><a href="#cb3-327" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
-<span id="cb3-328"><a href="#cb3-328" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-329"><a href="#cb3-329" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb3-330"><a href="#cb3-330" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-331"><a href="#cb3-331" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb3-332"><a href="#cb3-332" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb3-333"><a href="#cb3-333" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb3-334"><a href="#cb3-334" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-335"><a href="#cb3-335" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-336"><a href="#cb3-336" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb3-337"><a href="#cb3-337" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb3-338"><a href="#cb3-338" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-339"><a href="#cb3-339" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-340"><a href="#cb3-340" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV: y <span class="op">=</span> A <span class="op">*</span> x <span class="op">+</span> bias</span>
-<span id="cb3-341"><a href="#cb3-341" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> A: [M, N] row<span class="op">-</span>major</span>
-<span id="cb3-342"><a href="#cb3-342" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x: [N]</span>
-<span id="cb3-343"><a href="#cb3-343" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y<span class="op">/</span>bias: [M]</span>
-<span id="cb3-344"><a href="#cb3-344" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb3-345"><a href="#cb3-345" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 简化优化版本：</span>
-<span id="cb3-346"><a href="#cb3-346" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 一个 block 负责 A 的一行，block 内线程并行做 dot product。</span>
-<span id="cb3-347"><a href="#cb3-347" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 这适合面试讲清楚线程映射、coalesced load、block reduce。</span>
-<span id="cb3-348"><a href="#cb3-348" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb3-349"><a href="#cb3-349" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 局限：</span>
-<span id="cb3-350"><a href="#cb3-350" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x 会被每一行重复读取。更进一步的优化可以把 x 分块缓存到 shared memory，</span>
-<span id="cb3-351"><a href="#cb3-351" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 或者多个 row<span class="op">/</span>block 复用 x tile，但代码会复杂很多。</span>
-<span id="cb3-352"><a href="#cb3-352" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb3-353"><a href="#cb3-353" aria-hidden="true" tabindex="-1"></a>__global__ void gemv_kernel(</span>
-<span id="cb3-354"><a href="#cb3-354" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ A,</span>
-<span id="cb3-355"><a href="#cb3-355" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ x,</span>
-<span id="cb3-356"><a href="#cb3-356" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ bias,</span>
-<span id="cb3-357"><a href="#cb3-357" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ y,</span>
-<span id="cb3-358"><a href="#cb3-358" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb3-359"><a href="#cb3-359" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N</span>
-<span id="cb3-360"><a href="#cb3-360" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb3-361"><a href="#cb3-361" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
-<span id="cb3-362"><a href="#cb3-362" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
-<span id="cb3-363"><a href="#cb3-363" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
-<span id="cb3-364"><a href="#cb3-364" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-365"><a href="#cb3-365" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_A <span class="op">=</span> A <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
-<span id="cb3-366"><a href="#cb3-366" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb3-367"><a href="#cb3-367" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-368"><a href="#cb3-368" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程负责这一行里的若干列。</span>
-<span id="cb3-369"><a href="#cb3-369" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
-<span id="cb3-370"><a href="#cb3-370" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
-<span id="cb3-371"><a href="#cb3-371" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb3-372"><a href="#cb3-372" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> row_A[col] <span class="op">*</span> x[col]<span class="op">;</span></span>
-<span id="cb3-373"><a href="#cb3-373" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-374"><a href="#cb3-374" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-375"><a href="#cb3-375" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
-<span id="cb3-376"><a href="#cb3-376" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-377"><a href="#cb3-377" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> <span class="bu">reduce</span> 完后，只有一个线程写 y[row]，避免写冲突。</span>
-<span id="cb3-378"><a href="#cb3-378" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb3-379"><a href="#cb3-379" aria-hidden="true" tabindex="-1"></a>        y[row] <span class="op">=</span> <span class="bu">sum</span> <span class="op">+</span> (bias ? bias[row] : <span class="fl">0.0</span><span class="er">f</span>)<span class="op">;</span></span>
-<span id="cb3-380"><a href="#cb3-380" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb3-381"><a href="#cb3-381" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-382"><a href="#cb3-382" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-383"><a href="#cb3-383" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
-<span id="cb3-384"><a href="#cb3-384" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-385"><a href="#cb3-385" aria-hidden="true" tabindex="-1"></a>void launch_gemv(</span>
-<span id="cb3-386"><a href="#cb3-386" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> A,</span>
-<span id="cb3-387"><a href="#cb3-387" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> x,</span>
-<span id="cb3-388"><a href="#cb3-388" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> bias,</span>
-<span id="cb3-389"><a href="#cb3-389" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> y,</span>
-<span id="cb3-390"><a href="#cb3-390" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb3-391"><a href="#cb3-391" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb3-392"><a href="#cb3-392" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
-<span id="cb3-393"><a href="#cb3-393" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb3-394"><a href="#cb3-394" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
-<span id="cb3-395"><a href="#cb3-395" aria-hidden="true" tabindex="-1"></a>    gemv_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
-<span id="cb3-396"><a href="#cb3-396" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
-<span id="cb3-397"><a href="#cb3-397" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
-<span id="cb3-398"><a href="#cb3-398" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-399"><a href="#cb3-399" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-400"><a href="#cb3-400" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-401"><a href="#cb3-401" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-402"><a href="#cb3-402" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-403"><a href="#cb3-403" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输入状态**：全局显存中连续存储的行优先（Row-Major）矩阵 $A \in \mathbb{R}^{M \times N}$、输入向量 $x \in \mathbb{R}^N$、可选偏置向量 $\text{bias} \in \mathbb{R}^M$ 以及启动网格 <span class="in">`&lt;&lt;&lt;M, BLOCK_SIZE&gt;&gt;&gt;`</span>。</span>
-<span id="cb3-404"><a href="#cb3-404" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**状态变化（行级协同计算流）**：</span>
-<span id="cb3-405"><a href="#cb3-405" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>**Block 行绑定与指针偏移**：每个 Block 由其 <span class="in">`blockIdx.x`</span> 唯一绑定矩阵的第 <span class="in">`row`</span> 行，获取行基地址 <span class="in">`row_A = A + row * N`</span>；</span>
-<span id="cb3-406"><a href="#cb3-406" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>**跨步合并内积**：Block 内各线程沿列方向跨步前移（<span class="in">`col += BLOCK_SIZE`</span>），由于相邻线程访问相邻列元素，完美触发 128 字节对齐合并访存，局部点积累加在寄存器 <span class="in">`local_sum`</span> 中；</span>
-<span id="cb3-407"><a href="#cb3-407" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>**树状规约汇聚**：通过 Warp Shuffle 与 Shared Memory 快速完成 Block 内 256 个局部和的折半规约；</span>
-<span id="cb3-408"><a href="#cb3-408" aria-hidden="true" tabindex="-1"></a><span class="ss">  4. </span>**带偏置单点写回**：仅由 <span class="in">`tid == 0`</span> 线程读取可选的 <span class="in">`bias[row]`</span>，相加后单次写出到 <span class="in">`y[row]`</span>。</span>
-<span id="cb3-409"><a href="#cb3-409" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输出状态**：输出向量 $y$ 的 $M$ 个分量被 $M$ 个 Block 并发计算完成，全局内存访问达到接近物理极限的总线利用率。</span>
-<span id="cb3-410"><a href="#cb3-410" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-411"><a href="#cb3-411" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-412"><a href="#cb3-412" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-413"><a href="#cb3-413" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**一线程负责一行（Thread-per-Row）的致命瓶颈**：</span>
-<span id="cb3-414"><a href="#cb3-414" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*访存离散（Uncoalesced Memory Access）*：同一个 Warp 内的 32 个线程计算 32 个不同行。在行优先存储下，它们在同一拍访问的地址是 <span class="in">`A[0, col], A[1, col], ..., A[31, col]`</span>，两个地址间距整整相隔 $N \times 4$ 字节！</span>
-<span id="cb3-415"><a href="#cb3-415" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*带宽雪崩*：硬件内存控制器无法合并这些请求，32 个线程产生 32 次独立的非对齐 Cache Line 事务，带宽有效利用率暴跌十倍以上。</span>
-<span id="cb3-416"><a href="#cb3-416" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**一块负责一行（Block-per-Row）的优势与权衡**：</span>
-<span id="cb3-417"><a href="#cb3-417" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*优势*：同一个 Warp 的 32 个线程共同处理同一行内部的相邻列，<span class="in">`A[row, tid]`</span> 地址完全连续，天然达成 128 字节合并访存；</span>
-<span id="cb3-418"><a href="#cb3-418" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>*代价*：行内需要额外的 Block 树状规约开销；若矩阵列数 $N$ 较小（如 $N \le 32$），会出现较多空闲线程，此时更适合采用 Warp-per-Row 策略。</span>
-<span id="cb3-419"><a href="#cb3-419" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-420"><a href="#cb3-420" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-421"><a href="#cb3-421" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-422"><a href="#cb3-422" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**从 GEMV 转向 GEMM 的算术强度拐点**：</span>
-<span id="cb3-423"><a href="#cb3-423" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>GEMV 的输入批次为 $B=1$（单向量），其算术强度上限仅为 $I \approx 0.5\text{ FLOPs/Byte}$，性能被全局显存（HBM）带宽牢牢锁死在内存受限区（Memory Bound）；</span>
-<span id="cb3-424"><a href="#cb3-424" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>当并发请求增多、批次合并（Batching）、或在大模型 Prompt 预填充阶段时，批次大小上升至 $B \ge 16 \sim 32$。</span>
-<span id="cb3-425"><a href="#cb3-425" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>运算形态演化为矩阵乘矩阵 $<span class="co">[</span><span class="ot">M, K</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">K, B</span><span class="co">]</span> \to <span class="co">[</span><span class="ot">M, B</span><span class="co">]</span>$。其理论计算量为 $2 M K B$，而权重矩阵 $A$（$M \times K$）被 $B$ 个样本充分复用，算术强度跃升为：</span>
-<span id="cb3-426"><a href="#cb3-426" aria-hidden="true" tabindex="-1"></a>    $$I_{\text{GEMM}} \approx \frac{2 M K B}{4(M K + K B + M B)} \gg 10\text{ FLOPs/Byte}$$</span>
-<span id="cb3-427"><a href="#cb3-427" aria-hidden="true" tabindex="-1"></a><span class="ss">  - </span>此时算子脱离访存受限区，进入 Tensor Core 的高算力受限区（Compute Bound）。必须立即转向利用 Shared Memory 分块缓存与 Tensor Core MMA 指令驱动的 GEMM 内核（如 CUTLASS / cuBLAS）。</span>
-<span id="cb3-428"><a href="#cb3-428" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-429"><a href="#cb3-429" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-430"><a href="#cb3-430" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-431"><a href="#cb3-431" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Programming Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-programming-guide/)</span></span>
-<span id="cb3-432"><a href="#cb3-432" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Best Practices Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)</span></span>
-<span id="cb3-433"><a href="#cb3-433" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-434"><a href="#cb3-434" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-435"><a href="#cb3-435" aria-hidden="true" tabindex="-1"></a>:::</span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 3 课：GEMV 与行级并行"</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>学完后你应能：把矩阵行映射到 block，复用 block reduce 完成点积并分析带宽瓶颈。</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：C/C++、线性代数、基本并行编程</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：GEMV 每个输出是矩阵一行与向量的点积，算术强度低，通常受内存带宽限制。</span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/cuda_roofline.png)</span>{width="85%"}</span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 3-1：NVIDIA H100 Roofline 性能模型与 GEMV 极低算术强度受限区分析（基于 scientific-figure-making 绘制）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>    subgraph Matrix[<span class="ot">"</span><span class="st">矩阵 A (M × K)</span><span class="ot">"</span>]</span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>        Row0[<span class="ot">"</span><span class="st">Row 0 ➔ 分配给 Warp 0</span><span class="ot">"</span>]</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>        Row1[<span class="ot">"</span><span class="st">Row 1 ➔ 分配给 Warp 1</span><span class="ot">"</span>]</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>        RowM[<span class="ot">"</span><span class="st">Row M ➔ 分配给 Warp M</span><span class="ot">"</span>]</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>    subgraph Vector[<span class="ot">"</span><span class="st">向量 x (K × 1)</span><span class="ot">"</span>]</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a>        Vx[<span class="ot">"</span><span class="st">常驻 L1/L2 Cache 广播读取</span><span class="ot">"</span>]</span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>    subgraph Out[<span class="ot">"</span><span class="st">输出 y (M × 1)</span><span class="ot">"</span>]</span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>        Y0[<span class="ot">"</span><span class="st">y[0]</span><span class="ot">"</span>]</span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>        Y1[<span class="ot">"</span><span class="st">y[1]</span><span class="ot">"</span>]</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>        YM[<span class="ot">"</span><span class="st">y[M]</span><span class="ot">"</span>]</span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>    Row0 &amp; Vx --&gt; Y0</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>    Row1 &amp; Vx --&gt; Y1</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>    RowM &amp; Vx --&gt; YM</span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：GEMV 矩阵-向量乘行级映射与数据复用拓扑<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>    Init[<span class="ot">"</span><span class="st">Warp 绑定矩阵第 row 行</span><span class="ot">"</span>] --&gt; Loop[<span class="ot">"</span><span class="st">Warp 内各线程跨步读取 A[row, c] 并与 x[c] 做乘积累加</span><span class="ot">"</span>]</span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a>    Loop --&gt; Reduce[<span class="ot">"</span><span class="st">Warp 内执行 Shuffle 求和归约</span><span class="ot">"</span>]</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a>    Reduce --&gt; Write[<span class="ot">"</span><span class="st">Lane 0 将点积和加上偏置写回全局内存 y[row]</span><span class="ot">"</span>]</span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-3：GEMV 单行点积累加与 Warp 归约执行流水<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 矩阵-向量乘（GEMV）在大模型推理中的地位与算术强度瓶颈</span></span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>通用矩阵-向量乘（General Matrix-Vector Multiplication, GEMV: $y = A x + \text{bias}$）是线性代数与深度学习中的基础算子。</span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a>尤其在大语言模型（LLM）的**自回归解码生成阶段（Decode Phase）**中，每生成一个新 Token，KV Cache 投影以及 MLP 投影都是以单个 Token（即批次维度 $\text{Batch}=1$）输入线性层。此时通用的矩阵乘（GEMM: $<span class="co">[</span><span class="ot">M, K</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">K, N</span><span class="co">]</span>$）必然退化为矩阵-向量乘（GEMV: $<span class="co">[</span><span class="ot">M, N</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">N, 1</span><span class="co">]</span> \to <span class="co">[</span><span class="ot">M, 1</span><span class="co">]</span>$）：</span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**极低的算术强度（Memory-Bound 典型代表，结合图 3-1 Roofline 模型）**：</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>  设矩阵 $A \in \mathbb{R}^{M \times N}$，向量 $x \in \mathbb{R}^N$。</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>理论计算量：每个元素需要 1 次乘法和 1 次加法，总浮点运算量为 $2 M N\text{ FLOPs}$；</span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>显存访存量：必须从全局内存中加载整个权重矩阵 $A$（$4MN$ 字节），读取向量 $x$（$4N$ 字节），并写回结果 $y$（$4M$ 字节）。</span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>其算术强度上限仅为：</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>    $$I = \frac{2 M N}{4 M N + 4 N + 4 M} \approx \frac{2 M N}{4 M N} = 0.5 \text{ FLOPs/Byte}$$</span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a>  在标称带宽 $3.35\text{ TB/s}$ 的 H100 GPU 上，GEMV 的理论算力上限只有 $\approx 1.67\text{ TFLOPS}$（远低于硬件 $1000\text{ TFLOPS}$ 峰值）。</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>  因此，GEMV 的优化哲学在于：**极致榨干全局显存读取带宽，确保权重矩阵 $A$ 的合并访存，并最大化向量 $x$ 在 L1/L2 缓存中的数据复用**。</span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 行级并行与 Block 映射架构（如**图 3-1 至图 3-3** 所示）</span></span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a>在行优先（Row-Major）存储格式下，矩阵 $A$ 的同一行元素在物理内存地址中是严格连续排列的。</span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. 为什么必须采用“一个 Block 负责一行（Block-per-Row）”？</span></span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a>如果在初学者代码中采用朴素的“一个线程负责一行（Thread-per-Row）”：</span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>线程 0 计算第 0 行，线程 1 计算第 1 行……</span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>同一个 Warp 内的 32 个线程在同一时刻读取各自行的第 0 列元素：<span class="in">`A[0, 0], A[1, 0], A[2, 0], ...`</span>；</span>
+<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>由于是行优先存储，相邻两个元素的内存地址相隔整整 $N \times 4$ 字节！</span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**访存灾难**：32 个线程的访存完全离散，硬件无法执行合并访存，被迫拆分为 32 次独立的内存事务，总线有效利用率暴跌至不足 5%！</span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a>工业级标准设计采用如**图 3-2** 所示的 **Block-per-Row（一个线程块负责一行矩阵-向量点积）**：</span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每个 Thread Block（例如 <span class="in">`BLOCK_SIZE = 256`</span>）专职负责输出向量的一个分量 $y<span class="co">[</span><span class="ot">\text{row}</span><span class="co">]</span>$，即计算第 <span class="in">`row = blockIdx.x`</span> 行与向量 $x$ 的内积。</span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Block 内的 256 个线程沿着列维度以网格跨步循环前移：</span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a>  <span class="in">```cuda</span></span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="dt">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a>      local_sum <span class="op">+=</span> row_A<span class="op">[</span>col<span class="op">]</span> <span class="op">*</span> x<span class="op">[</span>col<span class="op">];</span></span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a>  <span class="in">```</span></span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**完美访存合并**：Warp 内的线程 0 至 31 访问的地址是 `row_A[0], row_A[1], ..., row_A[31]`，在物理内存上**完全连续且天然 128 字节对齐**！</span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 向量 $x$ 的高速片上缓存复用</span></span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a>在计算过程中，所有的 Block（共 $M$ 个）都需要与同一个向量 $x$ 相乘。</span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a>虽然每个 Block 都从显存中逻辑读取 $x$，但由于硬件 L1 Data Cache 和 L2 Cache（几十 MB）的巨大容量，向量 $x$ 在首个 Block 读取后便大概率常驻在高速片上缓存中，后续各个 Block 读取 $x$ 几乎全部命中 L2 缓存，极大缓解了显存带宽压力。</span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a><span class="fu">#### C. 点积规约与原子写入解耦（图 3-3）</span></span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a>当 Block 内每个线程完成各自负责列的局部乘累加后，调用第 2 课所学的 <span class="in">`block_reduce_sum`</span>：</span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>Warp 内通过 <span class="in">`__shfl_down_sync`</span> 快速树状折叠；</span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>跨 Warp 通过 Shared Memory 汇聚为单一标量 <span class="in">`sum`</span>；</span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>仅由 <span class="in">`tid == 0`</span> 的单线程将偏置 <span class="in">`bias[row]`</span> 加上，直接写回全局内存 <span class="in">`y[row]`</span>。全程**无任何原子操作（Atomic-Free）**，消除了内存争用。</span>
+<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性边界与指针安全性</span></span>
+<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**偏置指针解引用保护**：</span>
+<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>线性层并非全部带有偏置项（例如现代 LLaMA 架构完全移除了偏置）。</span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>内核代码必须支持 <span class="in">`bias == nullptr`</span> 的情况：<span class="in">`y[row] = sum + (bias ? bias[row] : 0.0f);`</span>，严禁无防护直接解引用空指针。</span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**矩阵维度跨步安全**：</span>
+<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当矩阵的行数 $M$ 大于启动的 Block 数量时，必须依赖网格跨步或确保启动网格充足；</span>
+<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>越界检查 <span class="in">`if (row &gt;= M) return;`</span> 必须放在进入行指针计算的最前端。</span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程权舍：何时从 GEMV 转向 GEMM？</span></span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Block 大小的平衡点**：</span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若列数 $N$ 较小（例如 $N=128$），分配 256 线程会导致一半的线程闲置；</span>
+<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>工业级高性能库（如 cuBLAS）会根据 $N$ 的大小动态调整：当 $N \le 64$ 时采用 Warp-per-Row（一个 Warp 负责一行），当 $N \ge 1024$ 时采用 Block-per-Row。</span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**转入 GEMM 的临界点（Prefill vs Decode）**：</span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当并发请求增多，或者进入长 Prompt 预填充阶段（Prefill Phase）时，批次或序列维度 $B \ge 16 \sim 32$。</span>
+<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>矩阵计算变为 $<span class="co">[</span><span class="ot">M, K</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">K, B</span><span class="co">]</span>$。其算术强度随着 $B$ 线性提升：$I \approx \frac{2 M K B}{4(M K + K B + M B)} \gg 10\text{ FLOPs/Byte}$。</span>
+<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时内核从访存瓶颈蜕变为算力密集型，必须立即切换为 Tensor Core 驱动的 GEMM 内核（如 CUTLASS / cuBLAS）。</span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示与数值推演</span></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a>设矩阵 $A$ 维度为 $M = 3$ 行、$N = 1024$ 列，配置 <span class="in">`BLOCK_SIZE = 256`</span>，启动发射网格为 <span class="in">`&lt;&lt;&lt;3, 256&gt;&gt;&gt;`</span>：</span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**硬件映射布局**：</span>
+<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>系统启动 3 个 Thread Block（Block 0, 1, 2 分别绑定处理 Row 0, 1, 2）。</span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>每个 Block 内驻留 256 个线程（分为 8 个 Warp）。</span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**执行推演（以 Block 0 计算 Row 0 为例）**：</span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>单行包含 1024 个列元素，Block 内 256 个线程只需执行 $\frac{1024}{256} = 4$ 轮循环；</span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**第 1 轮（`col = 0 ... 255`）**：256 个线程合并读取 $A<span class="co">[</span><span class="ot">0, 0\dots 255</span><span class="co">]</span>$ 与 $x<span class="co">[</span><span class="ot">0\dots 255</span><span class="co">]</span>$，在寄存器中计算乘积并累加；</span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**第 2~4 轮**：线程每次列索引递增 256，继续以连续事务吞吐剩余元素；</span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>4 轮循环结束后，每个线程的私有寄存器 <span class="in">`local_sum`</span> 中均存有 4 个元素的局部点积和；</span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>调用 <span class="in">`block_reduce_sum`</span> 进行 256 选 1 的快速折叠，耗时仅几十纳秒；</span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`threadIdx.x == 0`</span> 线程加上 <span class="in">`bias[0]`</span>，单次写回 <span class="in">`y[0]`</span>。</span>
+<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**全流程收益**：矩阵 $A$ 的读取 100% 达成 128 字节对齐合并访存，3 行独立输出并行落地。</span>
+<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a>补齐局部点积更新。</span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a>namespace {</span>
+<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV 的核心是 dot product，因此 <span class="bu">reduce</span> 是主要优化点。</span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
+<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
+<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
+<span id="cb4-176"><a href="#cb4-176" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-177"><a href="#cb4-177" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 把一个 block 内所有线程的局部 dot partial <span class="bu">sum</span> 合并成一个 sum。</span>
+<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-183"><a href="#cb4-183" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
+<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
+<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">%</span> <span class="dv">32</span></span>
+<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">/</span> <span class="dv">32</span></span>
+<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
+<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV: y <span class="op">=</span> A <span class="op">*</span> x <span class="op">+</span> bias</span>
+<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> A: [M, N] row<span class="op">-</span>major</span>
+<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x: [N]</span>
+<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y<span class="op">/</span>bias: [M]</span>
+<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 简化优化版本：</span>
+<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 一个 block 负责 A 的一行，block 内线程并行做 dot product。</span>
+<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 这适合面试讲清楚线程映射、coalesced load、block reduce。</span>
+<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 局限：</span>
+<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x 会被每一行重复读取。更进一步的优化可以把 x 分块缓存到 shared memory，</span>
+<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 或者多个 row<span class="op">/</span>block 复用 x tile，但代码会复杂很多。</span>
+<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a>__global__ void gemv_kernel(</span>
+<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ A,</span>
+<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ x,</span>
+<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ bias,</span>
+<span id="cb4-222"><a href="#cb4-222" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ y,</span>
+<span id="cb4-223"><a href="#cb4-223" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-224"><a href="#cb4-224" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N</span>
+<span id="cb4-225"><a href="#cb4-225" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-226"><a href="#cb4-226" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
+<span id="cb4-227"><a href="#cb4-227" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
+<span id="cb4-228"><a href="#cb4-228" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
+<span id="cb4-229"><a href="#cb4-229" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-230"><a href="#cb4-230" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_A <span class="op">=</span> A <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-231"><a href="#cb4-231" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-232"><a href="#cb4-232" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-233"><a href="#cb4-233" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程负责这一行里的若干列。</span>
+<span id="cb4-234"><a href="#cb4-234" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
+<span id="cb4-235"><a href="#cb4-235" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
+<span id="cb4-236"><a href="#cb4-236" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb4-237"><a href="#cb4-237" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> ______<span class="op">;</span>  <span class="op">//</span> TODO: 当前列的乘积</span>
+<span id="cb4-238"><a href="#cb4-238" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-239"><a href="#cb4-239" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-240"><a href="#cb4-240" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
+<span id="cb4-241"><a href="#cb4-241" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-242"><a href="#cb4-242" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> <span class="bu">reduce</span> 完后，只有一个线程写 y[row]，避免写冲突。</span>
+<span id="cb4-243"><a href="#cb4-243" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-244"><a href="#cb4-244" aria-hidden="true" tabindex="-1"></a>        y[row] <span class="op">=</span> <span class="bu">sum</span> <span class="op">+</span> (bias ? bias[row] : <span class="fl">0.0</span><span class="er">f</span>)<span class="op">;</span></span>
+<span id="cb4-245"><a href="#cb4-245" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-246"><a href="#cb4-246" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-247"><a href="#cb4-247" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-248"><a href="#cb4-248" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
+<span id="cb4-249"><a href="#cb4-249" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-250"><a href="#cb4-250" aria-hidden="true" tabindex="-1"></a>void launch_gemv(</span>
+<span id="cb4-251"><a href="#cb4-251" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> A,</span>
+<span id="cb4-252"><a href="#cb4-252" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> x,</span>
+<span id="cb4-253"><a href="#cb4-253" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> bias,</span>
+<span id="cb4-254"><a href="#cb4-254" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> y,</span>
+<span id="cb4-255"><a href="#cb4-255" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-256"><a href="#cb4-256" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb4-257"><a href="#cb4-257" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
+<span id="cb4-258"><a href="#cb4-258" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-259"><a href="#cb4-259" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
+<span id="cb4-260"><a href="#cb4-260" aria-hidden="true" tabindex="-1"></a>    gemv_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
+<span id="cb4-261"><a href="#cb4-261" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
+<span id="cb4-262"><a href="#cb4-262" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
+<span id="cb4-263"><a href="#cb4-263" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-264"><a href="#cb4-264" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-265"><a href="#cb4-265" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-266"><a href="#cb4-266" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb4-267"><a href="#cb4-267" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-268"><a href="#cb4-268" aria-hidden="true" tabindex="-1"></a>有 CUDA 环境时执行 <span class="in">`nvcc -std=c++17 -c /tmp/03_gemv.cu -o /tmp/03_gemv.cu.o`</span>；无 CUDA 环境时只做静态审查并登记待验证。</span>
+<span id="cb4-269"><a href="#cb4-269" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-270"><a href="#cb4-270" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb4-271"><a href="#cb4-271" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-272"><a href="#cb4-272" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb4-273"><a href="#cb4-273" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-274"><a href="#cb4-274" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“GEMV 与行级并行”的工作机制。</span>
+<span id="cb4-275"><a href="#cb4-275" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-276"><a href="#cb4-276" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-277"><a href="#cb4-277" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-278"><a href="#cb4-278" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb4-279"><a href="#cb4-279" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-280"><a href="#cb4-280" aria-hidden="true" tabindex="-1"></a>把一个 thread 映射一整行与一个 block 映射一行相比，瓶颈有何不同？</span>
+<span id="cb4-281"><a href="#cb4-281" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-282"><a href="#cb4-282" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-283"><a href="#cb4-283" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-284"><a href="#cb4-284" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb4-285"><a href="#cb4-285" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-286"><a href="#cb4-286" aria-hidden="true" tabindex="-1"></a>当 batch 中矩阵数量增加时，何时应转向 GEMM？</span>
+<span id="cb4-287"><a href="#cb4-287" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-288"><a href="#cb4-288" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-289"><a href="#cb4-289" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-290"><a href="#cb4-290" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb4-291"><a href="#cb4-291" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-292"><a href="#cb4-292" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb4-293"><a href="#cb4-293" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb4-294"><a href="#cb4-294" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb4-295"><a href="#cb4-295" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-296"><a href="#cb4-296" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb4-297"><a href="#cb4-297" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-298"><a href="#cb4-298" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb4-299"><a href="#cb4-299" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-300"><a href="#cb4-300" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-301"><a href="#cb4-301" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb4-302"><a href="#cb4-302" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-305"><a href="#cb4-305" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-306"><a href="#cb4-306" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb4-307"><a href="#cb4-307" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">3_gemv</span>.cu</span>
+<span id="cb4-308"><a href="#cb4-308" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
+<span id="cb4-309"><a href="#cb4-309" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-310"><a href="#cb4-310" aria-hidden="true" tabindex="-1"></a>namespace {</span>
+<span id="cb4-311"><a href="#cb4-311" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-312"><a href="#cb4-312" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV 的核心是 dot product，因此 <span class="bu">reduce</span> 是主要优化点。</span>
+<span id="cb4-313"><a href="#cb4-313" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-314"><a href="#cb4-314" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-315"><a href="#cb4-315" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
+<span id="cb4-316"><a href="#cb4-316" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
+<span id="cb4-317"><a href="#cb4-317" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
+<span id="cb4-318"><a href="#cb4-318" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-319"><a href="#cb4-319" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-320"><a href="#cb4-320" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-321"><a href="#cb4-321" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-322"><a href="#cb4-322" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 把一个 block 内所有线程的局部 dot partial <span class="bu">sum</span> 合并成一个 sum。</span>
+<span id="cb4-323"><a href="#cb4-323" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-324"><a href="#cb4-324" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-325"><a href="#cb4-325" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
+<span id="cb4-326"><a href="#cb4-326" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
+<span id="cb4-327"><a href="#cb4-327" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-328"><a href="#cb4-328" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">%</span> <span class="dv">32</span></span>
+<span id="cb4-329"><a href="#cb4-329" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span>  <span class="op">//</span>等价于 threadIdx.x <span class="op">/</span> <span class="dv">32</span></span>
+<span id="cb4-330"><a href="#cb4-330" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-331"><a href="#cb4-331" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-332"><a href="#cb4-332" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-333"><a href="#cb4-333" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-334"><a href="#cb4-334" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
+<span id="cb4-335"><a href="#cb4-335" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-336"><a href="#cb4-336" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-337"><a href="#cb4-337" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-338"><a href="#cb4-338" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-339"><a href="#cb4-339" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-340"><a href="#cb4-340" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-341"><a href="#cb4-341" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-342"><a href="#cb4-342" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-343"><a href="#cb4-343" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-344"><a href="#cb4-344" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-345"><a href="#cb4-345" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-346"><a href="#cb4-346" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-347"><a href="#cb4-347" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> GEMV: y <span class="op">=</span> A <span class="op">*</span> x <span class="op">+</span> bias</span>
+<span id="cb4-348"><a href="#cb4-348" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> A: [M, N] row<span class="op">-</span>major</span>
+<span id="cb4-349"><a href="#cb4-349" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x: [N]</span>
+<span id="cb4-350"><a href="#cb4-350" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y<span class="op">/</span>bias: [M]</span>
+<span id="cb4-351"><a href="#cb4-351" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-352"><a href="#cb4-352" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 简化优化版本：</span>
+<span id="cb4-353"><a href="#cb4-353" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 一个 block 负责 A 的一行，block 内线程并行做 dot product。</span>
+<span id="cb4-354"><a href="#cb4-354" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 这适合面试讲清楚线程映射、coalesced load、block reduce。</span>
+<span id="cb4-355"><a href="#cb4-355" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-356"><a href="#cb4-356" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 局限：</span>
+<span id="cb4-357"><a href="#cb4-357" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> x 会被每一行重复读取。更进一步的优化可以把 x 分块缓存到 shared memory，</span>
+<span id="cb4-358"><a href="#cb4-358" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 或者多个 row<span class="op">/</span>block 复用 x tile，但代码会复杂很多。</span>
+<span id="cb4-359"><a href="#cb4-359" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-360"><a href="#cb4-360" aria-hidden="true" tabindex="-1"></a>__global__ void gemv_kernel(</span>
+<span id="cb4-361"><a href="#cb4-361" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ A,</span>
+<span id="cb4-362"><a href="#cb4-362" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ x,</span>
+<span id="cb4-363"><a href="#cb4-363" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ bias,</span>
+<span id="cb4-364"><a href="#cb4-364" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ y,</span>
+<span id="cb4-365"><a href="#cb4-365" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-366"><a href="#cb4-366" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N</span>
+<span id="cb4-367"><a href="#cb4-367" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-368"><a href="#cb4-368" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
+<span id="cb4-369"><a href="#cb4-369" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
+<span id="cb4-370"><a href="#cb4-370" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
+<span id="cb4-371"><a href="#cb4-371" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-372"><a href="#cb4-372" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_A <span class="op">=</span> A <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-373"><a href="#cb4-373" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-374"><a href="#cb4-374" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-375"><a href="#cb4-375" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程负责这一行里的若干列。</span>
+<span id="cb4-376"><a href="#cb4-376" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> A[row, col] 是连续地址，因此一个 warp 同一轮读 A 时是合并访存。</span>
+<span id="cb4-377"><a href="#cb4-377" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> x[col] 也是连续读取，但不同 row 会重复读同一个 x。</span>
+<span id="cb4-378"><a href="#cb4-378" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb4-379"><a href="#cb4-379" aria-hidden="true" tabindex="-1"></a>        local_sum <span class="op">+=</span> row_A[col] <span class="op">*</span> x[col]<span class="op">;</span></span>
+<span id="cb4-380"><a href="#cb4-380" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-381"><a href="#cb4-381" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-382"><a href="#cb4-382" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> <span class="bu">sum</span> <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sum)<span class="op">;</span></span>
+<span id="cb4-383"><a href="#cb4-383" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-384"><a href="#cb4-384" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> <span class="bu">reduce</span> 完后，只有一个线程写 y[row]，避免写冲突。</span>
+<span id="cb4-385"><a href="#cb4-385" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-386"><a href="#cb4-386" aria-hidden="true" tabindex="-1"></a>        y[row] <span class="op">=</span> <span class="bu">sum</span> <span class="op">+</span> (bias ? bias[row] : <span class="fl">0.0</span><span class="er">f</span>)<span class="op">;</span></span>
+<span id="cb4-387"><a href="#cb4-387" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-388"><a href="#cb4-388" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-389"><a href="#cb4-389" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-390"><a href="#cb4-390" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
+<span id="cb4-391"><a href="#cb4-391" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-392"><a href="#cb4-392" aria-hidden="true" tabindex="-1"></a>void launch_gemv(</span>
+<span id="cb4-393"><a href="#cb4-393" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> A,</span>
+<span id="cb4-394"><a href="#cb4-394" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> x,</span>
+<span id="cb4-395"><a href="#cb4-395" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> bias,</span>
+<span id="cb4-396"><a href="#cb4-396" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> y,</span>
+<span id="cb4-397"><a href="#cb4-397" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-398"><a href="#cb4-398" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb4-399"><a href="#cb4-399" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
+<span id="cb4-400"><a href="#cb4-400" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-401"><a href="#cb4-401" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
+<span id="cb4-402"><a href="#cb4-402" aria-hidden="true" tabindex="-1"></a>    gemv_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
+<span id="cb4-403"><a href="#cb4-403" aria-hidden="true" tabindex="-1"></a>        A, x, bias, y, M, N</span>
+<span id="cb4-404"><a href="#cb4-404" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
+<span id="cb4-405"><a href="#cb4-405" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-406"><a href="#cb4-406" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-407"><a href="#cb4-407" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-408"><a href="#cb4-408" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb4-409"><a href="#cb4-409" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-410"><a href="#cb4-410" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输入状态**：全局显存中连续存储的行优先（Row-Major）矩阵 $A \in \mathbb{R}^{M \times N}$、输入向量 $x \in \mathbb{R}^N$、可选偏置向量 $\text{bias} \in \mathbb{R}^M$ 以及启动网格 <span class="in">`&lt;&lt;&lt;M, BLOCK_SIZE&gt;&gt;&gt;`</span>。</span>
+<span id="cb4-411"><a href="#cb4-411" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**状态变化（行级协同计算流）**：</span>
+<span id="cb4-412"><a href="#cb4-412" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>**Block 行绑定与指针偏移**：每个 Block 由其 <span class="in">`blockIdx.x`</span> 唯一绑定矩阵的第 <span class="in">`row`</span> 行，获取行基地址 <span class="in">`row_A = A + row * N`</span>；</span>
+<span id="cb4-413"><a href="#cb4-413" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>**跨步合并内积**：Block 内各线程沿列方向跨步前移（<span class="in">`col += BLOCK_SIZE`</span>），由于相邻线程访问相邻列元素，完美触发 128 字节对齐合并访存，局部点积累加在寄存器 <span class="in">`local_sum`</span> 中；</span>
+<span id="cb4-414"><a href="#cb4-414" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>**树状规约汇聚**：通过 Warp Shuffle 与 Shared Memory 快速完成 Block 内 256 个局部和的折半规约；</span>
+<span id="cb4-415"><a href="#cb4-415" aria-hidden="true" tabindex="-1"></a><span class="ss">  4. </span>**带偏置单点写回**：仅由 <span class="in">`tid == 0`</span> 线程读取可选的 <span class="in">`bias[row]`</span>，相加后单次写出到 <span class="in">`y[row]`</span>。</span>
+<span id="cb4-416"><a href="#cb4-416" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-417"><a href="#cb4-417" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输出状态**：输出向量 $y$ 的 $M$ 个分量被 $M$ 个 Block 并发计算完成，全局内存访问达到接近物理极限的总线利用率。</span>
+<span id="cb4-418"><a href="#cb4-418" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-419"><a href="#cb4-419" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb4-420"><a href="#cb4-420" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-421"><a href="#cb4-421" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**一线程负责一行（Thread-per-Row）的致命瓶颈**：</span>
+<span id="cb4-422"><a href="#cb4-422" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*访存离散（Uncoalesced Memory Access）*：同一个 Warp 内的 32 个线程计算 32 个不同行。在行优先存储下，它们在同一拍访问的地址是 <span class="in">`A[0, col], A[1, col], ..., A[31, col]`</span>，两个地址间距整整相隔 $N \times 4$ 字节！</span>
+<span id="cb4-423"><a href="#cb4-423" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*带宽雪崩*：硬件内存控制器无法合并这些请求，32 个线程产生 32 次独立的非对齐 Cache Line 事务，带宽有效利用率暴跌十倍以上。</span>
+<span id="cb4-424"><a href="#cb4-424" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**一块负责一行（Block-per-Row）的优势与权衡**：</span>
+<span id="cb4-425"><a href="#cb4-425" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*优势*：同一个 Warp 的 32 个线程共同处理同一行内部的相邻列，<span class="in">`A[row, tid]`</span> 地址完全连续，天然达成 128 字节合并访存；</span>
+<span id="cb4-426"><a href="#cb4-426" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*代价*：行内需要额外的 Block 树状规约开销；若矩阵列数 $N$ 较小（如 $N \le 32$），会出现较多空闲线程，此时更适合采用 Warp-per-Row 策略。</span>
+<span id="cb4-427"><a href="#cb4-427" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-428"><a href="#cb4-428" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb4-429"><a href="#cb4-429" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-430"><a href="#cb4-430" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**从 GEMV 转向 GEMM 的算术强度拐点**：</span>
+<span id="cb4-431"><a href="#cb4-431" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>GEMV 的输入批次为 $B=1$（单向量），其算术强度上限仅为 $I \approx 0.5\text{ FLOPs/Byte}$，性能被全局显存（HBM）带宽牢牢锁死在内存受限区（Memory Bound）；</span>
+<span id="cb4-432"><a href="#cb4-432" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当并发请求增多、批次合并（Batching）、或在大模型 Prompt 预填充阶段时，批次大小上升至 $B \ge 16 \sim 32$。</span>
+<span id="cb4-433"><a href="#cb4-433" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>运算形态演化为矩阵乘矩阵 $<span class="co">[</span><span class="ot">M, K</span><span class="co">]</span> \times <span class="co">[</span><span class="ot">K, B</span><span class="co">]</span> \to <span class="co">[</span><span class="ot">M, B</span><span class="co">]</span>$。其理论计算量为 $2 M K B$，而权重矩阵 $A$（$M \times K$）被 $B$ 个样本充分复用，算术强度跃升为：</span>
+<span id="cb4-434"><a href="#cb4-434" aria-hidden="true" tabindex="-1"></a>    $$I_{\text{GEMM}} \approx \frac{2 M K B}{4(M K + K B + M B)} \gg 10\text{ FLOPs/Byte}$$</span>
+<span id="cb4-435"><a href="#cb4-435" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时算子脱离访存受限区，进入 Tensor Core 的高算力受限区（Compute Bound）。必须立即转向利用 Shared Memory 分块缓存与 Tensor Core MMA 指令驱动的 GEMM 内核（如 CUTLASS / cuBLAS）。</span>
+<span id="cb4-436"><a href="#cb4-436" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-437"><a href="#cb4-437" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb4-438"><a href="#cb4-438" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-439"><a href="#cb4-439" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Programming Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-programming-guide/)</span></span>
+<span id="cb4-440"><a href="#cb4-440" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Best Practices Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)</span></span>
+<span id="cb4-441"><a href="#cb4-441" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-442"><a href="#cb4-442" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb4-443"><a href="#cb4-443" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

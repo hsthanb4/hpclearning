@@ -588,11 +588,32 @@ window.Quarto = {
 <section id="它是什么解决什么问题" class="level3">
 <h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
 <p><strong>CuTe Layout（布局代数）</strong> 是 CUTLASS 3.x 的数学基石与核心抽象。它彻底重构了高性能 CUDA 编程中“张量数据在内存与寄存器中如何排布”的认知体系。</p>
-<p><strong>传统 CUDA 编程的坐标地狱 vs.&nbsp;CuTe 布局代数（结合图 2-1 与图 2-2）</strong>： - <strong>传统指针黑魔法的痛点</strong>：在手写 CUDA 代码时，开发者充斥着类似 <code>ptr[b * stride_b + m * lda + n]</code> 这样散落且易错的手工一维偏移量计算。一旦遇到行主序、列主序对调、跨步填充（Padding）或分块转置，整个内核中的索引宏与硬编码偏移就会彻底失控； - <strong>CuTe 的纯函数定义</strong>：Layout 是一个<strong>纯数学函数映射</strong>： <span class="math display">\[f: \text{Domain (多维逻辑坐标)} \to \text{Codomain (一维线性物理偏移)}\]</span> 由形状元组（Shape）与步长元组（Stride）精确配对组合而成：<span class="math inline">\(\text{Layout} = (\text{Shape}, \text{Stride})\)</span>； - <strong>内存所有权完全解耦</strong>：Layout 自身<strong>不占用任何实际物理显存，也不拥有内存所有权</strong>；它只是一个编译期元数据对象。CuTe 的张量（Tensor）概念就是“数据指针（Engine）+ 布局（Layout）”的简洁绑定：<code>make_tensor(ptr, layout)</code>。</p>
+<p><strong>传统 CUDA 编程的坐标地狱 vs.&nbsp;CuTe 布局代数（结合图 2-1 与图 2-2）</strong>： - <strong>传统指针黑魔法的痛点</strong>：在手写 CUDA 代码时，开发者充斥着类似 <code>ptr[b * stride_b + m * lda + n]</code> 这样散落且易错的手工一维偏移量计算。一旦遇到行主序、列主序对调、跨步填充（Padding）或分块转置，整个内核中的索引宏与硬编码偏移就会彻底失控； - <strong>CuTe 的纯函数定义</strong>：Layout 是一个<strong>纯数学函数映射</strong>： <span class="math display">\[f: \text{Domain (多维逻辑坐标)} \to \text{Codomain (一维线性物理偏移)}\]</span> 由形状元组（Shape）与步长元组（Stride）精确配对组合而成：<span class="math inline">\(\text{Layout} = (\text{Shape}, \text{Stride})\)</span>；</p>
+<ul>
+<li><strong>内存所有权完全解耦</strong>：Layout 自身<strong>不占用任何实际物理显存，也不拥有内存所有权</strong>；它只是一个编译期元数据对象。CuTe 的张量（Tensor）概念就是“数据指针（Engine）+ 布局（Layout）”的简洁绑定：<code>make_tensor(ptr, layout)</code>。</li>
+</ul>
 </section>
 <section id="它如何工作结合图-2-1-与图-2-2" class="level3">
 <h3 class="anchored" data-anchor-id="它如何工作结合图-2-1-与图-2-2">2. 它如何工作（结合图 2-1 与图 2-2）</h3>
-<p>CuTe Layout 将多维坐标映射到一维物理地址的通用代数内积流程： 1. <strong>基础二维映射</strong>： - 设布局定义为 <code>(M, N) : (sM, sN)</code>； - 逻辑坐标输入为 <span class="math inline">\((m, n)\)</span>，其中 <span class="math inline">\(0 \le m &lt; M, \ 0 \le n &lt; N\)</span>； - 输出的物理线性偏移量计算为： <span class="math display">\[\text{offset} = m \cdot sM + n \cdot sN\]</span> 2. <strong>主序性（Majorness）的步长表现</strong>： - <strong>列优先（Column-Major）</strong>：<code>Shape = (M, N), Stride = (1, M)</code>。第 0 维（行坐标）步长为 1，相邻行物理连续； - <strong>行优先（Row-Major）</strong>：<code>Shape = (M, N), Stride = (N, 1)</code>。第 1 维（列坐标）步长为 1，相邻列物理连续。 3. <strong>分层嵌套形状（Hierarchical / Nested Layout）</strong>： - Shape 和 Stride 可以是任意递归嵌套的 Tuple，例如： <span class="math display">\[\text{Shape} = ((4, 8), 16), \quad \text{Stride} = ((1, 4), 32)\]</span> - 这允许开发者将“Warp 内部 32 线程的 <span class="math inline">\(4 \times 8\)</span> 排布”与“跨 Warp 的外层维度”在同一个强类型 Layout 中直接层级组合，彻底消除了手工多层下标折算的工程复杂度。</p>
+<p>CuTe Layout 将多维坐标映射到一维物理地址的通用代数内积流程：</p>
+<ol type="1">
+<li><strong>基础二维映射</strong>：
+<ul>
+<li>设布局定义为 <code>(M, N) : (sM, sN)</code>；</li>
+<li>逻辑坐标输入为 <span class="math inline">\((m, n)\)</span>，其中 <span class="math inline">\(0 \le m &lt; M, \ 0 \le n &lt; N\)</span>；</li>
+<li>输出的物理线性偏移量计算为： <span class="math display">\[\text{offset} = m \cdot sM + n \cdot sN\]</span></li>
+</ul></li>
+<li><strong>主序性（Majorness）的步长表现</strong>：
+<ul>
+<li><strong>列优先（Column-Major）</strong>：<code>Shape = (M, N), Stride = (1, M)</code>。第 0 维（行坐标）步长为 1，相邻行物理连续；</li>
+<li><strong>行优先（Row-Major）</strong>：<code>Shape = (M, N), Stride = (N, 1)</code>。第 1 维（列坐标）步长为 1，相邻列物理连续。</li>
+</ul></li>
+<li><strong>分层嵌套形状（Hierarchical / Nested Layout）</strong>：
+<ul>
+<li>Shape 和 Stride 可以是任意递归嵌套的 Tuple，例如： <span class="math display">\[\text{Shape} = ((4, 8), 16), \quad \text{Stride} = ((1, 4), 32)\]</span></li>
+<li>这允许开发者将“Warp 内部 32 线程的 <span class="math inline">\(4 \times 8\)</span> 排布”与“跨 Warp 的外层维度”在同一个强类型 Layout 中直接层级组合，彻底消除了手工多层下标折算的工程复杂度。</li>
+</ul></li>
+</ol>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
@@ -622,13 +643,29 @@ window.Quarto = {
 </section>
 <section id="具体演示行主序-vs.-列主序及-padded-layout-手算对验" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示行主序-vs.-列主序及-padded-layout-手算对验">具体演示：行主序 vs.&nbsp;列主序及 Padded Layout 手算对验</h2>
-<p>考虑形状为 <span class="math inline">\(2 \times 3\)</span> 的矩阵（行数 <span class="math inline">\(M=2\)</span>，列数 <span class="math inline">\(N=3\)</span>）： 1. <strong>行优先布局（Row-Major）</strong>： - 定义：<code>layout = make_layout(make_shape(2, 3), make_stride(3, 1))</code>； - 坐标 <span class="math inline">\((m=1, n=2)\)</span>（第 1 行第 2 列）： <span class="math display">\[\text{offset} = 1 \times 3 + 2 \times 1 = 5\]</span> - 逻辑大小 <code>size = 2 * 3 = 6</code>，物理跨度 <code>cosize = 1 * 3 + 2 * 1 + 1 = 6</code>（紧凑映射，<code>size == cosize</code>）。 2. <strong>带列填充的布局（Padded Strided Layout）</strong>： - 假设为满足 128 字节硬件对齐，将每行的有效 3 列填充到 8 个槽位： - 定义：<code>layout_padded = make_layout(make_shape(2, 3), make_stride(8, 1))</code>； - 坐标 <span class="math inline">\((m=1, n=2)\)</span> 的线性地址： <span class="math display">\[\text{offset} = 1 \times 8 + 2 \times 1 = 10\]</span> - 逻辑元素数 <code>size = 2 * 3 = 6</code> 个，但实际内存最大占用跨度为： <span class="math display">\[\text{cosize} = (1 \times 8 + 2 \times 1) + 1 = 11 \text{ 个元素}\]</span> - 此时必须严格分配至少 11 个元素的物理显存，否则末尾元素写入必然越界崩溃。</p>
+<p>考虑形状为 <span class="math inline">\(2 \times 3\)</span> 的矩阵（行数 <span class="math inline">\(M=2\)</span>，列数 <span class="math inline">\(N=3\)</span>）：</p>
+<ol type="1">
+<li><strong>行优先布局（Row-Major）</strong>：
+<ul>
+<li>定义：<code>layout = make_layout(make_shape(2, 3), make_stride(3, 1))</code>；</li>
+<li>坐标 <span class="math inline">\((m=1, n=2)\)</span>（第 1 行第 2 列）： <span class="math display">\[\text{offset} = 1 \times 3 + 2 \times 1 = 5\]</span></li>
+<li>逻辑大小 <code>size = 2 * 3 = 6</code>，物理跨度 <code>cosize = 1 * 3 + 2 * 1 + 1 = 6</code>（紧凑映射，<code>size == cosize</code>）。</li>
+</ul></li>
+<li><strong>带列填充的布局（Padded Strided Layout）</strong>：
+<ul>
+<li>假设为满足 128 字节硬件对齐，将每行的有效 3 列填充到 8 个槽位：</li>
+<li>定义：<code>layout_padded = make_layout(make_shape(2, 3), make_stride(8, 1))</code>；</li>
+<li>坐标 <span class="math inline">\((m=1, n=2)\)</span> 的线性地址： <span class="math display">\[\text{offset} = 1 \times 8 + 2 \times 1 = 10\]</span></li>
+<li>逻辑元素数 <code>size = 2 * 3 = 6</code> 个，但实际内存最大占用跨度为： <span class="math display">\[\text{cosize} = (1 \times 8 + 2 \times 1) + 1 = 11 \text{ 个元素}\]</span></li>
+<li>此时必须严格分配至少 11 个元素的物理显存，否则末尾元素写入必然越界崩溃。</li>
+</ul></li>
+</ol>
 </section>
 <section id="实践任务唯一代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 row-major CuTe layout 的 stride。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="e7bac074" class="cell" data-course_role="exercise">
+<div id="36ea432f" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>cute_layout.cu</span>
@@ -686,7 +723,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="d0f8c9d0" class="cell" data-course_role="solution">
+<div id="c698321d" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>cute_layout.cu</span>
@@ -722,11 +759,49 @@ window.Quarto = {
 </section>
 <section id="q2-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q2-参考答案">Q2 参考答案</h3>
-<p>若将 <code>size(layout)</code>（定义域逻辑元素数）等同于实际物理显存占用范围，在<strong>非紧凑跨步布局（Non-compact / Padded / Strided Layout）</strong>下会发生灾难性的显存越界崩溃： 1. <strong>显存越界写入的典型场景（Padded 行/列对齐）</strong>： - 考虑形状为 <span class="math inline">\(M=4, N=4\)</span> 的矩阵，为保证硬件 128 字节对齐，将行跨度（Leading Dimension）填充为 8（即物理上一行占 8 个元素槽位，后 4 个为 Padding 虚槽）； - 该布局定义为：<code>Shape = (4, 4), Stride = (8, 1)</code>； - 逻辑大小 <code>size(layout) = 4 * 4 = 16</code>； - 但访问右下角边界坐标 <span class="math inline">\((m=3, n=3)\)</span> 时，映射出的物理偏移为： <span class="math display">\[\text{offset} = 3 \times 8 + 3 \times 1 = 27\]</span> - 此时实际所需的连续物理地址跨度为 <code>cosize(layout) = 28</code>； 2. <strong>毁灭性后果</strong>： - 若分配显存时错误执行 <code>cudaMalloc(&amp;ptr, size(layout) * sizeof(float))</code>，仅分配了 16 个浮点数（64 字节）空间； - 一旦 Kernel 写入坐标 <span class="math inline">\((3, 3)\)</span>，它会向偏移量为 27 的地址（第 108 字节处）强行写入数据，直接踩踏相邻内存，触发硬件 <code>cudaErrorIllegalAddress</code> 崩溃或不可逆的数据静默破坏； - <strong>铁律</strong>：分配物理显存与共享内存时，必须严格使用 <code>cosize(layout) * sizeof(T)</code>，绝不能使用 <code>size(layout)</code>。</p>
+<p>若将 <code>size(layout)</code>（定义域逻辑元素数）等同于实际物理显存占用范围，在<strong>非紧凑跨步布局（Non-compact / Padded / Strided Layout）</strong>下会发生灾难性的显存越界崩溃：</p>
+<ol type="1">
+<li><strong>显存越界写入的典型场景（Padded 行/列对齐）</strong>：
+<ul>
+<li>考虑形状为 <span class="math inline">\(M=4, N=4\)</span> 的矩阵，为保证硬件 128 字节对齐，将行跨度（Leading Dimension）填充为 8（即物理上一行占 8 个元素槽位，后 4 个为 Padding 虚槽）；</li>
+<li>该布局定义为：<code>Shape = (4, 4), Stride = (8, 1)</code>；</li>
+<li>逻辑大小 <code>size(layout) = 4 * 4 = 16</code>；</li>
+<li>但访问右下角边界坐标 <span class="math inline">\((m=3, n=3)\)</span> 时，映射出的物理偏移为： <span class="math display">\[\text{offset} = 3 \times 8 + 3 \times 1 = 27\]</span></li>
+<li>此时实际所需的连续物理地址跨度为 <code>cosize(layout) = 28</code>；</li>
+</ul></li>
+<li><strong>毁灭性后果</strong>：
+<ul>
+<li>若分配显存时错误执行 <code>cudaMalloc(&amp;ptr, size(layout) * sizeof(float))</code>，仅分配了 16 个浮点数（64 字节）空间；</li>
+<li>一旦 Kernel 写入坐标 <span class="math inline">\((3, 3)\)</span>，它会向偏移量为 27 的地址（第 108 字节处）强行写入数据，直接踩踏相邻内存，触发硬件 <code>cudaErrorIllegalAddress</code> 崩溃或不可逆的数据静默破坏；</li>
+<li><strong>铁律</strong>：分配物理显存与共享内存时，必须严格使用 <code>cosize(layout) * sizeof(T)</code>，绝不能使用 <code>size(layout)</code>。</li>
+</ul></li>
+</ol>
 </section>
 <section id="q3-参考答案" class="level3">
 <h3 class="anchored" data-anchor-id="q3-参考答案">Q3 参考答案</h3>
-<p>在处理带有 Batch 维度且行间、Batch 间存在内存对齐填充（Padding）的 3D 张量时，CuTe Layout 能够以极度优雅的方式通过 Stride 显式建模： 1. <strong>张量几何与物理参数定义</strong>： - 逻辑有效维度：矩阵行数为 <span class="math inline">\(M\)</span>，列数为 <span class="math inline">\(N\)</span>，Batch 大小为 <span class="math inline">\(B\)</span>（逻辑形状 <code>Shape = (M, N, B)</code>）； - 物理填充参数： - 列为行主序连续存储，相邻列步长为 <span class="math inline">\(1\)</span>； - 每一行有效宽度为 <span class="math inline">\(N\)</span>，但为了对齐硬件 Cache Line 填充为 <span class="math inline">\(P\)</span>（即行 Leading Dimension 步长为 <span class="math inline">\(P\)</span>，其中 <span class="math inline">\(P \ge N\)</span>）； - 每一个完整的 2D 矩阵实际占用空间为 <span class="math inline">\(M \times P\)</span>，但为了满足页对齐或跨 Block 对齐，各个 Batch 矩阵之间的跨度填充为 <span class="math inline">\(S\)</span>（即 Batch Stride 步长为 <span class="math inline">\(S\)</span>，其中 <span class="math inline">\(S \ge M \times P\)</span>）； 2. <strong>CuTe 布局构造</strong>： <code>cpp    auto padded_batch_layout = make_layout(        make_shape(M, N, B),        make_stride(P, 1, S)    );</code> 3. <strong>坐标映射解析</strong>： - 对任意样本的任意逻辑坐标 <span class="math inline">\((m, n, b)\)</span>，其物理偏移计算公式由 Layout 自动解算： <span class="math display">\[\text{offset}(m, n, b) = m \cdot P + n \cdot 1 + b \cdot S\]</span> - 核心优势：业务算法代码中可以完全保持纯粹的 <span class="math inline">\((m, n, b)\)</span> 逻辑坐标表达，所有的硬件对齐、跨步填充细节全部被无侵入地封装在 Layout 的 Stride 元组中，实现了算法逻辑与物理排布的完美解耦。</p>
+<p>在处理带有 Batch 维度且行间、Batch 间存在内存对齐填充（Padding）的 3D 张量时，CuTe Layout 能够以极度优雅的方式通过 Stride 显式建模：</p>
+<ol type="1">
+<li><p><strong>张量几何与物理参数定义</strong>：</p>
+<ul>
+<li>逻辑有效维度：矩阵行数为 <span class="math inline">\(M\)</span>，列数为 <span class="math inline">\(N\)</span>，Batch 大小为 <span class="math inline">\(B\)</span>（逻辑形状 <code>Shape = (M, N, B)</code>）；</li>
+<li>物理填充参数：
+<ul>
+<li>列为行主序连续存储，相邻列步长为 <span class="math inline">\(1\)</span>；</li>
+<li>每一行有效宽度为 <span class="math inline">\(N\)</span>，但为了对齐硬件 Cache Line 填充为 <span class="math inline">\(P\)</span>（即行 Leading Dimension 步长为 <span class="math inline">\(P\)</span>，其中 <span class="math inline">\(P \ge N\)</span>）；</li>
+<li>每一个完整的 2D 矩阵实际占用空间为 <span class="math inline">\(M \times P\)</span>，但为了满足页对齐或跨 Block 对齐，各个 Batch 矩阵之间的跨度填充为 <span class="math inline">\(S\)</span>（即 Batch Stride 步长为 <span class="math inline">\(S\)</span>，其中 <span class="math inline">\(S \ge M \times P\)</span>）；</li>
+</ul></li>
+</ul></li>
+<li><p><strong>CuTe 布局构造</strong>：</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">auto</span> padded_batch_layout <span class="op">=</span> make_layout<span class="op">(</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    make_shape<span class="op">(</span>M<span class="op">,</span> N<span class="op">,</span> B<span class="op">),</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    make_stride<span class="op">(</span>P<span class="op">,</span> <span class="dv">1</span><span class="op">,</span> S<span class="op">)</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="op">);</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div></li>
+<li><p><strong>坐标映射解析</strong>：</p>
+<ul>
+<li>对任意样本的任意逻辑坐标 <span class="math inline">\((m, n, b)\)</span>，其物理偏移计算公式由 Layout 自动解算： <span class="math display">\[\text{offset}(m, n, b) = m \cdot P + n \cdot 1 + b \cdot S\]</span></li>
+<li>核心优势：业务算法代码中可以完全保持纯粹的 <span class="math inline">\((m, n, b)\)</span> 逻辑坐标表达，所有的硬件对齐、跨步填充细节全部被无侵入地封装在 Layout 的 Stride 元组中，实现了算法逻辑与物理排布的完美解耦。</li>
+</ul></li>
+</ol>
 </section>
 </section>
 <section id="参考资料" class="level2">
@@ -1214,240 +1289,248 @@ window.Quarto = {
     }
   });
   </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 2 课：CuTe Layout：Shape、Stride 与坐标映射"</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
-<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>学完后你应能：读写 <span class="in">`shape:stride`</span>，手算坐标到线性索引，并识别 layout 的余域与别名。</span>
-<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
-<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
-<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
-<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
-<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
-<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：CUDA 线程模型、GEMM、C++ 模板基础</span>
-<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：CuTe Layout 是坐标到整数索引的函数，由层级 Shape 和 Stride 组合；它描述映射，不拥有内存。</span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a><span class="al">![CuTe Layout 映射图](assets/figs/fig_01_CuTe_的第_1_种_Layout____Tensor_Layout.png)</span>{width="90%"}</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 2-1：CuTe Layout 核心代数：Shape、Stride 与多维逻辑坐标到一维内存物理偏移的映射<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    Coord[<span class="ot">"</span><span class="st">逻辑坐标 (m, n)</span><span class="ot">"</span>] --&gt; InnerProduct[<span class="ot">"</span><span class="st">坐标与步长做代数内积: offset = m * stride_m + n * stride_n</span><span class="ot">"</span>]</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    InnerProduct --&gt; MemOffset[<span class="ot">"</span><span class="st">物理内存一维下标 1D Pointer Offset</span><span class="ot">"</span>]</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    MemOffset --&gt; Memory[<span class="ot">"</span><span class="st">高效定位全局显存或共享内存单元</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 2-2：CuTe 核心代数坐标变换与内存地址计算流水<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>**CuTe Layout（布局代数）** 是 CUTLASS 3.x 的数学基石与核心抽象。它彻底重构了高性能 CUDA 编程中“张量数据在内存与寄存器中如何排布”的认知体系。</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>**传统 CUDA 编程的坐标地狱 vs. CuTe 布局代数（结合图 2-1 与图 2-2）**：</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**传统指针黑魔法的痛点**：在手写 CUDA 代码时，开发者充斥着类似 <span class="in">`ptr[b * stride_b + m * lda + n]`</span> 这样散落且易错的手工一维偏移量计算。一旦遇到行主序、列主序对调、跨步填充（Padding）或分块转置，整个内核中的索引宏与硬编码偏移就会彻底失控；</span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CuTe 的纯函数定义**：Layout 是一个**纯数学函数映射**：</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>  $$f: \text{Domain (多维逻辑坐标)} \to \text{Codomain (一维线性物理偏移)}$$</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>  由形状元组（Shape）与步长元组（Stride）精确配对组合而成：$\text{Layout} = (\text{Shape}, \text{Stride})$；</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**内存所有权完全解耦**：Layout 自身**不占用任何实际物理显存，也不拥有内存所有权**；它只是一个编译期元数据对象。CuTe 的张量（Tensor）概念就是“数据指针（Engine）+ 布局（Layout）”的简洁绑定：<span class="in">`make_tensor(ptr, layout)`</span>。</span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作（结合图 2-1 与图 2-2）</span></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>CuTe Layout 将多维坐标映射到一维物理地址的通用代数内积流程：</span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**基础二维映射**：</span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>设布局定义为 <span class="in">`(M, N) : (sM, sN)`</span>；</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑坐标输入为 $(m, n)$，其中 $0 \le m &lt; M, \ 0 \le n &lt; N$；</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>输出的物理线性偏移量计算为：</span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = m \cdot sM + n \cdot sN$$</span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**主序性（Majorness）的步长表现**：</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**列优先（Column-Major）**：<span class="in">`Shape = (M, N), Stride = (1, M)`</span>。第 0 维（行坐标）步长为 1，相邻行物理连续；</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**行优先（Row-Major）**：<span class="in">`Shape = (M, N), Stride = (N, 1)`</span>。第 1 维（列坐标）步长为 1，相邻列物理连续。</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**分层嵌套形状（Hierarchical / Nested Layout）**：</span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Shape 和 Stride 可以是任意递归嵌套的 Tuple，例如：</span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>     $$\text{Shape} = ((4, 8), 16), \quad \text{Stride} = ((1, 4), 32)$$</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>这允许开发者将“Warp 内部 32 线程的 $4 \times 8$ 排布”与“跨 Warp 的外层维度”在同一个强类型 Layout 中直接层级组合，彻底消除了手工多层下标折算的工程复杂度。</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**`size` 与 `cosize` 的致命混淆（显存越界重灾区）**：</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`size(Layout)`**：定义域中逻辑元素的总个数，即 $\prod \text{shape}_i$；</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`cosize(Layout)`**：值域中实际覆盖的一维物理内存跨度大小，即 $\max_{c \in \text{Domain}} f(c) + 1$；</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**致命误区**：在带步长跨步（Padded/Strided）的张量中，<span class="in">`cosize`</span> 远远大于 <span class="in">`size`</span>！若错误地按照 <span class="in">`size() * sizeof(T)`</span> 去 <span class="in">`cudaMalloc`</span> 分配显存，一旦访问边界坐标，就会直接发生非法显存越界段错误（<span class="in">`cudaErrorIllegalAddress`</span>）；</span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**别名（Aliasing）与非单射映射**：</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当某维度的 Stride 设为 0 时（广播操作），多个不同的逻辑坐标会映射到同一个物理内存位置；在只读场景下合法，但在并行写回输出时会导致严重的并发写覆写冲突。</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**静态编译期常量（`Int&lt;N&gt;`）vs. 动态运行时维度**：</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若使用 <span class="in">`cute::Int&lt;M&gt;{}`</span> 定义静态编译期常数，C++ 编译器会展开所有乘加运算，将步长乘法完全优化为移位指令或单周期地址计算，并在编译期通过模板元编程证明不存在越界与 Bank 冲突；</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若引入动态运行时维度，灵活性提升，但编译器无法进行代数化简（Algebraic Simplification），会引入额外的运行时乘法指令与寄存器开销。</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：行主序 vs. 列主序及 Padded Layout 手算对验</span></span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>考虑形状为 $2 \times 3$ 的矩阵（行数 $M=2$，列数 $N=3$）：</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**行优先布局（Row-Major）**：</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>定义：<span class="in">`layout = make_layout(make_shape(2, 3), make_stride(3, 1))`</span>；</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>坐标 $(m=1, n=2)$（第 1 行第 2 列）：</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = 1 \times 3 + 2 \times 1 = 5$$</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑大小 <span class="in">`size = 2 * 3 = 6`</span>，物理跨度 <span class="in">`cosize = 1 * 3 + 2 * 1 + 1 = 6`</span>（紧凑映射，<span class="in">`size == cosize`</span>）。</span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**带列填充的布局（Padded Strided Layout）**：</span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>假设为满足 128 字节硬件对齐，将每行的有效 3 列填充到 8 个槽位：</span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>定义：<span class="in">`layout_padded = make_layout(make_shape(2, 3), make_stride(8, 1))`</span>；</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>坐标 $(m=1, n=2)$ 的线性地址：</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = 1 \times 8 + 2 \times 1 = 10$$</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑元素数 <span class="in">`size = 2 * 3 = 6`</span> 个，但实际内存最大占用跨度为：</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a>     $$\text{cosize} = (1 \times 8 + 2 \times 1) + 1 = 11 \text{ 个元素}$$</span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时必须严格分配至少 11 个元素的物理显存，否则末尾元素写入必然越界崩溃。</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a>补齐 row-major CuTe layout 的 stride。</span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>cute_layout.cu</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cute/layout.hpp&gt;</span></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>using namespace cute<span class="op">;</span></span>
-<span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a><span class="bu">int</span> main() {</span>
-<span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a>  auto layout <span class="op">=</span> make_layout(make_shape(Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">3</span><span class="op">&gt;</span>{}),</span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>                            make_stride(______, ______))<span class="op">;</span></span>
-<span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a>  static_assert(decltype(layout(Int<span class="op">&lt;</span><span class="dv">1</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}))::value <span class="op">==</span> <span class="dv">5</span>)<span class="op">;</span></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a>在配置 CUTLASS include 路径后用 nvcc 编译；无环境时手算 6 个坐标映射并检查无别名。</span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“CuTe Layout：Shape、Stride 与坐标映射”的工作机制。</span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a>把 size 当作实际占用地址范围会在哪种 stride 下出错？</span>
-<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>如何用 layout 表示 batch 维有 padding 的矩阵？</span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>cute_layout.cu</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cute/layout.hpp&gt;</span></span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>using namespace cute<span class="op">;</span></span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a><span class="bu">int</span> main() {</span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>  auto layout <span class="op">=</span> make_layout(make_shape(Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">3</span><span class="op">&gt;</span>{}),</span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a>                            make_stride(Int<span class="op">&lt;</span><span class="dv">3</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">1</span><span class="op">&gt;</span>{}))<span class="op">;</span></span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a>  static_assert(decltype(layout(Int<span class="op">&lt;</span><span class="dv">1</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}))::value <span class="op">==</span> <span class="dv">5</span>)<span class="op">;</span></span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（Hierarchical Coordinate Parsing）**：</span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>调用者向 Layout 函数传入一个或一组逻辑坐标。坐标可以是标量整数、也可以是嵌套元组（如 <span class="in">`(m, n)`</span> 或 <span class="in">`((w_m, t_m), n)`</span>）；</span>
-<span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Layout 内部通过强类型代数检查该逻辑坐标是否落在自身定义的几何空间（Domain，即 Shape 所界定的范围）之内；</span>
-<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（Algebraic Dot-Product Evaluation）**：</span>
-<span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Layout 对输入的多维坐标向量与预设的步长向量（Stride）执行代数内积折叠运算；</span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若 Shape/Stride 包含分层嵌套结构（Nested Tuple），CuTe 递归展开各级子元组，将局部的子分块坐标（如 Warp 内线程号与寄存器编号）逐级投射配平，最终线性折叠为一个统一的整数标量；</span>
-<span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（Physical Offset Generation）**：</span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>函数返回唯一确定的 1D 线性物理偏移量（Offset）；</span>
-<span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>该偏移量直接与底层原始数据指针（Data Pointer）相加，索引物理显存（Global Memory）、片上共享内存（SMem）或寄存器文件（Register File）中的目标物理槽位。</span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a>若将 <span class="in">`size(layout)`</span>（定义域逻辑元素数）等同于实际物理显存占用范围，在**非紧凑跨步布局（Non-compact / Padded / Strided Layout）**下会发生灾难性的显存越界崩溃：</span>
-<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**显存越界写入的典型场景（Padded 行/列对齐）**：</span>
-<span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>考虑形状为 $M=4, N=4$ 的矩阵，为保证硬件 128 字节对齐，将行跨度（Leading Dimension）填充为 8（即物理上一行占 8 个元素槽位，后 4 个为 Padding 虚槽）；</span>
-<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>该布局定义为：<span class="in">`Shape = (4, 4), Stride = (8, 1)`</span>；</span>
-<span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑大小 <span class="in">`size(layout) = 4 * 4 = 16`</span>；</span>
-<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>但访问右下角边界坐标 $(m=3, n=3)$ 时，映射出的物理偏移为：</span>
-<span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = 3 \times 8 + 3 \times 1 = 27$$</span>
-<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时实际所需的连续物理地址跨度为 <span class="in">`cosize(layout) = 28`</span>；</span>
-<span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**毁灭性后果**：</span>
-<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若分配显存时错误执行 <span class="in">`cudaMalloc(&amp;ptr, size(layout) * sizeof(float))`</span>，仅分配了 16 个浮点数（64 字节）空间；</span>
-<span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>一旦 Kernel 写入坐标 $(3, 3)$，它会向偏移量为 27 的地址（第 108 字节处）强行写入数据，直接踩踏相邻内存，触发硬件 <span class="in">`cudaErrorIllegalAddress`</span> 崩溃或不可逆的数据静默破坏；</span>
-<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**铁律**：分配物理显存与共享内存时，必须严格使用 <span class="in">`cosize(layout) * sizeof(T)`</span>，绝不能使用 <span class="in">`size(layout)`</span>。</span>
-<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a>在处理带有 Batch 维度且行间、Batch 间存在内存对齐填充（Padding）的 3D 张量时，CuTe Layout 能够以极度优雅的方式通过 Stride 显式建模：</span>
-<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**张量几何与物理参数定义**：</span>
-<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑有效维度：矩阵行数为 $M$，列数为 $N$，Batch 大小为 $B$（逻辑形状 <span class="in">`Shape = (M, N, B)`</span>）；</span>
-<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>物理填充参数：</span>
-<span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a><span class="ss">     - </span>列为行主序连续存储，相邻列步长为 $1$；</span>
-<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a><span class="ss">     - </span>每一行有效宽度为 $N$，但为了对齐硬件 Cache Line 填充为 $P$（即行 Leading Dimension 步长为 $P$，其中 $P \ge N$）；</span>
-<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a><span class="ss">     - </span>每一个完整的 2D 矩阵实际占用空间为 $M \times P$，但为了满足页对齐或跨 Block 对齐，各个 Batch 矩阵之间的跨度填充为 $S$（即 Batch Stride 步长为 $S$，其中 $S \ge M \times P$）；</span>
-<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**CuTe 布局构造**：</span>
-<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a>   <span class="in">```cpp</span></span>
-<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a>   <span class="kw">auto</span> padded_batch_layout <span class="op">=</span> make_layout<span class="op">(</span></span>
-<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>       make_shape<span class="op">(</span>M<span class="op">,</span> N<span class="op">,</span> B<span class="op">),</span></span>
-<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a>       make_stride<span class="op">(</span>P<span class="op">,</span> <span class="dv">1</span><span class="op">,</span> S<span class="op">)</span></span>
-<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a>   <span class="op">);</span></span>
-<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a>   <span class="in">```</span></span>
-<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**坐标映射解析**：</span>
-<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对任意样本的任意逻辑坐标 $(m, n, b)$，其物理偏移计算公式由 Layout 自动解算：</span>
-<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>     $$\text{offset}(m, n, b) = m \cdot P + n \cdot 1 + b \cdot S$$</span>
-<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>核心优势：业务算法代码中可以完全保持纯粹的 $(m, n, b)$ 逻辑坐标表达，所有的硬件对齐、跨步填充细节全部被无侵入地封装在 Layout 的 Stride 元组中，实现了算法逻辑与物理排布的完美解耦。</span>
-<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CuTe Layout Algebra</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/01_layout.html)</span></span>
-<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CuTe Tensors</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/03_tensor.html)</span></span>
-<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CuTe Algorithms</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/04_algorithms.html)</span></span>
-<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUTLASS GEMM API</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/gemm_api.html)</span></span>
-<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUTLASS repository</span><span class="co">](https://github.com/NVIDIA/cutlass)</span></span>
-<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a>:::</span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "第 2 课：CuTe Layout：Shape、Stride 与坐标映射"</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="an">jupyter:</span><span class="co"> python3</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="fu">## 本课目标与完成标准</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>学完后你应能：读写 <span class="in">`shape:stride`</span>，手算坐标到线性索引，并识别 layout 的余域与别名。</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>通过必须同时满足：</span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>独立补齐本课唯一的代码填空题，并通过给定检查；</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>三个问答题均说明因果链，而不是只报术语；</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>能指出至少一个正确性边界和一个性能取舍；</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>总分不低于 8/10，且没有一票否决级概念错误。</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a><span class="fu">## 前置关系</span></span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>课程前置：CUDA 线程模型、GEMM、C++ 模板基础</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>本课在路线中的作用：CuTe Layout 是坐标到整数索引的函数，由层级 Shape 和 Stride 组合；它描述映射，不拥有内存。</span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a><span class="al">![CuTe Layout 映射图](assets/figs/fig_01_CuTe_的第_1_种_Layout____Tensor_Layout.png)</span>{width="90%"}</span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 2-1：CuTe Layout 核心代数：Shape、Stride 与多维逻辑坐标到一维内存物理偏移的映射<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>    Coord[<span class="ot">"</span><span class="st">逻辑坐标 (m, n)</span><span class="ot">"</span>] --&gt; InnerProduct[<span class="ot">"</span><span class="st">坐标与步长做代数内积: offset = m * stride_m + n * stride_n</span><span class="ot">"</span>]</span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>    InnerProduct --&gt; MemOffset[<span class="ot">"</span><span class="st">物理内存一维下标 1D Pointer Offset</span><span class="ot">"</span>]</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>    MemOffset --&gt; Memory[<span class="ot">"</span><span class="st">高效定位全局显存或共享内存单元</span><span class="ot">"</span>]</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 2-2：CuTe 核心代数坐标变换与内存地址计算流水<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>**CuTe Layout（布局代数）** 是 CUTLASS 3.x 的数学基石与核心抽象。它彻底重构了高性能 CUDA 编程中“张量数据在内存与寄存器中如何排布”的认知体系。</span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>**传统 CUDA 编程的坐标地狱 vs. CuTe 布局代数（结合图 2-1 与图 2-2）**：</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**传统指针黑魔法的痛点**：在手写 CUDA 代码时，开发者充斥着类似 <span class="in">`ptr[b * stride_b + m * lda + n]`</span> 这样散落且易错的手工一维偏移量计算。一旦遇到行主序、列主序对调、跨步填充（Padding）或分块转置，整个内核中的索引宏与硬编码偏移就会彻底失控；</span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CuTe 的纯函数定义**：Layout 是一个**纯数学函数映射**：</span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>  $$f: \text{Domain (多维逻辑坐标)} \to \text{Codomain (一维线性物理偏移)}$$</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>  由形状元组（Shape）与步长元组（Stride）精确配对组合而成：$\text{Layout} = (\text{Shape}, \text{Stride})$；</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**内存所有权完全解耦**：Layout 自身**不占用任何实际物理显存，也不拥有内存所有权**；它只是一个编译期元数据对象。CuTe 的张量（Tensor）概念就是“数据指针（Engine）+ 布局（Layout）”的简洁绑定：<span class="in">`make_tensor(ptr, layout)`</span>。</span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作（结合图 2-1 与图 2-2）</span></span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a>CuTe Layout 将多维坐标映射到一维物理地址的通用代数内积流程：</span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**基础二维映射**：</span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>设布局定义为 <span class="in">`(M, N) : (sM, sN)`</span>；</span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑坐标输入为 $(m, n)$，其中 $0 \le m &lt; M, \ 0 \le n &lt; N$；</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>输出的物理线性偏移量计算为：</span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = m \cdot sM + n \cdot sN$$</span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**主序性（Majorness）的步长表现**：</span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**列优先（Column-Major）**：<span class="in">`Shape = (M, N), Stride = (1, M)`</span>。第 0 维（行坐标）步长为 1，相邻行物理连续；</span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**行优先（Row-Major）**：<span class="in">`Shape = (M, N), Stride = (N, 1)`</span>。第 1 维（列坐标）步长为 1，相邻列物理连续。</span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**分层嵌套形状（Hierarchical / Nested Layout）**：</span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Shape 和 Stride 可以是任意递归嵌套的 Tuple，例如：</span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>     $$\text{Shape} = ((4, 8), 16), \quad \text{Stride} = ((1, 4), 32)$$</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>这允许开发者将“Warp 内部 32 线程的 $4 \times 8$ 排布”与“跨 Warp 的外层维度”在同一个强类型 Layout 中直接层级组合，彻底消除了手工多层下标折算的工程复杂度。</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**`size` 与 `cosize` 的致命混淆（显存越界重灾区）**：</span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`size(Layout)`**：定义域中逻辑元素的总个数，即 $\prod \text{shape}_i$；</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`cosize(Layout)`**：值域中实际覆盖的一维物理内存跨度大小，即 $\max_{c \in \text{Domain}} f(c) + 1$；</span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**致命误区**：在带步长跨步（Padded/Strided）的张量中，<span class="in">`cosize`</span> 远远大于 <span class="in">`size`</span>！若错误地按照 <span class="in">`size() * sizeof(T)`</span> 去 <span class="in">`cudaMalloc`</span> 分配显存，一旦访问边界坐标，就会直接发生非法显存越界段错误（<span class="in">`cudaErrorIllegalAddress`</span>）；</span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**别名（Aliasing）与非单射映射**：</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当某维度的 Stride 设为 0 时（广播操作），多个不同的逻辑坐标会映射到同一个物理内存位置；在只读场景下合法，但在并行写回输出时会导致严重的并发写覆写冲突。</span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**静态编译期常量（`Int&lt;N&gt;`）vs. 动态运行时维度**：</span>
+<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若使用 <span class="in">`cute::Int&lt;M&gt;{}`</span> 定义静态编译期常数，C++ 编译器会展开所有乘加运算，将步长乘法完全优化为移位指令或单周期地址计算，并在编译期通过模板元编程证明不存在越界与 Bank 冲突；</span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若引入动态运行时维度，灵活性提升，但编译器无法进行代数化简（Algebraic Simplification），会引入额外的运行时乘法指令与寄存器开销。</span>
+<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：行主序 vs. 列主序及 Padded Layout 手算对验</span></span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a>考虑形状为 $2 \times 3$ 的矩阵（行数 $M=2$，列数 $N=3$）：</span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**行优先布局（Row-Major）**：</span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>定义：<span class="in">`layout = make_layout(make_shape(2, 3), make_stride(3, 1))`</span>；</span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>坐标 $(m=1, n=2)$（第 1 行第 2 列）：</span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = 1 \times 3 + 2 \times 1 = 5$$</span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑大小 <span class="in">`size = 2 * 3 = 6`</span>，物理跨度 <span class="in">`cosize = 1 * 3 + 2 * 1 + 1 = 6`</span>（紧凑映射，<span class="in">`size == cosize`</span>）。</span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**带列填充的布局（Padded Strided Layout）**：</span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>假设为满足 128 字节硬件对齐，将每行的有效 3 列填充到 8 个槽位：</span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>定义：<span class="in">`layout_padded = make_layout(make_shape(2, 3), make_stride(8, 1))`</span>；</span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>坐标 $(m=1, n=2)$ 的线性地址：</span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = 1 \times 8 + 2 \times 1 = 10$$</span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑元素数 <span class="in">`size = 2 * 3 = 6`</span> 个，但实际内存最大占用跨度为：</span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a>     $$\text{cosize} = (1 \times 8 + 2 \times 1) + 1 = 11 \text{ 个元素}$$</span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时必须严格分配至少 11 个元素的物理显存，否则末尾元素写入必然越界崩溃。</span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a>补齐 row-major CuTe layout 的 stride。</span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>cute_layout.cu</span>
+<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cute/layout.hpp&gt;</span></span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a>using namespace cute<span class="op">;</span></span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a><span class="bu">int</span> main() {</span>
+<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a>  auto layout <span class="op">=</span> make_layout(make_shape(Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">3</span><span class="op">&gt;</span>{}),</span>
+<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a>                            make_stride(______, ______))<span class="op">;</span></span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a>  static_assert(decltype(layout(Int<span class="op">&lt;</span><span class="dv">1</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}))::value <span class="op">==</span> <span class="dv">5</span>)<span class="op">;</span></span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a>在配置 CUTLASS include 路径后用 nvcc 编译；无环境时手算 6 个坐标映射并检查无别名。</span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“CuTe Layout：Shape、Stride 与坐标映射”的工作机制。</span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a>把 size 当作实际占用地址范围会在哪种 stride 下出错？</span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a>如何用 layout 表示 batch 维有 padding 的矩阵？</span>
+<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span>cute_layout.cu</span>
+<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cute/layout.hpp&gt;</span></span>
+<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a>using namespace cute<span class="op">;</span></span>
+<span id="cb4-176"><a href="#cb4-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-177"><a href="#cb4-177" aria-hidden="true" tabindex="-1"></a><span class="bu">int</span> main() {</span>
+<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a>  auto layout <span class="op">=</span> make_layout(make_shape(Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">3</span><span class="op">&gt;</span>{}),</span>
+<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a>                            make_stride(Int<span class="op">&lt;</span><span class="dv">3</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">1</span><span class="op">&gt;</span>{}))<span class="op">;</span></span>
+<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a>  static_assert(decltype(layout(Int<span class="op">&lt;</span><span class="dv">1</span><span class="op">&gt;</span>{}, Int<span class="op">&lt;</span><span class="dv">2</span><span class="op">&gt;</span>{}))::value <span class="op">==</span> <span class="dv">5</span>)<span class="op">;</span></span>
+<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-183"><a href="#cb4-183" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**输入阶段（Hierarchical Coordinate Parsing）**：</span>
+<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>调用者向 Layout 函数传入一个或一组逻辑坐标。坐标可以是标量整数、也可以是嵌套元组（如 <span class="in">`(m, n)`</span> 或 <span class="in">`((w_m, t_m), n)`</span>）；</span>
+<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Layout 内部通过强类型代数检查该逻辑坐标是否落在自身定义的几何空间（Domain，即 Shape 所界定的范围）之内；</span>
+<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**状态变化阶段（Algebraic Dot-Product Evaluation）**：</span>
+<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Layout 对输入的多维坐标向量与预设的步长向量（Stride）执行代数内积折叠运算；</span>
+<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若 Shape/Stride 包含分层嵌套结构（Nested Tuple），CuTe 递归展开各级子元组，将局部的子分块坐标（如 Warp 内线程号与寄存器编号）逐级投射配平，最终线性折叠为一个统一的整数标量；</span>
+<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**输出阶段（Physical Offset Generation）**：</span>
+<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>函数返回唯一确定的 1D 线性物理偏移量（Offset）；</span>
+<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>该偏移量直接与底层原始数据指针（Data Pointer）相加，索引物理显存（Global Memory）、片上共享内存（SMem）或寄存器文件（Register File）中的目标物理槽位。</span>
+<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a>若将 <span class="in">`size(layout)`</span>（定义域逻辑元素数）等同于实际物理显存占用范围，在**非紧凑跨步布局（Non-compact / Padded / Strided Layout）**下会发生灾难性的显存越界崩溃：</span>
+<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**显存越界写入的典型场景（Padded 行/列对齐）**：</span>
+<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>考虑形状为 $M=4, N=4$ 的矩阵，为保证硬件 128 字节对齐，将行跨度（Leading Dimension）填充为 8（即物理上一行占 8 个元素槽位，后 4 个为 Padding 虚槽）；</span>
+<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>该布局定义为：<span class="in">`Shape = (4, 4), Stride = (8, 1)`</span>；</span>
+<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑大小 <span class="in">`size(layout) = 4 * 4 = 16`</span>；</span>
+<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>但访问右下角边界坐标 $(m=3, n=3)$ 时，映射出的物理偏移为：</span>
+<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a>     $$\text{offset} = 3 \times 8 + 3 \times 1 = 27$$</span>
+<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时实际所需的连续物理地址跨度为 <span class="in">`cosize(layout) = 28`</span>；</span>
+<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**毁灭性后果**：</span>
+<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若分配显存时错误执行 <span class="in">`cudaMalloc(&amp;ptr, size(layout) * sizeof(float))`</span>，仅分配了 16 个浮点数（64 字节）空间；</span>
+<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>一旦 Kernel 写入坐标 $(3, 3)$，它会向偏移量为 27 的地址（第 108 字节处）强行写入数据，直接踩踏相邻内存，触发硬件 <span class="in">`cudaErrorIllegalAddress`</span> 崩溃或不可逆的数据静默破坏；</span>
+<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**铁律**：分配物理显存与共享内存时，必须严格使用 <span class="in">`cosize(layout) * sizeof(T)`</span>，绝不能使用 <span class="in">`size(layout)`</span>。</span>
+<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a>在处理带有 Batch 维度且行间、Batch 间存在内存对齐填充（Padding）的 3D 张量时，CuTe Layout 能够以极度优雅的方式通过 Stride 显式建模：</span>
+<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**张量几何与物理参数定义**：</span>
+<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>逻辑有效维度：矩阵行数为 $M$，列数为 $N$，Batch 大小为 $B$（逻辑形状 <span class="in">`Shape = (M, N, B)`</span>）；</span>
+<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>物理填充参数：</span>
+<span id="cb4-222"><a href="#cb4-222" aria-hidden="true" tabindex="-1"></a><span class="ss">      - </span>列为行主序连续存储，相邻列步长为 $1$；</span>
+<span id="cb4-223"><a href="#cb4-223" aria-hidden="true" tabindex="-1"></a><span class="ss">      - </span>每一行有效宽度为 $N$，但为了对齐硬件 Cache Line 填充为 $P$（即行 Leading Dimension 步长为 $P$，其中 $P \ge N$）；</span>
+<span id="cb4-224"><a href="#cb4-224" aria-hidden="true" tabindex="-1"></a><span class="ss">      - </span>每一个完整的 2D 矩阵实际占用空间为 $M \times P$，但为了满足页对齐或跨 Block 对齐，各个 Batch 矩阵之间的跨度填充为 $S$（即 Batch Stride 步长为 $S$，其中 $S \ge M \times P$）；</span>
+<span id="cb4-225"><a href="#cb4-225" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-226"><a href="#cb4-226" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**CuTe 布局构造**：</span>
+<span id="cb4-227"><a href="#cb4-227" aria-hidden="true" tabindex="-1"></a>   <span class="in">```cpp</span></span>
+<span id="cb4-228"><a href="#cb4-228" aria-hidden="true" tabindex="-1"></a>   <span class="kw">auto</span> padded_batch_layout <span class="op">=</span> make_layout<span class="op">(</span></span>
+<span id="cb4-229"><a href="#cb4-229" aria-hidden="true" tabindex="-1"></a>       make_shape<span class="op">(</span>M<span class="op">,</span> N<span class="op">,</span> B<span class="op">),</span></span>
+<span id="cb4-230"><a href="#cb4-230" aria-hidden="true" tabindex="-1"></a>       make_stride<span class="op">(</span>P<span class="op">,</span> <span class="dv">1</span><span class="op">,</span> S<span class="op">)</span></span>
+<span id="cb4-231"><a href="#cb4-231" aria-hidden="true" tabindex="-1"></a>   <span class="op">);</span></span>
+<span id="cb4-232"><a href="#cb4-232" aria-hidden="true" tabindex="-1"></a>   <span class="in">```</span></span>
+<span id="cb4-233"><a href="#cb4-233" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-234"><a href="#cb4-234" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**坐标映射解析**：</span>
+<span id="cb4-235"><a href="#cb4-235" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对任意样本的任意逻辑坐标 $(m, n, b)$，其物理偏移计算公式由 Layout 自动解算：</span>
+<span id="cb4-236"><a href="#cb4-236" aria-hidden="true" tabindex="-1"></a>     $$\text{offset}(m, n, b) = m \cdot P + n \cdot 1 + b \cdot S$$</span>
+<span id="cb4-237"><a href="#cb4-237" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>核心优势：业务算法代码中可以完全保持纯粹的 $(m, n, b)$ 逻辑坐标表达，所有的硬件对齐、跨步填充细节全部被无侵入地封装在 Layout 的 Stride 元组中，实现了算法逻辑与物理排布的完美解耦。</span>
+<span id="cb4-238"><a href="#cb4-238" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-239"><a href="#cb4-239" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb4-240"><a href="#cb4-240" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-241"><a href="#cb4-241" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CuTe Layout Algebra</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/01_layout.html)</span></span>
+<span id="cb4-242"><a href="#cb4-242" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CuTe Tensors</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/03_tensor.html)</span></span>
+<span id="cb4-243"><a href="#cb4-243" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CuTe Algorithms</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/04_algorithms.html)</span></span>
+<span id="cb4-244"><a href="#cb4-244" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUTLASS GEMM API</span><span class="co">](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/gemm_api.html)</span></span>
+<span id="cb4-245"><a href="#cb4-245" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUTLASS repository</span><span class="co">](https://github.com/NVIDIA/cutlass)</span></span>
+<span id="cb4-246"><a href="#cb4-246" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-247"><a href="#cb4-247" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb4-248"><a href="#cb4-248" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->
