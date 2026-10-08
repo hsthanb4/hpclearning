@@ -3,19 +3,14 @@ title: "第 4 课：数据并行 DP 与 DDP"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Data Parallelism（含 Revisiting global batch size、Our journey up to now）
 - 前置：第 2 课（梯度累积）、第 3 课（all-reduce）
@@ -33,8 +28,12 @@ jupyter: python3
 
 ## 核心概念
 
-
 ### 核心操作与执行流程图解
+
+::: {.img-card}
+![](assets/figs/train_ddp_ring_allreduce_math.png){width="95%"}
+<p class="caption">图 4-1：数据并行（DDP）Ring AllReduce 通信拓扑、分块流动与代数复杂度数学证明</p>
+:::
 
 ```{mermaid}
 flowchart TD
@@ -52,7 +51,7 @@ flowchart TD
         AR --> Update["各卡同步更新同构参数 W_new"]
     end
 ```
-<p class="caption" align="center"><em>图 4-1：数据并行（DDP）同构副本前向与全量梯度归约架构</em></p>
+<p class="caption" align="center"><em>图 4-2：数据并行（DDP）同构副本前向与全量梯度归约架构</em></p>
 
 ```{mermaid}
 sequenceDiagram
@@ -70,12 +69,11 @@ sequenceDiagram
     Bucket->>NCCL: 异步触发 AllReduce (Bucket 1)
     NCCL-->>NCCL: 全部 Bucket 同步完毕
 ```
-<p class="caption" align="center"><em>图 4-2：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em></p>
-
+<p class="caption" align="center"><em>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em></p>
 
 ### 1. 数据并行（DP/DDP）的数学本质与并行语义
 
-数据并行（Data Parallelism）在数学本质上是**空间维度展开的梯度累积**。如**图 4-1** 所示，整个集群拥有 $N$ 个并行工作进程（Rank 0 至 Rank $N-1$），每个 GPU 显存内都完整存放了一份同构的模型参数副本 $W$。
+数据并行（Data Parallelism）在数学本质上是**空间维度展开的梯度累积**。如**图 4-1 与图 4-2** 所示，整个集群拥有 $N$ 个并行工作进程（Rank 0 至 Rank $N-1$），每个 GPU 显存内都完整存放了一份同构的模型参数副本 $W$。
 
 当一个全局 Batch（Global Batch Size, GBS）的数据输入系统时，各 Rank 分别取走互不重叠的数据子集（Micro Batch, MBS）。由于各 Rank 上的前向传播与反向传播计算完全基于各自的本地数据进行，彼此之间没有任何数据依赖，因此计算阶段具备天然的完全并行性。
 
@@ -94,8 +92,11 @@ $$\text{Batch Tokens} = \text{GBS} \times \text{seq\_len} = \text{MBS} \times \t
 ### 2. 朴素实现的瓶颈：计算与通信完全串行
 
 在最原始的 DistributedDataParallel 朴素实现中，执行流程遵循严格的阶段式阻塞顺序：
+
 1. **前向与反向完全执行完毕**：所有网络层反向计算结束，显存中产生所有参数的梯度张量。
+
 2. **一次性阻塞式 AllReduce**：启动 NCCL 通信，将全模型参数量 $\Psi$ 对应的全部梯度张量进行同步传输。
+
 3. **优化器更新**：等待通信全部完成后，统一更新权重。
 
 这种串行逻辑存在巨大的算力浪费。其一步总耗时为：
@@ -110,20 +111,24 @@ $$T_{\text{step}} = T_{\text{fwd}} + T_{\text{bwd}} + T_{\text{comm}} + T_{\text
 注意到自动微分（Autograd）的反向传播是反向有向无环图（DAG）的倒序执行过程：从最后一层（输出层 Layer $L$）逐层反向推进到第一层（输入层 Layer $1$）。当输出层 Layer $L$ 的参数求导计算完毕时，其梯度 $\nabla W_L$ 的数值已经完全确定，绝不会再受到后续浅层网络求导计算的影响。
 
 现代 PyTorch DDP 内部通过为每个可训练参数注册底层回调（如 `register_post_accumulate_grad_hook`）实现通信重叠：
+
 - 当反向计算图推进并生成参数 $W_k$ 的梯度时，Hook 立即被触发。
 - DDP 自动将该梯度的 AllReduce 异步投递到独立的 CUDA 通信流（`nccl_stream`）中执行。
 - 此时，默认的计算流（`compute_stream`）无须任何等待，继续向前推进计算 Layer $k-1$、Layer $k-2$ 的反向求导。
 - 只要浅层的反向计算耗时大于等于深层梯度的网络传输耗时，绝大部分通信时间就被反向计算完全掩盖（$T_{\text{comm}}$ 隐藏在 $T_{\text{bwd}}$ 背后）。
 
-如**图 4-2** 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行。
+如**图 4-3** 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行。
 
 ### 4. 优化二：梯度分桶策略（Gradient Bucketing）
 
 虽然逐参数挂载 Hook 理论上能实现最大程度的重叠，但在实际大模型中直接对每个小参数张量单独发起 AllReduce 会引发严重的性能倒退：
+
 1. **小包延迟开销爆炸**：神经网络中包含大量极小的权重和偏置张量（例如 LayerNorm 的 scale/bias 仅数 KB）。根据第 3 课的网络延迟模型 $T = 2(N-1)\alpha + 2\frac{N-1}{N}\frac{K}{B}$，当张量尺寸 $K$ 很小时，耗时完全由每步通信固有的延迟基数 $\alpha$ 主导。成百上千次小包 AllReduce 会导致网络传输极其低效。
+
 2. **CUDA 算子发射开销（Kernel Launch Overhead）**：CPU 端频繁向 GPU 发射小张量通信算子会迅速跑满 CPU，导致 GPU 发生发射等待饥饿。
 
 PyTorch DDP 采用**分桶机制（Bucketing）**进行折中处理：
+
 - 按照网络模型反向求导完成的**逆序方向**，预先分配若干块连续的扁平内存切片（称为 Bucket，默认上限通常为 `bucket_cap_mb = 25MB`）。
 - 各层的梯度产生后，先被直接拷贝（Copy）到对应的连续 Bucket 内存块中。
 - 当一个 Bucket 被填满，或者倒序遍历到了该桶管辖的最后一层梯度时，系统才对这块规整的 25MB 大张量集中发射一次异步 Ring AllReduce。
@@ -132,6 +137,7 @@ PyTorch DDP 采用**分桶机制（Bucketing）**进行折中处理：
 ### 5. 优化三：与梯度累积深度协同（`no_sync` 机制）
 
 在显存受限而必须开启梯度累积（Gradient Accumulation）的场景下，若任由 DDP 在每一个 Micro-Batch 的反向阶段都自动触发分桶 AllReduce，将带来极其荒谬的算力与带宽浪费：
+
 - 在累积步数 $\text{grad\_accum} = 8$ 时，前 7 次 Micro-Batch 计算出的梯度在下一次计算时只是被就地累加（`grad += new_grad`）。
 - 如果每次都跨节点通信，不仅产生 $8 \times 2\Psi$ 的巨大冗余网络流量，而且中间的同步结果在下一次本地累加前毫无实际价值。
 
@@ -141,6 +147,7 @@ $$\sum_{r=0}^{\text{DP}-1} \left( \sum_{m=1}^{\text{grad\_accum}} g_{r, m} \righ
 完全可以将各个 Micro-Batch 的梯度在单卡本地显存中纯算力累加，仅在最后第 $\text{grad\_accum}$ 次反向传播时执行一次全局 AllReduce 同步！
 
 PyTorch DDP 提供了专用的上下文管理器 `model.no_sync()`：
+
 - 在 `with model.no_sync():` 块内，DDP 会注销反向梯度的自动 AllReduce 挂钩，此时反向传播只在 GPU 本地累加梯度而不发起任何跨节点通信。
 - 仅在累积周期的最后一个 Micro-Batch 脱离该上下文，触发单次全局 AllReduce。
 - 该机制可将通信开销直接减少到未优化版本的 $1 / \text{grad\_accum}$，是单卡多步累积训练的黄金准则。
@@ -148,10 +155,13 @@ PyTorch DDP 提供了专用的上下文管理器 `model.no_sync()`：
 ### 6. 工程细节与 DDP 的物理扩展边界
 
 理解 DDP 的边界是掌握后续进阶并行架构（ZeRO、TP、PP）的前提：
+
 1. **通信内存开销**：DDP 为梯度分桶分配的连续缓存区（Buckets）常驻在 GPU 显存中，通常会额外占用 25MB~50MB 的固定显存。同时，为了保证张量内存地址对齐与连续性，必要时会发生梯度复制。
+
 2. **DDP 完全无法降低每卡的静态显存**：这是纯数据并行最致命的物理局限。每个 DDP 副本的 GPU 显存内都必须完整驻留 $1\times$ 模型参数 $\Psi$、$1\times$ 梯度 $\Psi$ 以及 $1\times$ 优化器状态（FP32 Master Weights + Momentum + Variance 共 $12\Psi$ 字节）。
    - 对于一个 70B 参数的 BF16 大模型，其静态状态显存高达 $70 \times 16\text{ GB} = 1120\text{ GB}$。
    - 即使单卡显存配置到顶级的 80GB/192GB，并将 Micro-Batch 降为 1 且开启全激活重计算，单卡也根本无法容纳模型静态权重，程序将瞬间触发 OOM 崩溃。
+
 3. **网络扩展性极限（Ring Latency 惩罚）**：
    - 当节点规模扩展到数百乃至数千卡（如 $\text{DP} \ge 512$）时，Ring AllReduce 的延迟项 $2(N-1)\alpha$ 随着环形步数呈线性膨胀。跨交换机（Spine-Leaf 网络二跳/三跳）的延迟显著拉长。
    - 当通信延迟超过了反向计算耗时时，异步重叠完全失效，算力利用率暴跌。
@@ -167,9 +177,11 @@ $$\text{GBS} = \frac{4,194,304}{4096} = 1024 \text{ samples}$$
 - **128 卡集群（$\text{DP} = 128$）**：
   $$\text{grad\_accum} = \frac{\text{GBS}}{\text{MBS} \times \text{DP}} = \frac{1024}{2 \times 128} = 4$$
   每卡连续计算 4 个 Micro-Batch（前 3 个使用 `no_sync` 纯本地累加，第 4 个触发异步 AllReduce），然后执行一次全局权重更新。
+
 - **512 卡集群（$\text{DP} = 512$）**：
   $$\text{grad\_accum} = \frac{1024}{2 \times 512} = 1$$
   此时不需要任何梯度累加，每个 Micro-Batch 直接就是全局步，训练速度提升近 4 倍。
+
 - **扩展性瓶颈突显**：
   在 512 卡场景下，反向计算时间缩短为单个 MBS=2 的计算耗时（假设为 80ms），但 512 卡跨节点 Ring AllReduce 的延迟开销与通信排队时间大幅增加（例如通信耗时上升至 120ms）。由于 $T_{\text{comm}} > T_{\text{bwd}}$，异步重叠出现暴露窗口，GPU 产生 40ms 的通信气泡（Bubble）。继续无脑堆叠 DP 规模将陷入严重的边际收益递减。
 
@@ -181,12 +193,10 @@ $$\text{GBS} = \frac{4,194,304}{4096} = 1024 \text{ samples}$$
 #| course_role: exercise
 from dataclasses import dataclass
 
-
 @dataclass
 class Bucket:
     names: list[str]      # 桶内梯度名（按反向完成顺序）
     total_bytes: int
-
 
 def bucket_gradients(
     grads: list[tuple[str, int]],   # [(参数名, 梯度字节数)]，按反向完成顺序（最后一层在前）
@@ -220,7 +230,6 @@ def bucket_gradients(
     if cur_names:
         buckets.append(Bucket(cur_names, cur_bytes))
     return buckets
-
 
 def simulate_dp_step(
     layer_backward_s: list[float],    # 每层 backward 时长（顺序：最后一层 → 第一层）
@@ -265,11 +274,9 @@ def simulate_dp_step(
     # 总时间 = max(backward 全部完成时刻, 通信流结束时刻)
     return max(finish[-1], t_comm)
 
-
 def gbs_tokens(mbs: int, grad_acc: int, dp: int, seq: int) -> int:
     """全局 batch 大小（token 数）。"""
     return ______
-
 
 if __name__ == "__main__":
     # 例：30 层，每层 backward 10ms；分 6 桶，每桶通信 12ms
@@ -315,7 +322,6 @@ DP + 梯度累积时，为什么可以用 `no_sync()` 只在最后一次 backwar
 - 不知道 all-reduce 是求和（平均需要再除以 dp）或同步时机错误。
 - 声称"DP 规模可以无限扩展"或"DP 能解决模型放不下单卡的问题"。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -325,12 +331,10 @@ DP + 梯度累积时，为什么可以用 `no_sync()` 只在最后一次 backwar
 #| course_role: solution
 from dataclasses import dataclass
 
-
 @dataclass
 class Bucket:
     names: list[str]      # 桶内梯度名（按反向完成顺序）
     total_bytes: int
-
 
 def bucket_gradients(
     grads: list[tuple[str, int]],   # [(参数名, 梯度字节数)]，按反向完成顺序（最后一层在前）
@@ -364,7 +368,6 @@ def bucket_gradients(
     if cur_names:
         buckets.append(Bucket(cur_names, cur_bytes))
     return buckets
-
 
 def simulate_dp_step(
     layer_backward_s: list[float],    # 每层 backward 时长（顺序：最后一层 → 第一层）
@@ -409,11 +412,9 @@ def simulate_dp_step(
     # 总时间 = max(backward 全部完成时刻, 通信流结束时刻)
     return max(finish[-1], t_comm)
 
-
 def gbs_tokens(mbs: int, grad_acc: int, dp: int, seq: int) -> int:
     """全局 batch 大小（token 数）。"""
     return mbs * grad_acc * dp * seq
-
 
 if __name__ == "__main__":
     # 例：30 层，每层 backward 10ms；分 6 桶，每桶通信 12ms
@@ -433,7 +434,6 @@ if __name__ == "__main__":
     # 全局 batch 示例
     print("gbs_tokens:", gbs_tokens(mbs=2, grad_acc=4, dp=128, seq=4096))
 ```
-
 
 ## 补全后的代码（关键填空处）
 

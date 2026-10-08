@@ -3,12 +3,9 @@ title: "第 1 课：vLLM V1 源码地图：AsyncLLM、EngineCore 与 Worker"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ## 本课目标与通过标准
 
@@ -36,6 +33,11 @@ jupyter: python3
 
 ### 核心操作与执行流程图解
 
+::: {.img-card}
+![](assets/figs/inference_prefill_vs_decode_math.png){width="95%"}
+<p class="caption">图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）</p>
+:::
+
 ```{mermaid}
 flowchart TD
     subgraph Frontend["API Server / Frontend"]
@@ -53,7 +55,7 @@ flowchart TD
     AsyncLLM -->|ZMQ / IPC 无锁通道| Core
     Scheduler & KVManager -->|发送执行指令| Backend
 ```
-<p class="caption" align="center"><em>图 1-1：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)</em></p>
+<p class="caption" align="center"><em>图 1-2：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)</em></p>
 
 ```{mermaid}
 flowchart LR
@@ -63,14 +65,14 @@ flowchart LR
     Step --> Forward["GPU ModelRunner 并行前向推理 (TP AllReduce)"]
     Forward --> Detokenize["采样器输出 Token 解码并流式回传 SSE"]
 ```
-<p class="caption" align="center"><em>图 1-2：vLLM V1 端到端请求流转与异构协同执行流水线</em></p>
-
+<p class="caption" align="center"><em>图 1-3：vLLM V1 端到端请求流转与异构协同执行流水线</em></p>
 
 ### 1. 它是什么，解决什么问题
 
 **vLLM V1 架构**是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。
 
-为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-1）：
+为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：
+
 - **`AsyncLLM`（前端服务层）**：面向客户端的异步 HTTP/gRPC/SSE 接入网关，负责请求接入、Tokenization 分词、流式输出解包与取消信号监听；
 - **`EngineCore` / `EngineCoreProc`（调度核心内核层）**：运行在完全物理隔离的独立进程中，由单事件循环主导，独占全局请求生命周期调度器（`Scheduler`）与显存逻辑账本（`KVCacheManager`）；
 - **`Worker` / `GPUModelRunner`（设备执行层）**：由分布式并行（TP/PP）驱动的执行引擎，独占物理 GPU 张量、物理 KV Block 内存池与 CUDA Graph 捕获环境。
@@ -79,7 +81,7 @@ flowchart LR
 
 ### 2. 它如何工作
 
-端到端请求流转与核心控制循环如图 1-1 与图 1-2 所示：
+端到端请求流转与核心控制循环如图 1-1 至图 1-3 所示：
 
 1. **三段式步进迭代循环（Schedule $\to$ Execute $\to$ Update）**：
    在 `EngineCore.step()` 内部，系统严格遵循严谨的时序管道：
@@ -87,18 +89,20 @@ flowchart LR
    - **异步发射与计算重叠（Async Execute & Overlap）**：通过 `model_executor.execute_model(plan, non_block=True)` 非阻塞地向 GPU Worker 广播执行指令。在 GPU 执行 Heavy GEMM 与 Attention 的微小间隙，CPU 主线程并发执行结构化输出的 Grammar 状态机掩码提取；
    - **等待同步与取消处理（Wait & Abort Drain）**：同步等待 Worker 的 `future()` 返回本次推理结果；在应用输出前，优先消费清空执行期间积累的取消请求队列 `process_aborts()`；
    - **状态递推更新（Update）**：调用 `scheduler.update_from_output(plan, model_output)`，更新每个请求的已计算 Token 计数并回收已完结请求的逻辑 KV 块。
-2. **端到端流水线推进（图 1-2）**：
+
+2. **端到端流水线推进（图 1-3）**：
    HTTP 请求到达后，`AsyncLLM` 完成异步分词，将 `EngineCoreRequest` 推入无锁共享内存队列；`EngineCore` 批量消费并驱动 GPU ModelRunner 并发前向传播；采样完成后的 Token 结果以流式事件（SSE）的形式逆向实时推送回前端。
 
 ### 3. 正确性条件与常见误区
 
 - **严格的单写者状态所有权（Single Writer Discipline）**：
   整个系统中每个核心对象的状态拥有唯一的权威写入者：
-  - `AsyncLLM` 独占流式传输通道与输入请求缓冲，严禁越权修改内部 KV 账本；
-  - `EngineCore` 与 `Scheduler` 独占跨步请求生命周期（Waiting, Running, Swapped, Finished），严禁 Worker 擅自更改请求状态；
-  - `GPUModelRunner` 独占物理显存与算子 Kernel 执行。若跨进程试图共享可变全局对象，会导致灾难性的数据竞争与状态错位。
+   - `AsyncLLM` 独占流式传输通道与输入请求缓冲，严禁越权修改内部 KV 账本；
+   - `EngineCore` 与 `Scheduler` 独占跨步请求生命周期（Waiting, Running, Swapped, Finished），严禁 Worker 擅自更改请求状态；
+   - `GPUModelRunner` 独占物理显存与算子 Kernel 执行。若跨进程试图共享可变全局对象，会导致灾难性的数据竞争与状态错位。
 - **Abort 取消处理的原子时序边界**：
   若请求在 GPU 执行前向传播期间被客户端主动取消（如用户关闭网页），`EngineCore` 必须在**调用 `scheduler.update_from_output` 之前**彻底消费并处理取消信号！若顺序颠倒（先更新再取消），模型刚生成的 Token 会被误推送给已断开的客户端，甚至引起已被释放的物理 Block 发生二次读写踩内存。
+
 - **计划与执行结果的版本一致性不变量**：
   `SchedulerOutput` 与 `ModelRunnerOutput` 必须严格属于同一个迭代步骤。严禁在 Worker 执行失败时返回伪造的静默空输出，必须通过强类型异常驱动全局容错与降级。
 
@@ -106,15 +110,20 @@ flowchart LR
 
 - **进程解耦带来的 IPC 序列化开销 vs GIL 消除红利**：
   将 EngineCore 独立为子进程彻底释放了 Python GIL 的并发阻塞，但引入了进程间通信开销。vLLM V1 采用极简的扁平 C-struct 内存布局与共享内存（Shared Memory）通道，将跨进程数据传输延迟压缩至十微秒级，使架构收益显著超越通信开销。
+
 - **Grammar 准备与 GPU 计算的精妙重叠**：
   在 JSON 等强约束解码（Structured Outputs）中，计算下一个合法 Token 的 Bitmask 极其消耗 CPU 算力。通过在 `execute_model(non_block=True)` 发射后立即开始计算 Grammar，系统完美地将 CPU 纯逻辑与 GPU 算力执行掩盖在同一时序窗口内，实现了近乎零气泡的控制流水线。
 
 ## 具体演示：单请求执行取消与控制流跟踪演练
 
 考虑一个典型的并发取消场景：
+
 1. 请求 $R_0$ 被调度进入当前批次，调度计划为 `{"scheduled_tokens": 4}`；
+
 2. 系统调用 `execute_async` 向 GPU 发射异步推理任务，GPU 开始执行前向注意力计算；
+
 3. 在 GPU 计算尚未结束的窗口内，客户端由于超时断开了 HTTP 连接，取消信号进入待处理队列；
+
 4. 核心调度流程执行控制：
    - 首先执行 `grammar = get_grammar(plan)`，准备下一 Token 约束；
    - 随后执行 `future()` 阻塞等待 GPU 输出；
@@ -194,7 +203,6 @@ assert engine_core_step(False, schedule, execute, grammar, aborts, update) == ({
 - Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；
 - 一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -243,6 +251,7 @@ assert engine_core_step(False, schedule, execute, grammar, aborts, update) == ({
    - **`EngineCore`（调度协调层）**：拥有主事件循环（Busy Loop）、跨进程 IPC 通信通道、输入/输出序列化协议栈，以及对 Executor 的协调控制逻辑；
    - **`Scheduler`（权威裁决层）**：拥有全局请求状态机（Waiting, Running, Swapped, Finished）、逻辑 Token 计数（`num_computed_tokens`, `total_tokens`）、逻辑 KV Block 映射账本以及请求抢占（Preemption）决策权；
    - **`GPUModelRunner / Worker`（设备执行层）**：独占物理 GPU 显存张量、PagedAttention 物理 KV 显存池（Block Table）、CUDA Graph 预热与执行环境、采样器状态以及分布式通信（NCCL TP/PP）组。
+
 2. **严禁合成全局可变对象的深层因果**：
    - **进程隔离与 GIL 消除前提**：为了突破 Python GIL 限制，Frontend、EngineCore 与 Worker 分布在不同物理进程中。跨进程内存天然不可变共享；
    - **杜绝多写者脑裂（Brain-Split & Race Condition）**：若允许 Worker 越权修改 Scheduler 状态，在分布式流水线或异步执行中会产生无序状态竞争，无法确定哪个组件持有真值；
@@ -255,6 +264,7 @@ assert engine_core_step(False, schedule, execute, grammar, aborts, update) == ({
    - 源码采用 `execute_model(non_block=True)` 是为了实现**控制流与设备执行的异步解耦**：系统将本次 Batch 的张量元数据非阻塞地发射给 GPU Worker 后立即返回，GPU 开始执行耗时的自注意力与 GEMM 计算；
    - 此时 CPU 主线程并没有空转等待，而是立即并发执行 `get_grammar(plan)`，在本地内存中完成 Bitmask 的推导与位运算；
    - 随后调用 `future()` 阻塞等待 GPU 输出。此时 CPU 的 Grammar Mask 恰好计算完毕，二者无缝对接。
+
 2. **Grammar 绝不能晚于采样（Sampling Constraint）**：
    - 这并不意味着 Grammar 可以晚于采样！GPU ModelRunner 在执行 Transformer Forward 产出未归一化的 Logits 后，必须等待 Grammar Mask 的位掩码注入（将非法 Token 的 Logits 强行置为 $-\infty$），然后才能执行 Softmax 和采样操作；
    - `non_block=True` 仅仅是将 Python 端的等待时机从“发射瞬间”推迟到了“提取最终输出之前”，在不破坏物理数据因果依赖的前提下，完全掩盖了 CPU 侧的状态机解析开销。
@@ -262,12 +272,15 @@ assert engine_core_step(False, schedule, execute, grammar, aborts, update) == ({
 ### Q3 参考答案
 
 若某请求在 GPU Forward 期间被客户端主动取消（Abort），`EngineCore.step` 必须**严格在调用 `scheduler.update_from_output` 之前优先消费并清空 Abort 队列**，因果链如下：
+
 1. **防止已取消请求产出“幽灵 Token”并破坏前端流**：
    - GPU 执行的是发射时刻快照决定的批次，因此 Model Output 中必定包含该请求刚刚生成的下一个 Token；
    - 若先调用 `update_from_output`，调度器会将该新生成的 Token 视作有效计算结果，更新其已完成计数并触发 Output Processor 向客户端推送。此时已断开连接的客户端不仅无法接收，还会引发前端管道断裂异常或日志报错；
+
 2. **保障物理显存与逻辑账本原子释放**：
    - 优先执行 `process_aborts()` 会将该请求在调度器的活动集合中正式注销，并向 KVCacheManager 宣告其占有的所有逻辑与物理 KV Block 可以被安全回收；
    - 随后执行 `update_from_output` 时，调度器便能根据最新的“存活请求子集”做过滤，直接将已取消请求的输出丢弃，且绝不会把已被回收释放的 Block 重新标记为活动状态（防止 Block Use-After-Free 悬空指针踩内存）；
+
 3. **提供清晰的串行化审计点**：
    先处理事件、再应用批次更新，保证了每一次迭代步的结束状态都是自洽、闭合且全局一致的。
 

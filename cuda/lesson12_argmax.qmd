@@ -3,12 +3,9 @@ title: "第 12 课：ArgMax 对归约与确定性"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ## 本课目标与完成标准
 
@@ -27,7 +24,6 @@ jupyter: python3
 - 本课在路线中的作用：ArgMax 不只归约值，还要同步携带索引；这是自定义归约算子的典型模式。
 
 ## 核心心智模型
-
 
 ### 核心操作与执行流程图解
 
@@ -48,13 +44,12 @@ sequenceDiagram
     participant L as Warp 各线程 (Lane 0~31)
     participant R as __shfl_down_sync 归约
     participant Winner as 最终极值与最小下标
-    
+
     L->>R: 各 Lane 打包 (val, idx) 参与两两比较
     R->>R: 16 -> 8 -> 4 -> 2 -> 1 步进折半比较
     R->>Winner: Lane 0 获得该 Warp 内最大数值及最小下标
 ```
 <p class="caption" align="center"><em>图 12-2：Warp 级确定性 ArgMax 归约时序流</em></p>
-
 
 ### 1. 它是什么，解决什么问题
 
@@ -69,11 +64,13 @@ $$\text{ArgMax}(\mathbf{x}) = \arg\max_{0 \le i < N} x_i = \{i \mid \forall j, \
 ### 2. 它如何工作（结合图 12-1 与图 12-2）
 
 由于需要支持百万到数十亿规模的超大张量，算法采用经典的 **两阶段分层归约架构（Two-Stage Grid Reduction）**：
+
 1. **阶段一：网格局部归约（Pass 1: Block-level ArgMax）**
    - 启动包含 `num_blocks` 个 Block 的网格，各线程以 Grid-Stride 方式遍历整个长数组；
    - 每个线程在本地寄存器中维护当前的局部最佳二元状态 `ValIdx local = {-FLT_MAX, -1}`；
    - **Warp 级元组洗牌（图 12-2）**：利用 `__shfl_down_sync` 同时在寄存器间交换 `val` 与 `idx`（或打包传输），在 5 步折半归约中通过确定性仲裁逻辑选出当前 Warp 的胜者；
    - **Block 级发布**：各 Warp 的 Lane 0 将局部的 `ValIdx` 写入共享内存 `smem`，由 Warp 0 再次归约出当前 Block 的最佳结果，最终由 Thread 0 将该 Block 的局部极值写入全局临时数组 `partial_val[blockIdx.x]` 与 `partial_idx[blockIdx.x]`。
+
 2. **阶段二：单块全局终局归约（Pass 2: Single-Block Final Reduce）**
    - 启动仅有 1 个 ThreadBlock 的 Kernel，Block 内线程并行读取 `num_blocks` 个局部极值候选者；
    - 在 Block 内部再次执行树状元组归约，Thread 0 将最终胜者的全局索引单次写回输出指针 `*output`。
@@ -86,6 +83,7 @@ $$\text{ArgMax}(\mathbf{x}) = \arg\max_{0 \le i < N} x_i = \{i \mid \forall j, \
      例如在 Offset=16 的比较中，Lane 0 比较 Lane 16；在 Offset=8 时，Lane 0 比较 Lane 8。这会导致最终保留下来的不一定是全局最小下标，甚至不同 Grid 大小跑出来的下标完全不同；
    - **强制不变量**：必须严格书写确定性判据：
      $$b \text{ 胜出} \iff (b.val > a.val) \lor (b.val == a.val \land b.idx < a.idx)$$
+
 2. **NaN 污染策略（NaN Handling Policy）**：
    - 根据 IEEE 754 规范，任何包含 NaN 的浮点比较（`NaN > x`、`x > NaN`、`NaN == x`）在硬件中全部返回 `false`；
    - 若未对 NaN 进行特判，NaN 永远无法在 `>` 比较中胜出，可能导致真正的最大值被静默吞掉，或者导致首个遇到的正常数被当作结果；工业级实现（如 PyTorch）通常定义“遇到 NaN 则直接传播 NaN 或优先返回首个 NaN 的索引”。
@@ -96,6 +94,7 @@ $$\text{ArgMax}(\mathbf{x}) = \arg\max_{0 \le i < N} x_i = \{i \mid \forall j, \
    - 普通 ReduceMax 每次洗牌仅需传输 1 个 32-bit 的 `float`；
    - ArgMax 每次洗牌必须传递 `val`（4 字节）和 `idx`（4 字节），洗牌指令数翻倍；
    - **极客工程优化**：若浮点数为 FP16/BF16（2 字节），或者能保证 `val` 为非负数，可利用位运算将浮点数的有序编码与 32-bit 整数打包进单个 64-bit 整数（`uint64_t`），单条洗牌指令同时传输数值与下标。
+
 2. **两阶段 Kernel vs. 原子操作/跨 Block 栅障**：
    - 采用两阶段独立 Kernel Launch 拥有绝对的硬件可移植性与安全性，中间通过 Global Memory 传递 partial 结果，天然具备 Stream 内存可见性；
    - 单 Kernel 协作（使用 Cooperative Groups 网格级同步）可省去二次 Launch 开销，但对 GPU 架构与 Occupancy 调度有严格的硬件配额约束。
@@ -103,15 +102,16 @@ $$\text{ArgMax}(\mathbf{x}) = \arg\max_{0 \le i < N} x_i = \{i \mid \forall j, \
 ## 具体演示：平局仲裁确定性演算
 
 考虑极小输入数组：$x = [5.0, 7.0, 7.0, 3.0]$，其中最大值 $7.0$ 在下标 1 和 2 处重复出现：
+
 - **无下标仲裁（仅凭 `val_b > val_a`）**：
-  - 线程 1 拥有 $(val=7.0, idx=1)$，线程 2 拥有 $(val=7.0, idx=2)$；
-  - 若在归约折半中由线程 2 比较线程 1（`b = 线程1, a = 线程2`）：$7.0 > 7.0$ 为假，保留线程 2 的结果，最终输出 $\text{Index} = 2$；
-  - 若换一种网格拓扑或线程配对顺序，由线程 1 比较线程 2（`b = 线程2, a = 线程1`）：$7.0 > 7.0$ 为假，保留线程 1 的结果，最终输出 $\text{Index} = 1$；
-  - **严重后果**：相同的模型权重和输入，在不同的 Batch 大小或不同的 GPU 架构上推理，生成的下一个 Token 竟然完全不同！
+   - 线程 1 拥有 $(val=7.0, idx=1)$，线程 2 拥有 $(val=7.0, idx=2)$；
+   - 若在归约折半中由线程 2 比较线程 1（`b = 线程1, a = 线程2`）：$7.0 > 7.0$ 为假，保留线程 2 的结果，最终输出 $\text{Index} = 2$；
+   - 若换一种网格拓扑或线程配对顺序，由线程 1 比较线程 2（`b = 线程2, a = 线程1`）：$7.0 > 7.0$ 为假，保留线程 1 的结果，最终输出 $\text{Index} = 1$；
+   - **严重后果**：相同的模型权重和输入，在不同的 Batch 大小或不同的 GPU 架构上推理，生成的下一个 Token 竟然完全不同！
 - **严格确定性字典序仲裁**：
-  - 比较逻辑：$(b.val > a.val) \lor (b.val == a.val \land b.idx < a.idx)$；
-  - 无论二者谁作为参数 $a$ 谁作为参数 $b$，下标较小的 $idx=1$ 恒定被判定为胜者；
-  - 无论如何调度，输出绝对恒为 $\text{Index} = 1$，完美捍卫了模型贪婪采样的可复现性（Reproducibility）。
+   - 比较逻辑：$(b.val > a.val) \lor (b.val == a.val \land b.idx < a.idx)$；
+   - 无论二者谁作为参数 $a$ 谁作为参数 $b$，下标较小的 $idx=1$ 恒定被判定为胜者；
+   - 无论如何调度，输出绝对恒为 $\text{Index} = 1$，完美捍卫了模型贪婪采样的可复现性（Reproducibility）。
 
 ## 实践任务：唯一代码填空题
 
@@ -342,7 +342,6 @@ int main() {
 
 需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -544,9 +543,11 @@ int main() {
 1. **输入阶段（Tuple State Initialization & Grid-Stride Ingestion）**：
    - 算法分配 `num_blocks` 个 Block 启动 Pass 1。每个线程在本地寄存器中初始化候选双元组 `ValIdx local = {-FLT_MAX, -1}`；
    - 线程以 Grid-Stride 跨步遍历其负责的一组连续或步进元素。每次遇到新输入 $x_i$，将其与当前本地 `local` 进行字典序比较：若 $x_i > \text{local.val}$，更新 `(x_i, i)`。连续的线程读取连续全局显存，保持合并访存；
+
 2. **状态变化阶段（Two-Pass Hierarchical Reduction & Strict Tie-breaking）**：
    - **Warp 级双元组洗牌**：Warp 内 32 个线程调用 `__shfl_down_sync` 同时交换 `val` 与 `idx`。两两比较时执行确定性仲裁规则：$(b.val > a.val) \lor (b.val == a.val \land b.idx < a.idx)$，确保数值相等时物理全局下标较小者胜出；
    - **Block 级与中间发布**：各 Warp 的 Lane 0 将部分结果写入 Shared Memory，二次归约后，每个 Block 的 Thread 0 将该 Block 胜出的 `(val, idx)` 分别写入显存中间数组 `partial_val[blockIdx.x]` 与 `partial_idx[blockIdx.x]`；
+
 3. **输出阶段（Final Single-Block Reduction & Scalar Store）**：
    - 启动仅有 1 个 ThreadBlock 的 Pass 2 Kernel，并行读取 `num_blocks` 个候选元组并在 Block 内执行终局树状归约；
    - Thread 0 将取得全局绝对最大值、且下标最小的合法索引单个整数写入输出指针 `*output`。
@@ -554,9 +555,11 @@ int main() {
 ### Q2 参考答案
 
 若比较逻辑仅简单使用单向严格大于 `>`（即 `if (b.val > a.val) a = b;`），当输入数据中存在多个数值完全相同的全局最大值时，不同的 Block 划分与调度顺序将导致**计算结果失去确定性（Non-deterministic Outcome）**：
+
 1. **树状对偶归约的物理非对称性**：
    - 在折半归约步进中（如 `offset = 16, 8, 4, 2, 1`），当前线程持有的状态作为左操作数 $a$，接收洗牌传来的数据作为右操作数 $b$；
    - 若 $a.val == b.val$，条件 `b.val > a.val` 返回 `false`，左操作数 $a$ 维持不变保留下来。这表面上看似乎“保留了左边”，但**左操作数对应的全局索引并不保证小于右操作数**！
+
 2. **Block 划分改变比较拓扑**：
    - 在 Block 内部，跨步循环 `col += BLOCK_SIZE` 会使同一个线程处理跨度很大的不同索引（如索引 0 和 256）；
    - 当改变 `num_blocks`（例如从 64 改为 128）或改变 `BLOCK_SIZE` 时，相同的两个相等元素（比如下标 10 和下标 500）可能由同一个线程串行比较，也可能被切分到两个不同的 Warp 在不同树枝上并行比较；
@@ -565,10 +568,13 @@ int main() {
 ### Q3 参考答案
 
 当输入数据中混入不可比的 `NaN`（Not a Number）异常值时，各生态系统与高性能算子库的约定及底层逻辑如下：
+
 1. **NumPy 约定（`np.argmax`）**：
    - 策略：**首个 NaN 优先捕获**。若输入包含 NaN，NumPy 会将输出索引锁定为数组中**第一次出现 NaN 的物理下标**。这有助于开发者迅速定位哪一个特征发生了数值污染；
+
 2. **PyTorch 约定（`torch.argmax`）**：
    - 策略：在早期版本或某些后端上，`torch.argmax` 在遇到 NaN 时的行为可能未定义（受底层 cuBLAS/CUB 实现影响）；但在标准行为中，若存在 NaN，通常会优先传播该异常，直接返回包含 NaN 的首个位置下标。若用户希望忽略 NaN，则需显式调用 `torch.nanargmax`（跳过 NaN 仅在合法实数中找最大值）；
+
 3. **本课 CUDA Kernel 的工程与数值约定建议**：
    - **朴素浮点比较的静默崩溃缺陷**：在 IEEE 754 标准下，`NaN > x` 与 `x > NaN` 恒为 `false`。若最大候选值为 NaN，它无法战胜任何数，导致 NaN 被悄无声息地吞噬掉，掩盖了严重的数值 Bug；
    - **生产级确定性约定**：在 Kernel 内部定义三元仲裁谓词：

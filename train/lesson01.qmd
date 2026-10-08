@@ -3,19 +3,14 @@ title: "第 1 课：训练流程与显存账本"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：First Steps: Training on One GPU → Memory usage in transformers（静态部分）、附录 A2
 - 前置：Python 基础、神经网络训练的大致概念
@@ -32,7 +27,6 @@ jupyter: python3
 
 ## 核心概念
 
-
 ### 核心操作与执行流程图解
 
 ::: {.img-card}
@@ -45,13 +39,14 @@ jupyter: python3
 <p class="caption">图 1-2：训练单步生命周期中的显存峰值与状态释放时序流（Anthropic 风格架构图）</p>
 :::
 
-
 ### 1. 训练迭代的三阶段与显存生命周期
 
 一次标准的深度学习模型训练迭代由三个紧密耦合的阶段构成（如上图 1-2 所示）：
 
 1. **前向传播（Forward Pass）**：根据输入微批次数据逐层执行矩阵乘与激活计算，输出预测值与 Loss。在此过程中，必须在 GPU 显存中保存反向传播求导所需的中间隐藏状态（即**动态激活值 Activation**）。随着网络深度推进，动态显存占用持续攀升至整个训练周期的最高点（激活峰值）。
+
 2. **反向传播（Backward Pass）**：从标量 Loss 出发，沿着计算图逆向逐层应用链式法则计算参数梯度。在此阶段，上一层的激活值在完成求导后立即被显式释放，同时申请显存用于存放计算出的梯度（Gradient）。激活释放与梯度建立交替进行，显存曲线呈现锯齿状回落。
+
 3. **优化器更新（Optimizer Step）**：在累积完全部梯度后，优化器遍历所有参数张量，结合历史动量与方差状态执行数值更新。更新完成后立即将梯度缓冲区清零或释放，显存回落至基线静态常驻状态。
 
 ### 2. 训练显存的四大支柱与静态账本
@@ -115,6 +110,7 @@ $$\begin{aligned}
 \end{aligned}$$
 
 一台配备 80 GB 显存的 NVIDIA A100/H100 SXM 节点，实际可用物理显存约为 $80 \times 10^9 \text{ bytes} \approx 74.5\text{ GiB}$。这意味着：
+
 - 单张 80GB 卡甚至连 7B 模型的静态权重和优化器状态都无法完整装入（$104.3\text{ GiB} > 74.5\text{ GiB}$），尚未运行任何前向计算就会直接 OOM！
 - **严谨的系统设计推论**：标准、全参数、单副本的 7B 模型训练**绝不可能单卡完成**，必须引入参数与优化器分片（ZeRO / FSDP，详见第 5 课）或多维并行拆分。只有在采用 LoRA（冻结基座、仅更新约 $1\%$ 参数）、8-bit 优化器（如 bitsandbytes 将优化器状态压减至 $2N$）或模型卸载（CPU Offloading）等特殊手段下，单卡 80GB 才能跑通训练。
 
@@ -125,7 +121,6 @@ $$\begin{aligned}
 ```{python}
 #| course_role: exercise
 from dataclasses import dataclass
-
 
 @dataclass(frozen=True)
 class MemoryBreakdown:
@@ -143,7 +138,6 @@ class MemoryBreakdown:
         # 不能手写"每参数共多少 byte"；
         # 应从各分量求和，以便检查每一项是否被重复或遗漏。
         return ______________________________
-
 
 def estimate_adam_memory(
     num_params: int,
@@ -192,16 +186,13 @@ def estimate_adam_memory(
         grad_accum_fp32=grad_accum_fp32,
     )
 
-
 def bytes_to_gb(num_bytes: int) -> float:
     """十进制 GB，硬件和原文表格常使用这个单位。"""
     return num_bytes / __________________
 
-
 def bytes_to_gib(num_bytes: int) -> float:
     """二进制 GiB；1 GiB = 1024^3 bytes。"""
     return num_bytes / __________________
-
 
 for size in (1_000_000_000, 7_000_000_000):
     for fp32_accum in (False, True):
@@ -229,7 +220,9 @@ BF16 混合精度在本课账本中可能仍是每参数 16 bytes。既然静态
 某模型在第一轮 forward/backward 成功，但第一次 optimizer step 后，第二轮训练 OOM。请回答：
 
 1. 哪类显存状态可能是在第一次 optimizer step 附近才完整建立？
+
 2. 为什么"第一轮成功"不能证明后续训练一定能运行？
+
 3. 你至少还需要测量哪两类信息，才能给出可信诊断？
 
 ## 检查与通过标准
@@ -247,7 +240,6 @@ BF16 混合精度在本课账本中可能仍是每参数 16 bytes。既然静态
 - 遗漏 master weights 或 Adam 的某个状态。
 - 根据单一配置断言某模型"绝对无法训练"。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -256,7 +248,6 @@ BF16 混合精度在本课账本中可能仍是每参数 16 bytes。既然静态
 ```{python}
 #| course_role: solution
 from dataclasses import dataclass
-
 
 @dataclass(frozen=True)
 class MemoryBreakdown:
@@ -274,7 +265,6 @@ class MemoryBreakdown:
         # 不能手写"每参数共多少 byte"；
         # 应从各分量求和，以便检查每一项是否被重复或遗漏。
         return self.model_bf16 + self.grad_bf16 + self.master_weights_fp32 + self.adam_m_fp32 + self.adam_v_fp32 + self.grad_accum_fp32
-
 
 def estimate_adam_memory(
     num_params: int,
@@ -323,16 +313,13 @@ def estimate_adam_memory(
         grad_accum_fp32=grad_accum_fp32,
     )
 
-
 def bytes_to_gb(num_bytes: int) -> float:
     """十进制 GB，硬件和原文表格常使用这个单位。"""
     return num_bytes / 1e9
 
-
 def bytes_to_gib(num_bytes: int) -> float:
     """二进制 GiB；1 GiB = 1024^3 bytes。"""
     return num_bytes / 1024 ** 3
-
 
 for size in (1_000_000_000, 7_000_000_000):
     for fp32_accum in (False, True):
@@ -345,12 +332,10 @@ for size in (1_000_000_000, 7_000_000_000):
         )
 ```
 
-
 ## 补全后的代码
 
 ```python
 from dataclasses import dataclass
-
 
 @dataclass(frozen=True)
 class MemoryBreakdown:
@@ -375,7 +360,6 @@ class MemoryBreakdown:
             + self.grad_accum_fp32
         )
 
-
 def estimate_adam_memory(num_params, use_fp32_grad_accum):
     if num_params <= 0:
         raise ValueError("num_params must be positive")
@@ -399,10 +383,8 @@ def estimate_adam_memory(num_params, use_fp32_grad_accum):
         grad_accum_fp32=grad_accum_fp32,
     )
 
-
 def bytes_to_gb(num_bytes: int) -> float:
     return num_bytes / 1e9
-
 
 def bytes_to_gib(num_bytes: int) -> float:
     return num_bytes / 1024 ** 3
@@ -438,7 +420,9 @@ params=7B, fp32_grad_accum=True, 140.0 GB, 130.4 GiB
 ## Q3
 
 1. 最可能是 Adam 的优化器状态（m、v，以及 master weights 的首次完整建立）——第一轮 optimizer step 前它们要么未分配、要么尚未占据显存；第一轮的 profile 与后续不同还有 caching allocator 预热的原因。
+
 2. "第一轮成功"只证明该时刻的显存占用 < 上限；显存是动态的（激活/梯度/优化器状态在不同阶段交替），峰值可能出现在 step 2 及以后（优化器状态常驻 + 缓存碎片累积）。
+
 3. 至少测量：a) 每轮峰值显存（torch.cuda.max_memory_allocated 与 reserved）；b) 内存 profile 曲线（哪些阶段、哪类张量占用）。必要时再看分配器碎片与 CUDA context。
 
 ## 通过要点

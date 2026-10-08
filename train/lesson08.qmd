@@ -3,19 +3,14 @@ title: "第 8 课：上下文并行 CP"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Context Parallelism / Ring Attention / Zig-Zag Ring Attention
 - 前置：第 3 课（all-gather / all-to-all 概念）、第 7 课（SP）
@@ -32,8 +27,12 @@ jupyter: python3
 
 ## 核心概念
 
-
 ### 核心操作与执行流程图解
+
+::: {.img-card}
+![](assets/figs/train_cp_ring_attention_math.png){width="95%"}
+<p class="caption">图 8-1：上下文并行（Context Parallelism / Ring Attention）环形流水线与因果掩码平衡数学模型</p>
+:::
 
 ```{mermaid}
 flowchart TD
@@ -44,7 +43,7 @@ flowchart TD
         Seq --> B3["Card 3: Q3, K3, V3 (96~128k)"]
     end
 ```
-<p class="caption" align="center"><em>图 8-1：上下文并行按序列切块并分配至独立 GPU 拓扑</em></p>
+<p class="caption" align="center"><em>图 8-2：上下文并行按序列切块并分配至独立 GPU 拓扑</em></p>
 
 ```{mermaid}
 sequenceDiagram
@@ -53,22 +52,22 @@ sequenceDiagram
     participant KV as Local Key/Value Block
     participant P2P as 异步 P2P 环形发送 (Ring Send/Recv)
     participant Acc as FlashAttention Online Accumulator
-    
+
     Q->>Acc: 与本地 KV0 计算局部注意力
     KV->>P2P: 异步把 KV 发送给下邻居，接收上邻居 KV
     P2P-->>Acc: 用接收到的 KV1 计算注意力，并通过 Online Softmax 配平更新
     Note over Q,Acc: 轮转 N-1 次后完成全序列因果注意力且显存恒定
 ```
-<p class="caption" align="center"><em>图 8-2：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程</em></p>
-
+<p class="caption" align="center"><em>图 8-3：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程</em></p>
 
 ### 1. 上下文并行（CP）的提出背景与第一性原理
 
 随着大语言模型应用从短文本对话演进到长文档分析、代码库解析、超长推理（如 128k、256k 乃至 1M 上下文），系统显存面临着**序列长度 $s$ 引发的非线性膨胀危机**：
+
 - **自注意力机制二次方显存**：原生 Attention 的分数矩阵维度为 $(s, s)$，显存复杂度为 $O(s^2)$；即便采用 FlashAttention 避免物化分数矩阵，前向与反向中的输入/输出激活、残差连接以及 KV 缓存显存仍然随 $s$ 呈线性增长。在 128k 序列下，仅单样本激活显存就高达数百吉字节。
 - **TP 扩展性的物理壁障**：第 6 课已指出，张量并行（TP）受限于机内 NVLink 超高带宽，通常最大只能取 $\text{TP}=8$。仅靠机内 TP 无法跨机扩展以消化百万级别的超长序列。
 
-**上下文并行（Context Parallelism, CP）**应运而生。如**图 8-1** 所示，CP 是一种**全局序列分块并行架构**：
+**上下文并行（Context Parallelism, CP）**应运而生。如**图 8-1 与图 8-2** 所示，CP 是一种**全局序列分块并行架构**：
 - 它将长达 $s$ 的输入序列在最外层直接沿序列维度均匀切分为 $N_{\text{cp}}$ 个子序列片段，分配给集群中的 $N_{\text{cp}}$ 张 GPU（通常跨物理节点，结合 RDMA 网络）。
 - 每张 GPU 分配到的局部序列长度仅为 $s_{\text{local}} = \frac{s}{N_{\text{cp}}}$。
 - **与逐 Token 算子的天然正交性**：Transformer 中的 MLP（Feed-Forward）、LayerNorm/RMSNorm、Embedding 以及各类残差连接完全是**逐 Token 独立计算（Token-wise）**的。在 CP 模式下，这些模块在各卡上进行完全本地的张量运算，**全程产生 0 跨卡通信开销**！
@@ -78,12 +77,15 @@ sequenceDiagram
 
 为了解决注意力跨卡计算的问题，UC Berkeley 提出了经典的 **Ring Attention（环形注意力）** 算法。其核心思想是：**让局部 Query 始终固定在本地显存，而让 Key/Value 块沿着逻辑通信环异步流转轮巡**。
 
-如**图 8-2** 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：
+如**图 8-3** 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：
+
 1. **初始状态**：每个 Rank $r \in [0, N_{\text{cp}}-1]$ 均持有本地的子序列块 $Q_r, K_r, V_r$，形状均为 $(b, s_{\text{local}}, h)$。
+
 2. **$N_{\text{cp}}$ 步环形流水循环**：在每一个时间步 $t \in [0, N_{\text{cp}}-1]$：
    - **异步通信启动**：通信流启动非阻塞 P2P 传输（`dist.isend` 与 `dist.irecv`），将当前卡持有的 $K, V$ 块异步投递给环形拓扑的下一个邻居 $(r+1) \pmod{N_{\text{cp}}}$，同时异步接收来自上一个邻居 $(r-1) \pmod{N_{\text{cp}}}$ 的新 $K, V$ 块。
    - **计算与通信重叠**：在后台网络传输的同时，GPU 计算流在本地执行矩阵乘：将固定的本地 $Q_r$ 与当前持有的 $K, V$ 计算局部注意力，并通过 **Online Softmax** 算法就地合并、缩放并累加到本地的上下文输出张量 $O_r$ 中。
    - **同步与双缓冲轮换**：计算完毕后，等待后台异步 P2P 传输收包完成，交换当前缓冲区与接收缓冲区（Buffer Swap），进入下一轮迭代。
+
 3. **显存恒定特性**：在整个环形轮转过程中，每张卡只需要额外保留用于接收下一个块的临时 KV 双缓冲空间。每卡显存仅为 $O(s_{\text{local}}) = O(\frac{s}{N_{\text{cp}}})$，与全网序列总长度 $s$ 的膨胀完全解耦！
 
 ### 3. 与 FlashAttention 的理论同源性：Online Softmax
@@ -93,6 +95,7 @@ sequenceDiagram
 在朴素计算中，Softmax 的分母需要全序列求和：$\ell = \sum_{j=1}^s \exp(S_j - m)$。若简单地对每个块独立做 Softmax 再拼接，会导致各块的分母归一化基准不一致，计算结果必然完全错误。
 
 Ring Attention 在本地维护三个统计状态量：
+
 - $m^{(t)}$：当前已见所有 KV 块的最大点积分数（用于防止指数溢出）；
 - $\ell^{(t)}$：当前已见所有 KV 块的归一化指数和；
 - $O^{(t)}$：当前累积的局部加权输出向量。
@@ -109,6 +112,7 @@ $$O^{(t)} = O^{(t-1)} \cdot \frac{\exp(m^{(t-1)} - \tilde{m}) \cdot \ell^{(t-1)}
 
 #### A. 朴素连续切分的灾难性失衡
 若将长序列简单地连续切片（例如 4 卡场景，Rank 0 分得 $[0, \frac{s}{4}]$，Rank 3 分得 $[\frac{3s}{4}, s]$）：
+
 - **Rank 0**：持有的 Query 全部位于序列最前端。它只需要与本地的 KV 块计算，其余 3 个远端发来的 KV 块全部处于未来时间步，计算量全部为 0！Rank 0 在第 1 步后就陷入彻底的空转饥饿。
 - **Rank 3**：持有的 Query 全部位于序列末尾。它必须与集群中所有 4 个 KV 块全部进行点积运算，工作量高达 Rank 0 的 4 倍！
 - **气泡率（Bubble Rate）**：在下三角注意力矩阵下，纯连续切分的总有效计算量仅为方阵的 $50\%$，但由于木桶效应，每轮必须等待最慢的 Rank 3，系统整体算力浪费高达近 $50\%$！
@@ -119,6 +123,7 @@ $$O^{(t)} = O^{(t-1)} \cdot \frac{\exp(m^{(t-1)} - \tilde{m}) \cdot \ell^{(t-1)}
 设每个 Rank 分配 $K=2$ 个 Chunk，全序列共 $2 N_{\text{cp}}$ 个块。Zig-Zag 按照如下规律交错分配：
 $$\text{Rank } r \text{ 持有 Chunk } \{ r, \ 2 N_{\text{cp}} - 1 - r \}$$
 以 $N_{\text{cp}} = 4$ 为例：
+
 - Rank 0: Chunk $\{0, 7\}$
 - Rank 1: Chunk $\{1, 6\}$
 - Rank 2: Chunk $\{2, 5\}$
@@ -146,22 +151,22 @@ $$W_r = (r + 1) + (2 N_{\text{cp}} - 1 - r + 1) = (r + 1) + (2 N_{\text{cp}} - r
 设集群规模为 $N_{\text{cp}} = 4$ 张 GPU，全序列划分为 8 个 Chunk（编号 0 至 7，因果掩码下 Chunk $q$ 合法 Attend 的 KV 范围是 $[0, q]$）：
 
 - **朴素连续分配方案（Sequential Assignment）**：
-  - 各卡持有的 Chunk：Rank 0: $\{0, 1\}$，Rank 1: $\{2, 3\}$，Rank 2: $\{4, 5\}$，Rank 3: $\{6, 7\}$。
-  - 各卡有效计算对数：
-    - Rank 0: $(0+1) + (1+1) = 1 + 2 = 3$ 对
-    - Rank 1: $(2+1) + (3+1) = 3 + 4 = 7$ 对
-    - Rank 2: $(4+1) + (5+1) = 5 + 6 = 11$ 对
-    - Rank 3: $(6+1) + (7+1) = 7 + 8 = 15$ 对
-  - **失衡分析**：最大负载（15）是最小负载（3）的 **5.0 倍**！Rank 0 大部分时间处于等待阻塞状态。
+   - 各卡持有的 Chunk：Rank 0: $\{0, 1\}$，Rank 1: $\{2, 3\}$，Rank 2: $\{4, 5\}$，Rank 3: $\{6, 7\}$。
+   - 各卡有效计算对数：
+   - Rank 0: $(0+1) + (1+1) = 1 + 2 = 3$ 对
+   - Rank 1: $(2+1) + (3+1) = 3 + 4 = 7$ 对
+   - Rank 2: $(4+1) + (5+1) = 5 + 6 = 11$ 对
+   - Rank 3: $(6+1) + (7+1) = 7 + 8 = 15$ 对
+   - **失衡分析**：最大负载（15）是最小负载（3）的 **5.0 倍**！Rank 0 大部分时间处于等待阻塞状态。
 
 - **Zig-Zag 镜像分配方案（Zig-Zag Assignment）**：
-  - 各卡持有的 Chunk：Rank 0: $\{0, 7\}$，Rank 1: $\{1, 6\}$，Rank 2: $\{2, 5\}$，Rank 3: $\{3, 4\}$。
-  - 各卡有效计算对数：
-    - Rank 0: $(0+1) + (7+1) = 1 + 8 = 9$ 对
-    - Rank 1: $(1+1) + (6+1) = 2 + 7 = 9$ 对
-    - Rank 2: $(2+1) + (5+1) = 3 + 6 = 9$ 对
-    - Rank 3: $(3+1) + (4+1) = 4 + 5 = 9$ 对
-  - **均衡分析**：所有卡的工作量均严格等于 9 对，达到绝对的完美负载均衡！虽然每张卡都需要与环上其他卡发生数据交换，但单卡发送与接收的总通信量恒定为 $2 \times \frac{s}{N_{\text{cp}}}$，没有产生任何额外的数据膨胀。
+   - 各卡持有的 Chunk：Rank 0: $\{0, 7\}$，Rank 1: $\{1, 6\}$，Rank 2: $\{2, 5\}$，Rank 3: $\{3, 4\}$。
+   - 各卡有效计算对数：
+   - Rank 0: $(0+1) + (7+1) = 1 + 8 = 9$ 对
+   - Rank 1: $(1+1) + (6+1) = 2 + 7 = 9$ 对
+   - Rank 2: $(2+1) + (5+1) = 3 + 6 = 9$ 对
+   - Rank 3: $(3+1) + (4+1) = 4 + 5 = 9$ 对
+   - **均衡分析**：所有卡的工作量均严格等于 9 对，达到绝对的完美负载均衡！虽然每张卡都需要与环上其他卡发生数据交换，但单卡发送与接收的总通信量恒定为 $2 \times \frac{s}{N_{\text{cp}}}$，没有产生任何额外的数据膨胀。
 
 ## 代码填空题
 
@@ -178,7 +183,6 @@ def sequential_assignment(num_ranks: int, chunks_per_rank: int):
     for r in range(num_ranks):
         assign[r] = ______   # 填空：第 r 个 rank 拿到的 chunk 列表
     return assign
-
 
 def zigzag_assignment(num_ranks: int, chunks_per_rank: int):
     """
@@ -201,7 +205,6 @@ def zigzag_assignment(num_ranks: int, chunks_per_rank: int):
         assign[r] = chunks
     return assign
 
-
 def causal_workload(assign: dict[int, list[int]], num_chunks: int) -> dict[int, int]:
     """
     因果掩码下每个 rank 需要计算的 (q_chunk, kv_chunk) 对数。
@@ -216,7 +219,6 @@ def causal_workload(assign: dict[int, list[int]], num_chunks: int) -> dict[int, 
         workload[r] = total
     return workload
 
-
 def ring_rotation(num_ranks: int, rank: int, start_chunk: int) -> list[int]:
     """
     Ring Attention 轮转：返回该 rank 在每一步（0..num_ranks-1）持有的
@@ -227,7 +229,6 @@ def ring_rotation(num_ranks: int, rank: int, start_chunk: int) -> list[int]:
     for t in range(num_ranks):
         steps.append(______)               # 填空：(start + t) 沿环回绕
     return steps
-
 
 if __name__ == "__main__":
     p = 4
@@ -272,7 +273,6 @@ CP 中为什么只有 attention 模块需要跨卡通信？为什么交换的是
 - 说不出因果掩码导致负载不均的具体机制。
 - 认为"分别 softmax 再拼接"是正确做法。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -289,7 +289,6 @@ def sequential_assignment(num_ranks: int, chunks_per_rank: int):
     for r in range(num_ranks):
         assign[r] = list(range(r * chunks_per_rank, (r + 1) * chunks_per_rank))   # 填空：第 r 个 rank 拿到的 chunk 列表
     return assign
-
 
 def zigzag_assignment(num_ranks: int, chunks_per_rank: int):
     """
@@ -312,7 +311,6 @@ def zigzag_assignment(num_ranks: int, chunks_per_rank: int):
         assign[r] = chunks
     return assign
 
-
 def causal_workload(assign: dict[int, list[int]], num_chunks: int) -> dict[int, int]:
     """
     因果掩码下每个 rank 需要计算的 (q_chunk, kv_chunk) 对数。
@@ -327,7 +325,6 @@ def causal_workload(assign: dict[int, list[int]], num_chunks: int) -> dict[int, 
         workload[r] = total
     return workload
 
-
 def ring_rotation(num_ranks: int, rank: int, start_chunk: int) -> list[int]:
     """
     Ring Attention 轮转：返回该 rank 在每一步（0..num_ranks-1）持有的
@@ -338,7 +335,6 @@ def ring_rotation(num_ranks: int, rank: int, start_chunk: int) -> list[int]:
     for t in range(num_ranks):
         steps.append((start_chunk + t) % num_ranks)               # 填空：(start + t) 沿环回绕
     return steps
-
 
 if __name__ == "__main__":
     p = 4
@@ -358,13 +354,11 @@ if __name__ == "__main__":
     print("rank 2 轮转:", ring_rotation(p, 2, 2))
 ```
 
-
 ## 补全后的代码（关键填空处）
 
 ```python
 def sequential_assignment(num_ranks, chunks_per_rank):
     assign[r] = list(range(r * chunks_per_rank, (r + 1) * chunks_per_rank))
-
 
 def zigzag_assignment(num_ranks, chunks_per_rank):
     total = num_ranks * chunks_per_rank
@@ -374,10 +368,8 @@ def zigzag_assignment(num_ranks, chunks_per_rank):
         else:
             chunks.append(total - 1 - (k // 2) * num_ranks - r)  # 反序轮
 
-
 def causal_workload(assign, num_chunks):
     total += q + 1        # 因果：query chunk q 可 attend kv chunk 0..q，共 q+1 个
-
 
 def ring_rotation(num_ranks, rank, start_chunk):
     steps.append((start_chunk + t) % num_ranks)   # 每步 K/V 沿环前进一块

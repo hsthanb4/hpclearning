@@ -3,22 +3,21 @@ title: "第 13 课：DeepSeek DeepGEMM 核心架构与 Hopper FP8 算子拆解"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
 
-
-
 ## 本课目标与完成标准
 
 学完后你应能：
+
 - 深入推演 DeepSeek-V3 核心算子库 DeepGEMM 的设计动机，说清其相比传统 CUTLASS 3.x / cuBLASLt 的架构取舍；
 - 掌握 Hopper 架构（SM90）的核心指令级原语：Tensor Memory Accelerator (TMA)、Warp-Group MMA (`wgmma.mma_async`) 与 `mbarrier` 硬件事务屏障；
 - 彻底理清 Fine-grained Block-wise FP8 量化（$1 \times 128$ 细粒度分块缩放）的数学原理与高效 Epilogue 反量化实现；
 - 掌握 MoE 场景下 Contiguous Grouped GEMM 与 Masked Grouped GEMM 的调度机制及其与 DeepEP 通信库的协同。
 
 通过必须同时满足：
+
 - 独立补齐本课唯一的代码填空题（Hopper WGMMA + 细粒度反量化分块模拟内核），并通过给定测试断言；
 - 三个问答题均说明因果链与硬件微架构状态迁移，而不是只报术语；
 - 能指出至少一个正确性边界和一个性能瓶颈取舍；
@@ -31,8 +30,12 @@ jupyter: python3
 
 ## 核心心智模型
 
-
 ### 核心操作与执行流程图解
+
+::: {.img-card}
+![](assets/figs/cuda_deepgemm_fp8_math.png){width="95%"}
+<p class="caption">图 13-1：DeepSeek DeepGEMM FP8 细粒度分组缩放与片上微架构数学模型</p>
+:::
 
 ```{mermaid}
 flowchart TD
@@ -63,7 +66,7 @@ flowchart TD
         SMEM -->|SS 模式零寄存器开销| Consumer
     end
 ```
-<p class="caption" align="center"><em>图 13-1：DeepGEMM 在 Hopper 架构下的 TMA 硬件直连与 WGMMA 异步多级流水线架构</em></p>
+<p class="caption" align="center"><em>图 13-2：DeepGEMM 在 Hopper 架构下的 TMA 硬件直连与 WGMMA 异步多级流水线架构</em></p>
 
 ```{mermaid}
 flowchart LR
@@ -81,8 +84,7 @@ flowchart LR
         end
     end
 ```
-<p class="caption" align="center"><em>图 13-2：DeepGEMM 面向 MoE 的 Contiguous 与 Masked 两大布局设计对比</em></p>
-
+<p class="caption" align="center"><em>图 13-3：DeepGEMM 面向 MoE 的 Contiguous 与 Masked 两大布局设计对比</em></p>
 
 ### 1. 它是什么，解决什么问题
 
@@ -92,9 +94,11 @@ flowchart LR
 1. **CUTLASS 3.x 极其庞大的 C++ 模板膨胀与编译噩梦**：
    - 传统 CUTLASS 依赖极深的模板嵌套与代数表达（Layout、Tile、Iterator、Collective Builder），仅编译一组 GEMM 内核通常需要数分钟乃至数十分钟；
    - 工业级二次开发、定制特殊访存或微架构调优时，工程师深陷模板推导黑洞，调试门槛极高。
+
 2. **DeepSeek-V3 细粒度分块量化（$1 \times 128$ Block-wise FP8）缺乏原生极致优化**：
    - 常规 TensorRT-LLM 或 cuBLASLt 主要面向 **Tensor-wise（整张量单标量缩放）** 或 **Channel-wise（逐通道缩放）**；
    - DeepSeek-V3 为了在 FP8 下保持与 BF16 无损的数学精度，提出了 **$1 \times 128$ 的 Block-wise Fine-grained Scaling**：矩阵在 $K$ 维度每 128 个元素划分为一个独立 Block，拥有专属的 FP32/UE8M0 缩放系数。这要求 GEMM 内核的 Epilogue 必须在极短时间内完成多维缩放反量化，cuBLASLt 无法原生内联融合。
+
 3. **MoE 解码（Decoding）与 CUDA Graph 的静态分配冲突**：
    - 在推理 Decode 阶段，各 Expert 分配到的 Token 数量极小且每步动态变化；
    - 若使用传统变长 Grouped GEMM，CPU 必须每步重新统计各专家 Token 偏移量并下发 Kernel 参数，**彻底打破 CUDA Graph 捕获机制**，带来沉重的 CPU Launch 延迟。
@@ -103,8 +107,8 @@ flowchart LR
 - **Radical KISS 原则**：完全摒弃 CUTLASS 繁重的类层次结构，精炼出不到数千行的自包含代码，通过轻量级 C++ JIT（即时编译）模块在运行时极速加载，免去安装时的预编译开销；
 - **原生拥抱 Hopper 硬件原语**：深度利用 SM90 硬件级 TMA（张量内存加速器）与 WGMMA 指令，在 H800/H100 上跑出高达 **1550 TFLOPS（逼近硬件理论极限的 85%~90%）**；
 - **双模 MoE Grouped GEMM 支持**：
-  - `Contiguous`：用于训练前向/反向与推理 Prefill，连续内存拼接，算力利用率最大化；
-  - `Masked`：用于推理 Decode，配合 DeepEP 零 CPU 开销静态捕获，以 Mask 标记有效 Token，完全兼容 CUDA Graph。
+   - `Contiguous`：用于训练前向/反向与推理 Prefill，连续内存拼接，算力利用率最大化；
+   - `Masked`：用于推理 Decode，配合 DeepEP 零 CPU 开销静态捕获，以 Mask 标记有效 Token，完全兼容 CUDA Graph。
 
 ---
 
@@ -122,6 +126,7 @@ flowchart LR
 
 #### (3) 生产者-消费者解耦（Producer-Consumer Splitting）与 `mbarrier`
 DeepGEMM 将一个 ThreadBlock（例如 256 或 384 线程）进行角色解耦：
+
 - **生产者（TMA Warp-Group，128 线程）**：负责调度 TMA 硬件发起下一阶段的 A、B 及 Scale Factor 数据预取，并在硬件事务屏障（`ClusterTransactionBarrier`）上注册预期传输字节数（`expect_tx`）；
 - **消费者（Math Warp-Groups，128 或 256 线程）**：通过 `mbarrier.try_wait.parity` 轮询硬件屏障。一旦 TMA 数据到位，立即执行 `wgmma.mma_async`，实现极致的多级流水掩盖（$k\text{NumStages} = 3 \sim 4$）。
 
@@ -188,6 +193,7 @@ __device__ void gemm_loop(
 在不支持真实 Hopper 物理 GPU 的模拟环境或静态代码审查中，我们需要深刻理解其**分块细粒度反量化逻辑**与**算子数值等价性**。
 
 请实现一个**细粒度分块量化 GEMM 模拟器（Block-wise FP8 GEMM with 1x128 Fine-grained Dequantization）**：
+
 - 输入矩阵 $A \in \mathbb{R}^{M \times K}$ 与矩阵 $B \in \mathbb{R}^{N \times K}$ 采用 FP8 E4M3 数值格式（在练习中用低精度浮点模拟）；
 - $K$ 维度按 $128$ 元素切分成若干 Block。每个 Block 拥有一个对应的缩放因子 $S_A \in \mathbb{R}^{M \times (K/128)}$ 与 $S_B \in \mathbb{R}^{N \times (K/128)}$；
 - 真实数学计算：对于分块 $b \in [0, K/128 - 1]$，子块点积结果累加后，需乘上对应的缩放标量：$S_A[i, b] \times S_B[j, b]$；
@@ -213,27 +219,27 @@ def fine_grained_block_gemm_simulation(A_fp8, B_fp8, S_A, S_B, block_k=128):
     assert K == K_b, "K dimension mismatch"
     assert K % block_k == 0, "K must be divisible by block_k"
     num_blocks = K // block_k
-    
+
     D = np.zeros((M, N), dtype=np.float32)
-    
+
     # 模拟 Hopper 内核外层循环：逐个 Block_K 推进并进行细粒度反量化累加
     for b in range(num_blocks):
         k_start = b * block_k
         k_end = ______
-        
+
         # 提取当前 128-channel 瓦片
         A_tile = A_fp8[:, k_start:k_end]  # [M, block_k]
         B_tile = B_fp8[:, k_start:k_end]  # [N, block_k]
-        
+
         # 1. 执行片上 Tile 点积累加: Tile_Acc = A_tile @ B_tile.T  -> [M, N]
         tile_acc = np.matmul(A_tile, B_tile.T)
-        
+
         # 2. 提取当前 Block 的缩放因子外积: scale_tile = S_A[:, b:b+1] * S_B[:, b:b+1].T -> [M, N]
         scale_tile = ______
-        
+
         # 3. 将反量化后的局部瓦片累加至全局输出矩阵 D
         D += ______
-        
+
     return D
 
 # 测试用例验证
@@ -259,7 +265,6 @@ assert np.allclose(out_D, ref_D, atol=1e-5), f"Max difference: {np.max(np.abs(ou
 print("DeepGEMM 细粒度分块量化模拟测试通过！")
 ```
 :::
-
 
 ### 检查方法
 
@@ -289,7 +294,6 @@ print("DeepGEMM 细粒度分块量化模拟测试通过！")
 - Q1～Q3 各 2 分：必须从算子精度下溢、寄存器/访存层次、CUDA Graph 静态内存模型等本质因果链回答；
 - 一票否决：无法讲清 WGMMA 与 TMA 的分工，或混淆 Tensor-wise 与 Block-wise 量化。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -301,26 +305,26 @@ def fine_grained_block_gemm_simulation(A_fp8, B_fp8, S_A, S_B, block_k=128):
     assert K == K_b, "K dimension mismatch"
     assert K % block_k == 0, "K must be divisible by block_k"
     num_blocks = K // block_k
-    
+
     D = np.zeros((M, N), dtype=np.float32)
-    
+
     for b in range(num_blocks):
         k_start = b * block_k
         k_end = (b + 1) * block_k
-        
+
         # 提取当前 128-channel 瓦片
         A_tile = A_fp8[:, k_start:k_end]  # [M, block_k]
         B_tile = B_fp8[:, k_start:k_end]  # [N, block_k]
-        
+
         # 1. 执行片上 Tile 点积累加
         tile_acc = np.matmul(A_tile, B_tile.T)
-        
+
         # 2. 提取当前 Block 的缩放因子外积 (利用广播生成 [M, N])
         scale_tile = S_A[:, b:b+1] * S_B[:, b:b+1].T
-        
+
         # 3. 反量化并累加
         D += tile_acc * scale_tile
-        
+
     return D
 
 # 执行验证
@@ -334,6 +338,7 @@ print("答案执行验证 100% 通过！")
 
 1. **数值精度与动态范围（Dynamic Range）**：
    FP8（E4M3 格式）的有效动态范围极小（仅 8 个指数位与尾数位，绝对值最大仅 448，精度显著低于 BF16/FP16）。大模型各激活通道间存在严重的离群值（Outliers）。若采用 Tensor-wise 单一缩放因子，为了容纳极大离群值，缩放系数必须非常大，导致绝大多数正常数值下溢变为 0，引起灾难性精度崩塌。$1 \times 128$ 细粒度分块量化将缩放局限在 128 个 Channel 内部，实现了极高的局部信噪比。
+
 2. **对 Hopper WGMMA 的挑战**：
    标准 WGMMA 的累加器工作在数学上的连续点积模式。在 $1 \times 128$ 模式下，点积不能无休止地在一个循环内跨 Block 累加，或者必须在 Epilogue 阶段将乘积拆解。DeepGEMM 的极致优化在于：将 $K$ 维分块瓦片大小（`BLOCK_K`）精准绑定为 $128$。每个 WGMMA 刚好计算完这 128 个元素后，由消费者线程直接在寄存器中乘以对应的 `Scale_A * Scale_B`，使得点积累加与反量化严格同步，杜绝了中间精度的溢出。
 
@@ -342,6 +347,7 @@ print("答案执行验证 100% 通过！")
 1. **彻底消除寄存器往返搬运（Zero Register Allocation for Operands）**：
    Ampere 的流程是：`Global Memory -> (cp.async) -> SMEM -> (ldmatrix) -> Registers -> (mma.sync) -> Registers`。A 和 B 矩阵必须同时常驻在寄存器堆中，每个线程需要几十甚至上百个寄存器存放输入操作数。
    Hopper WGMMA 的 SS 模式是：`Global Memory -> (TMA) -> SMEM -> (wgmma.mma_async) -> Registers(仅存放累加器 D)`。矩阵 A 和 B 的输入操作数永远停留在 SMEM，Tensor Core 直接通过硬件总线并发抓取 SMEM 数据进行 FMA。
+
 2. **性能与 Occupancy 飞跃**：
    寄存器占用量骤降 60% 以上，使得每个 SM 可以容纳更多并发活跃的 ThreadBlock（提升 Occupancy）。同时完全消除了 `ldmatrix` 指令的发射开销，解除了 Warp Scheduler 的指令发射槽瓶颈。
 
@@ -349,15 +355,16 @@ print("答案执行验证 100% 通过！")
 
 1. **CUDA Graph 核心不变性原理**：
    CUDA Graph 依赖“静态执行图”消除 CPU Launch 开销。在 Graph 捕获期间，所有 Kernel 的 Launch 参数、输入输出指针、Grid/Block 维度必须完全固化，执行期不得发起任何主机端动态内存分配或 CPU-GPU 间的同步（如根据各专家实际 Token 偏移重算元数据）。
+
 2. **Masked 布局解决动态偏移**：
    在 Decode 阶段，每个 GPU 每步分配给各个 Expert 的 Token 数完全动态不可预知。`m_grouped_fp8_gemm_nt_masked` 预先分配满足最大并发 Token 长度的静态 Buffer。通信库 DeepEP 将收到的数据直接散列在固定 Slot 中，并生成一份 0/1 Mask 张量。Kernel 在执行时遍历固定网格，仅在 `mask[token] == 1` 时执行真实计算，跳过无效分块，在完全不打断 CUDA Graph 静态回放的前提下完美适配 MoE 动态路由。
 
 ## 面试高频追问与工业级优化扩展
 
 - **追问 1：TMA 的 Multicast 广播特性在 GEMM 中如何使用？**
-  - *回答要点*：Hopper 引入了 Cluster 概念（最多 8 个 SM 组成硬件集群）。当多个 SM 负责计算相同 $M$ 或相同 $N$ 维度的矩阵瓦片时，A 或 B 矩阵数据完全相同。TMA 支持 Cluster Multicast：一个 SM 发起 TMA 读取，硬件可将数据自动多播并发写入集群内其他多个 SM 的 Shared Memory 中，将 L2 Cache 和显存带宽压力直接骤降数倍！
+   - *回答要点*：Hopper 引入了 Cluster 概念（最多 8 个 SM 组成硬件集群）。当多个 SM 负责计算相同 $M$ 或相同 $N$ 维度的矩阵瓦片时，A 或 B 矩阵数据完全相同。TMA 支持 Cluster Multicast：一个 SM 发起 TMA 读取，硬件可将数据自动多播并发写入集群内其他多个 SM 的 Shared Memory 中，将 L2 Cache 和显存带宽压力直接骤降数倍！
 - **追问 2：为什么 DeepGEMM 坚决不用 NVRTC 而是自研 C++ JIT 编译系统？**
-  - *回答要点*：早期版本尝试过 NVRTC，但发现 NVRTC 针对 Hopper SM90 高级 PTX（如 WGMMA、TMA 事务屏障）的代码生成效率和指令交织优化远不如最新的标准 NVCC 驱动编译器。DeepGEMM 开发了轻量级的 C++ JIT 运行时，直接调用主机端 NVCC 缓存二进制产物，实现了亚秒级冷启动与极低运行时调用开销。
+   - *回答要点*：早期版本尝试过 NVRTC，但发现 NVRTC 针对 Hopper SM90 高级 PTX（如 WGMMA、TMA 事务屏障）的代码生成效率和指令交织优化远不如最新的标准 NVCC 驱动编译器。DeepGEMM 开发了轻量级的 C++ JIT 运行时，直接调用主机端 NVCC 缓存二进制产物，实现了亚秒级冷启动与极低运行时调用开销。
 
 ## 源码参考与延伸阅读
 

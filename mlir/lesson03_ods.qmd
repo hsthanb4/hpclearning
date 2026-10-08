@@ -3,12 +3,9 @@ title: "第 3 课：ODS/TableGen 与自定义 Operation"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ## 本课目标与完成标准
 
@@ -27,7 +24,6 @@ jupyter: python3
 - 本课在路线中的作用：ODS 用 TableGen 描述 dialect/op 的结构约束并生成 C++ 声明、parser/printer 框架和文档，减少重复样板。
 
 ## 核心心智模型
-
 
 ### 核心操作与执行流程图解
 
@@ -52,7 +48,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 3-2：基于 mlir-tblgen 的自定义算子全自动构建与接入生命周期</em></p>
 
-
 ### 1. 它是什么，解决什么问题
 
 在 C++ 中手动编写一个工业级 MLIR Operation 需要耗费数以百行的样板代码（Boilerplate）：手写类定义、构造函数、访问器（Accessors）、Operand/Result 数量校验、Parser/Printer 文本解析序列化、类型检查 Verifier 以及文档。这极其冗长且极易出错。
@@ -70,10 +65,12 @@ ODS 声明规范与全自动构建生命周期如图 3-1 与图 3-2 所示：
    - `results`：使用 `(outs ...)` 声明返回值；
    - `traits`：挂载编译期语义特征（如 `Pure` 表示无副作用、`Commutative` 表示可交换、`SameOperandsAndResultType` 表示输入输出类型同构）；
    - `assemblyFormat`：声明声明式自定义打印与解析规则，免写手写 Parser。
+
 2. **代码生成（`mlir-tblgen` 驱动）**：
    如图 3-2 所示，在项目 CMake 构建阶段：
    - 运行 `mlir-tblgen -gen-op-decls` 生成 `*.h.inc`（包含强类型 C++ 包装类、`getLhs()` / `getRhs()` 访问器、Trait 继承声明）；
    - 运行 `mlir-tblgen -gen-op-defs` 生成 `*.cpp.inc`（包含操作数偏移行内解析、自动类型校验骨架、`build()` 工厂方法与 Parser/Printer 逻辑）。
+
 3. **C++ 语义钩子接入**：
    对于超越声明式表达能力的复杂业务逻辑（如多维张量沿某一轴求和的形状推导、常量折叠），开发者在自定义 C++ 文件中实现声明的语义钩子函数：
    - `verify()`：执行复杂的深层跨字段数值校验；
@@ -84,8 +81,10 @@ ODS 声明规范与全自动构建生命周期如图 3-1 与图 3-2 所示：
 
 - **Trait 是严肃的语义承诺，而非非绑定的注释**：
   Trait（如 `Pure`、`Commutative`、`SameOperandsAndResultType`）会直接被下游优化 Pass（如 DCE、CSE、规范化重写）作为无条件成立的前提公理使用。若给实际向显存写入数据或改变全局状态的 Op（如 `memref.store`）错误标记了 `Pure`，下游 DCE Pass 会在发现其返回值未被使用时直接将其整条物理消除，导致严重的状态静默损坏。
+
 - **类型系统与 ODS Constraint 匹配**：
   若在 `arguments` 声明了 `AnyTensor:$lhs`，但未在 Trait 中约束类型相等，则 `$lhs` 可以是 `tensor<4xf32>` 而 `$rhs` 可以是 `tensor<8xi32>`。若要确保逐元素相加合法，必须同时施加 `SameOperandsAndResultType` 或显式的 `AllTypesMatch` 约束。
+
 - **生成头文件与手写代码的循环依赖**：
   包含生成的 `*.h.inc` 时必须置于正确的命名空间内，否则会导致编译期类名未定名错误。
 
@@ -93,6 +92,7 @@ ODS 声明规范与全自动构建生命周期如图 3-1 与图 3-2 所示：
 
 - **声明式约束 vs 手写 C++ Verifier**：
   能用 ODS 声明式表达的约束（如 `SameTypeOperands`、`TypeConstraint`）尽量在 `.td` 中声明。ODS 能自动生成直观易读的报错提示，并能自动导出至 Markdown 语法手册；过度依赖手写 C++ `verify()` 会降低算子文档的自解释性。
+
 - **自动 AssemblyFormat vs 手写 Parser**：
   声明式 `assemblyFormat` 覆盖了 95% 的自定义语法格式，并能自动保证 Parser 与 Printer 的完全对称可逆（Round-trip Safety）；仅当涉及极特殊的复杂动态语法解析时才需要开启 `let hasCustomAssemblyFormat = 1;`。
 
@@ -106,6 +106,7 @@ def My_AddOp : My_Op<"add", [Pure, SameOperandsAndResultType]> {
   let results = (outs AnyTensor:$result);
 }
 ```
+
 - `arguments` 指定必须输入两个张量 `$lhs` 与 `$rhs`；
 - `results` 指定输出张量 `$result`；
 - `[Pure]` 承诺无任何内存副作用，供 DCE 安全消除；
@@ -161,7 +162,6 @@ shape 相等这种跨 operand 约束应写 trait、ODS constraint 还是 verifie
 
 需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -180,8 +180,11 @@ def My_AddOp : My_Op<"add", [Pure, SameOperandsAndResultType]> {
 ### Q1 参考答案
 
 从三个阶段拆解其运行机制：
+
 1. **输入阶段（声明式元模型定义）**：开发者在 TableGen 脚本（`.td` 文件）中以极简 DSL 声明 Operation 的核心规格，包括输入操作数类型（`arguments`）、返回值类型（`results`）、编译期语义公理（`traits`，如 `Pure`）以及文本汇编语法（`assemblyFormat`）。
+
 2. **状态变化阶段（编译期代码生成与 C++ 虚实结合）**：构建系统调用 `mlir-tblgen` 驱动前端解析 TableGen AST，自动生成包含静态类型安全访问器、`build()` 工厂重载、结构化校验逻辑和语法反序列化器的 C++ 源码片段（`*.h.inc` 与 `*.cpp.inc`）。开发者补充手写高级语义钩子（如 `verify()` 边界判断与 `fold()` 常量折叠），共同编译为本地二进制。
+
 3. **输出阶段（方言模块装配与动态注册）**：在编译器启动或测试驱动初始化时，调用方言的 `registerOperations()` 将生成的 Operation 实例完整注册至 `MLIRContext` 核心环境，为整个编译器优化管线提供强类型、可被验证的语法树节点。
 
 ### Q2 参考答案
@@ -195,12 +198,15 @@ DCE Pass（如 `-canonicalize` 或 `-symbol-dce`）会基于“没有结果被�
 ### Q3 参考答案
 
 在设计算子约束时，三者的选型与架构分层原则如下：
+
 1. **优先选择 Trait（如 `SameOperandsShape` / `SameOperandsAndResultShape`）**：
    - **适用场景**：当形状约束是编译器中广泛通用的公理模式时。
    - **优势**：Trait 不仅在解析时自动生成校验逻辑，更重要的是为下游 Pass 提供了可查询的 C++ Trait 概念，能被优化算法批量识别（例如代数重写 Pass 可直接针对所有 `SameOperandsShape` 的算子执行跨节点广播下推）。
+
 2. **次选 ODS 声明式 Constraint（如在 arguments/results 中使用 Predicate 谓词）**：
    - **适用场景**：当约束模式较为特殊（例如输入维度必须与输出属性满足算术倍数），但仍能用纯逻辑公式表达时。
    - **优势**：保持在 `.td` 中声明式维护，能自动生成到导出的算子文档中，维护成本低。
+
 3. **最后选择自定义 C++ `verify()` 钩子**：
    - **适用场景**：涉及动态上下文、高阶张量广播（Broadcasting）兼容性检查、或依赖外部硬件属性的极复杂条件逻辑。
    - **优势**：拥有 C++ 图遍历的全部图灵完备能力，能构造极度精准详尽的局部诊断错误信息（`op->emitOpError(...)`）。

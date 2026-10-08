@@ -3,12 +3,9 @@ title: "第 6 课：均值方差与 Mask 二次传播"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ## 本课目标与完成标准
 
@@ -27,7 +24,6 @@ jupyter: python3
 - 本课在路线中的作用：均值和方差是两次 reduction；masked load 的 0 对 sum 安全，但减 mean 后 padding lane 变成 `-mean`。
 
 ## 核心心智模型
-
 
 ### 核心操作与执行流程图解
 
@@ -48,7 +44,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 6-2：两阶段掩码二次传播计算时序流</em></p>
 
-
 ### 1. 它是什么，解决什么问题
 
 在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 $\mu$ 与方差 $\sigma^2$ 是必经步骤。总体方差（Population Variance）的经典定义为：
@@ -66,11 +61,13 @@ $$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=
    - 使用 `cols = tl.arange(0, BLOCK)` 与 `mask = cols < N`。
    - `values = tl.load(..., mask=mask, other=0.0)`。
    - 在片上调用 `tl.sum(values, axis=0)` 并除以**真实逻辑长度 $N$**（绝对不能除以硬件向量长度 $\text{BLOCK}$），得到严格无偏的均值标量 $\mu$。
+
 2. **中心化与掩码重施加（Re-masking）**：
    - 寄存器中所有 lane 同时广播减去标量 $\mu$：`diff = values - mean`。
    - 此时，前 $N$ 个有效 lane 为 $x_i - \mu$；后 $\text{BLOCK} - N$ 个 Padding lane 变为 $-\mu$。
    - 计算元素平方项 `diff_sq = diff * diff`。此时 Padding lane 上的数值为 $\mu^2$。
    - **核心二次传播防护**：通过 `tl.where(mask, diff_sq, 0.0)` 强制对平方项重新施加掩码。将后 $\text{BLOCK} - N$ 个 lane 携带的 $\mu^2$ 重新强行抹平为加法单位元 $0.0$。
+
 3. **Pass 2（方差规约与双标量写回）**：
    - 对清洗后的 `centered_sq` 向量执行二次 `tl.sum`，除以真实长度 $N$，得到位级精准的总体方差 $\sigma^2$。
    - 将均值与方差标量分别通过 `tl.store` 写回显存。
@@ -79,8 +76,10 @@ $$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=
 
 - **归一化分母混淆（除 $N$ vs 除 $\text{BLOCK}$）**：
   若在计算均值或方差时误用除以 `BLOCK`，由于 $\text{BLOCK} \ge N$，算出的统计量将被无辜缩小 $N / \text{BLOCK}$ 倍。必须除以真实有效元素数 $N$。
+
 - **样本方差 vs 总体方差（Bessel 校正）**：
   PyTorch 默认的 `torch.var` 使用无偏样本方差（Unbiased Sample Variance，分母为 $N - 1$）。而神经网络算子（如 LayerNorm）规范定义使用总体方差（Population Variance，分母为 $N$，对应 PyTorch 的 `unbiased=False`）。当 $N=1$ 时，样本方差的分母为 0 导致除零错误，必须在系统边界做契约防御。
+
 - **遗漏 `tl.where` 的二次掩码**：
   这是新手最容易犯的隐蔽 Bug。只要 $\mu \neq 0$ 且存在 Padding（$N < \text{BLOCK}$），不重施掩码就会导致方差偏大 $(\text{BLOCK}-N)\mu^2 / N$。当输入均值很大时，方差误差可达数个数量级。
 
@@ -88,20 +87,24 @@ $$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=
 
 - **片上两遍计算（Two-pass）的极致性能**：
   在 Triton 中，数据加载到寄存器后，均值与方差的两轮规约完全在片上寄存器文件内部展开，中间数据 `values` 和 `centered_sq` 根本不需要写入全局显存（HBM）。访存量仅为读取矩阵一次（$M \times N$ 元素），相比于在 PyTorch 中分别调用 `x.mean()` 和 `x.var()` 导致的 2 次全局显存扫描，显存带宽节约了整整 50%。
+
 - **数值稳定性与 Welford 算法**：
   两阶段算法（Two-pass）需要先求均值再求方差。如果遇到“大均值、小方差”极端分布（例如所有元素在 $10^6$ 附近，波动仅 $10^{-4}$），两次减法可能在浮点有限精度下产生轻微的灾难性抵消。此时若采用 Welford 增量流式算法，数值条件数最好，但 Welford 的 Warp 间归约公式较为复杂（需要维护 $(n, \mu, M_2)$ 三元组）。
 
 ## 具体演示
 
 以 $N = 3, \text{BLOCK} = 4$，输入行向量为 $[1.0, 2.0, 3.0]$ 为例：
+
 1. **Pass 1 均值**：
    - 加载向量：`values = [1.0, 2.0, 3.0, 0.0]`（Padding 位被赋予 0.0）。
    - 求和：$1 + 2 + 3 + 0 = 6.0$。
    - 均值：$\mu = 6.0 / 3 = 2.0$。正确。
+
 2. **中心化陷阱（若无二次掩码）**：
    - 差值向量：`values - mean = [1-2, 2-2, 3-2, 0-2] = [-1.0, 0.0, 1.0, -2.0]`。
    - 平方向量：`[1.0, 0.0, 1.0, 4.0]`。注意第 3 位变成了 $4.0$！
    - 若直接求和：$1 + 0 + 1 + 4 = 6.0 \to \sigma^2 = 6.0 / 3 = 2.0$。而真实方差为 $(1+0+1)/3 = 2/3 \approx 0.667$。误差高达 $200\%$！
+
 3. **二次掩码保护（`tl.where`）**：
    - 施加掩码：`tl.where(mask, diff_sq, 0.0) = [1.0, 0.0, 1.0, 0.0]`。第 3 位被精准重置为 0.0。
    - 求和：$1 + 0 + 1 + 0 = 2.0$。
@@ -182,7 +185,6 @@ for shape in ((3, 17), (4, 128)):
 
 需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -226,11 +228,14 @@ for shape in ((3, 17), (4, 128)):
 ### Q1 参考答案
 
 从三个阶段拆解其运行机制：
+
 1. **输入阶段（网格绑定与加法零元注入）**：按行发射 Program，列维度以 2 的幂次构造 `cols = tl.arange(0, BLOCK)`。在掩码 `mask = cols < N` 保护下，通过带 `other=0.0` 的 `tl.load` 一次性将该行数据拉入寄存器向量 `values`，超出 $N$ 的 Padding lane 注入加法单位元 0.0。
+
 2. **状态变化阶段（两阶段归约与二次掩码阻断）**：
    - 阶段 A：调用 `tl.sum` 计算有效总和，除以真实列宽 $N$ 得到行均值标量 $\mu$。
    - 阶段 B：执行广播减法 `values - mean` 并求平方。由于 Padding lane 上的 0.0 变为 $-\mu$ 后平方变成 $\mu^2$，立即通过 `tl.where(mask, diff_sq, 0.0)` 强制将 Padding lane 的虚假能量清零，使加法单位元在数据流中重新闭环。
    - 阶段 C：调用二次 `tl.sum` 计算清洗后的方差平方和，除以真实列宽 $N$ 得到总体方差 $\sigma^2$。
+
 3. **输出阶段（双标量写回）**：将算出的均值标量与方差标量，通过各自独立的 `tl.store` 写回到目标全局内存地址 `means + row` 与 `variances + row`。
 
 ### Q2 参考答案
@@ -245,8 +250,10 @@ for shape in ((3, 17), (4, 128)):
 ### Q3 参考答案
 
 当输入数据呈现“大均值、小方差”特征时（例如数据集中在 $10^6 \pm 0.01$），直接使用单精度 FP32 的两阶段朴素公式会导致严重的**灾难性数值抵消（Catastrophic Cancellation）**。工程改进策略包括：
+
 1. **寄存器累加器提升为 FP64 计算**：
    在计算均值与平方和时，将寄存器内的 `values` 显式转换为高精度的双精度浮点数 `tl.float64`。求出 `mean` 与二次中心化平方和后再转换回 FP32 写回，彻底抹平浮点尾数截断误差。
+
 2. **采用流式 Welford 增量递推算法**：
    改用单遍（One-pass）Welford 在线均值方差算法：
    $$ \mu_k = \mu_{k-1} + \frac{x_k - \mu_{k-1}}{k}, \quad M_{2, k} = M_{2, k-1} + (x_k - \mu_{k-1})(x_k - \mu_k) $$

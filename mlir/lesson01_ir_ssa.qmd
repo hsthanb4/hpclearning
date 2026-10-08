@@ -3,12 +3,9 @@ title: "第 1 课：IR 层级、SSA 与 Region"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ## 本课目标与完成标准
 
@@ -27,7 +24,6 @@ jupyter: python3
 - 本课在路线中的作用：MLIR 的统一节点是 Operation；Module、函数、循环都通过 operation 嵌套 region/block 表达，多结果 SSA 连接数据流。
 
 ## 核心心智模型
-
 
 ### 核心操作与执行流程图解
 
@@ -59,7 +55,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 1-2：MLIR Operation 解析验证与内存模型装载全流程</em></p>
 
-
 ### 1. 它是什么，解决什么问题
 
 在现代异构编译基础设施中，传统编译器的中间表示（如 LLVM IR）以一维指令流与基本块（Basic Block）CFG 为中心，虽然极其适合底层标量优化与机器码生成，但丢失了高层张量算子结构、循环多面体多维嵌套以及硬件特定语义。
@@ -77,9 +72,11 @@ MLIR 递归嵌套层次与内存验证流程如图 1-1 与图 1-2 所示：
    - **Operation**：语义执行单元。它可以拥有 0 或多个操作数（Operands）、产生 0 或多个静态单赋值返回值（SSA Results）、绑定一组编译期属性（Attributes）、拥有特定类型（Types），并嵌套 0 或多个 Region。
    - **Region**：封装一个局部的控制流与局部作用域容器。例如 `func.func` 的函数体是一个 Region，`scf.if` 的 then/else 分支各是一个 Region。
    - **Block**：Region 内部的基本块（如 `^bb0`）。Block 包含线性排列的 Operation 列表，并强制以终止操作（Terminator Operation，如 `func.return`、`scf.yield` 或 `cf.br`）结尾。
+
 2. **消灭 $\phi$ 节点的 Block Arguments（块参数控制流）**：
    在传统 LLVM IR 中，基本块汇聚控制流必须依赖 $\phi$ 节点（Phi Node），这极易在优化 Pass 移动指令时产生隐蔽的悬空引用 Bug。
    MLIR 革命性地废弃了 $\phi$ 节点，转而采用类似函数调用的**块参数（Block Arguments）**：每个 Block 可以声明参数列表（如 `^bb1(%x: i32):`），上游块通过跳转指令 `cf.br ^bb1(%val)` 显式传参。
+
 3. **文本解析与语义验证（Verifier Pipeline）**：
    如图 1-2 所示，文本源码经过 `AsmParser` 词法/语法解析生成内存中的 Operation AST。随后进入 `verify()` 阶段：验证所有操作数的类型、属性的合法性、支配关系（Dominance）、以及终止操作与外层 Region 的类型签名匹配。
 
@@ -87,8 +84,10 @@ MLIR 递归嵌套层次与内存验证流程如图 1-1 与图 1-2 所示：
 
 - **SSA 值的严格支配约束（Dominance Invariant）**：
   在同一个 Block 或存在嵌套关系的 Region 中，SSA 值必须**先定值（Definition），后使用（Use）**。这不仅是文本的书写顺序，更是支配树（Dominance Tree）的物理拓扑约束。未定义的 SSA 值无法通过符号绑定，会直接触发 `use of undeclared SSA value` 诊断错误。
+
 - **孤儿块与终止指令缺失（Missing Terminator）**：
   每个基本块（Block）的最后一条操作必须是具备 `IsTerminator` Trait 的终止操作。若遗漏 `func.return` 或 `scf.yield`，Verifier 会抛出 `block must end with a terminator` 语法校验失败。
+
 - **Region 隔离与符号可见性（IsolatedFromAbove Trait）**：
   拥有 `IsolatedFromAbove` 特征的操作（如 `func.func`、`builtin.module`）其内部 Region 是完全封闭的，**绝对不能直接捕获外层作用域的 SSA 变量**。任何外部数据必须显式通过参数传递进入。
 
@@ -96,12 +95,14 @@ MLIR 递归嵌套层次与内存验证流程如图 1-1 与图 1-2 所示：
 
 - **结构化控制流（Structured Control Flow）的分析优势**：
   MLIR 倡导在前端阶段保留结构化控制流（如 `scf.if`、`scf.for`、`affine.for`），其循环边界和条件分支作为 Operation 的属性或操作数显式存在。这使得循环展开、仿射多面体变换、并行化分析极为简明，避免了过早将循环打散成 CFG 跳转图后导致难以逆向分析控制流拓扑。
+
 - **内存树开销 vs 表达力**：
   相比于扁平线性的传统三地址码，MLIR 在内存中维护的是一颗深度嵌套的 C++ 指针树（每个 Operation 包含 Operand 链表、Result 数组与 Region 向量）。这带来了一定的内存常数开销，但为多层级 Dialect 逐步降级（Lowering）提供了无可替代的灵活性。
 
 ## 具体演示
 
 以文本指令 `%sum = arith.addi %a, %b : i32` 为例：
+
 - **Operation 标识**：`arith.addi`（隶属于算术方言 `arith` 的整数加法操作）。
 - **Operands**：`%a` 与 `%b`，必须为合法的 SSA 值且类型均为 `i32`。
 - **Result**：产生唯一的 SSA 变量 `%sum`，类型为 `i32`。
@@ -161,7 +162,6 @@ module {
 
 需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -181,19 +181,25 @@ module {
 ### Q1 参考答案
 
 从三个阶段拆解其运行机制：
+
 1. **输入阶段（操作数解析与局部作用域绑定）**：调用方将输入张量/标量绑定到函数或基本块参数（Block Arguments，如 `%a: i32, %b: i32`）。外层 Operation（如 `func.func`）开辟包含入口 Block `^bb0` 的 Region 局部作用域，建立局部 SSA 符号表。
+
 2. **状态变化阶段（Operation 序列求值与 SSA 链条传递）**：顺序执行 Block 内的 Operation 序列。每个 Operation 消费上游的 SSA 操作数（Operands），根据自身语义规则（如 `arith.addi` 执行补码加法）计算并产生全新的强类型 SSA 结果变量（Results，如 `%sum`）。数据流严格沿着由 Def-Use 边构成的有向无环图流动，中间状态不可变。
+
 3. **输出阶段（终止操作截断与 Region 结果向上回传）**：Block 的最后一条指令必须是 Terminator 操作（如 `func.return %sum : i32`）。终止操作捕获当前的 SSA 状态，验证返回类型与函数外层签名的严格一致性，随后将控制流和计算结果移交给调用方，退出当前 Region。
 
 ### Q2 参考答案
 
 在 SSA（静态单赋值）语义和编译器数据流分析中，在定值之前使用变量绝对不只是简单的代码文本行数先后问题，而是触碰了编译器的核心代数不变式：
+
 1. **支配性（Dominance）与因果链崩溃**：SSA 的核心形式化基础是**支配性（Dominance）**——定义点必须在控制流图（CFG）中严格支配（Dominate）所有的使用点。如果在使用点之前该变量尚未被定义，意味着存在一条控制流路径使得该变量未经初始化就被读取，在物理机器上对应读取未初始化的悬空寄存器或脏内存。
+
 2. **数据流依赖（Def-Use Chain）的不可构造性**：MLIR 在构建内存 IR 树时，每个 SSA Value 维护着一条引用它的 User 双向链表。若在使用时尚无定义实体，编译器无法绑定操作数的来源指针，无法进行常量折叠、活性分析（Liveness Analysis）以及寄存器生命周期分配，直接破坏编译器的数据结构完整性。
 
 ### Q3 参考答案
 
 在 MLIR 中，表达 `if-else` 双分支均产生返回值有两种标准范式，其中现代高层 MLIR 最推崇**结构化控制流（SCF: Structured Control Flow）**：
+
 1. **结构化控制流范式（`scf.if`）**：
    `scf.if` 操作自身直接产生 SSA 返回值，then 和 else 分支 Region 各自以 `scf.yield` 将分支内计算的值传出：
    ```mlir
@@ -206,6 +212,7 @@ module {
    }
    ```
    此种结构下完全不需要 $\phi$ 节点，数据流与控制流高度结构化闭环。
+
 2. **底层 CFG 块参数范式（`cf.cond_br` + Block Arguments）**：
    在降级到底层控制流方言时，通过条件跳转进入两个分支 Block，两个分支在汇合块 `^merge(%phi_val: i32)` 处通过显式 Block Argument 传参：
    `cf.br ^merge(%val1 : i32)` 与 `cf.br ^merge(%val2 : i32)`。

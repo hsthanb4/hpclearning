@@ -3,19 +3,14 @@ title: "第 13 课：GPU 内核与 FlashAttention"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Diving into the GPUs（A primer on GPUs / Improving performance with kernels / Fused kernels / FlashAttention）+ 附录 A1（kernel 剖析）
 - 前置：第 2 课（激活、softmax 的注意力）、第 8 课（online softmax 概念）
@@ -31,7 +26,6 @@ jupyter: python3
 - 用代码实现 FlashAttention 的 online softmax 分块算法并验证与标准实现一致。
 
 ## 核心概念
-
 
 ### 核心操作与执行流程图解
 
@@ -58,14 +52,14 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 13-2：FlashAttention 前向分块双层循环流水与增量更新流</em></p>
 
-
 ### 1. GPU 硬件微架构层次与存储金字塔（Memory Hierarchy）
 
 要写出达到硬件峰值利用率的深度学习内核，必须深入理解现代 GPU 的物理组织。以 NVIDIA Hopper（H100）架构为例：
+
 - **计算拓扑（SM / Warp / Thread）**：
-  - 一张 GPU 芯片由若干个**流式多处理器（Streaming Multiprocessor, SM）**构成（H100 SXM 配备 132 个 SM）。
-  - 每个 SM 包含若干个调度器与执行单元（如 Tensor Core、FP32/FP64 CUDA Core、SFU 特殊函数单元）。
-  - 硬件执行的最基本不可分割调度单位是 **Warp（线程束，固定为 32 个线程）**，Warp 内部 32 个线程严格以单指令多线程（SIMT）步调锁步执行。若干个 Warp 组织为逻辑上的 **Thread Block（线程块，如 128~1024 线程）**，调度驻留在一个 SM 上。
+   - 一张 GPU 芯片由若干个**流式多处理器（Streaming Multiprocessor, SM）**构成（H100 SXM 配备 132 个 SM）。
+   - 每个 SM 包含若干个调度器与执行单元（如 Tensor Core、FP32/FP64 CUDA Core、SFU 特殊函数单元）。
+   - 硬件执行的最基本不可分割调度单位是 **Warp（线程束，固定为 32 个线程）**，Warp 内部 32 个线程严格以单指令多线程（SIMT）步调锁步执行。若干个 Warp 组织为逻辑上的 **Thread Block（线程块，如 128~1024 线程）**，调度驻留在一个 SM 上。
 - **物理存储金字塔（带宽与延迟的极端鸿沟）**：
   1. **寄存器堆（Registers）**：单 SM 容量约 256 KB，全芯片总带宽高达 $\approx 30 \sim 40\text{ TB/s}$，0~1 个时钟周期延迟，由线程独占；
   2. **共享内存 / L1 缓存（Shared Memory / L1 Cache, SRAM）**：单 SM 容量约 228 KB，物理带宽高达 $\approx 15 \sim 20\text{ TB/s}$，约 20 周期延迟，供同一个 Block 内的所有线程高速协同共享；
@@ -83,12 +77,15 @@ H100 的 Tensor Core 标称计算峰值高达近 $1000\text{ TFLOPS}$，但外�
    - GPU 全局内存控制器以固定突发（Burst，通常为 32 或 128 字节对齐的缓存行 Cache Line）为单位进行事务传输。
    - 当一个 Warp 内的 32 个线程并发访问连续且对齐的内存地址时，硬件能够将这 32 个内存请求**合并为单次 128 字节的物理传输事务**，总线利用率达到 100%。
    - 若线程访问地址产生跨度（Strided）或随机离散访问，硬件将被迫发射多达 32 次独立的孤立内存请求，导致总线利用率跌破 10%，引发近十倍的吞吐断崖。
+
 2. **分块与共享内存复用（Tiling & Shared Memory Staging）**：
    - 在矩阵乘法（GEMM）中，利用分块算法将大矩阵拆解为适应 SRAM 容量的子块（Tile）。
    - 将输入 Tile 从 HBM 协同搬运到 Shared Memory 后，块内各个线程反复读取该 Tile 进行乘累加，使 HBM 访存次数降低 $\text{BlockSize}$ 倍。
+
 3. **线程粗化与寄存器分块（Thread Coarsening & Register Tiling）**：
    - 让每个 CUDA 线程不再仅负责计算 1 个输出元素，而是负责计算一个微型子块（例如 $4 \times 4$ 或 $8 \times 8$ 个输出）。
    - 累加过程中的中间变量全程保存在线程私有寄存器中，彻底消除对 Shared Memory 的读写冲突（Bank Conflicts）与指令发射瓶颈。
+
 4. **消除分支分歧（Warp Divergence Elimination）**：
    - 避免在 Warp 内部编写基于线程号的条件分支（`if (threadIdx.x % 2 == 0)`）。
    - 一旦同一 Warp 内线程执行路径分叉，硬件只能串行执行所有分支路径并用掩码屏蔽无效线程，导致算力有效利用率腰斩。
@@ -109,40 +106,46 @@ $$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) 
 
 #### A. 传统自注意力的访存灾难（如**图 13-1** 所示）
 在原生 PyTorch 实现中，该公式被拆解为三个分离的物理内核：
+
 1. **GEMM 1**：从 HBM 加载 $Q$ 与 $K$，计算注意力点积分数 $S = Q K^T$，将庞大的 $N \times N$ 矩阵完整**写入 HBM**（$O(N^2)$ 显存）；
+
 2. **Softmax**：从 HBM 重新完整读出 $S$，计算归一化权重矩阵 $P = \text{Softmax}(S)$，再次将 $N \times N$ 矩阵完整**写回 HBM**；
+
 3. **GEMM 2**：从 HBM 重新读出 $P$ 与 $V$，计算上下文输出 $O = P V$，最终写回 HBM。
+
 - **痛点曝光**：长序列下 $N \times N$ 矩阵极其庞大（例如 $N=16\text{k}$ 时，单头浮点数高达 2.56 亿个）。整个过程对极其缓慢的 HBM 进行了多达 **3 次往返读写**！计算时间完全被 HBM 访存延迟统治。
 
 #### B. FlashAttention 的破局机制（SRAM 瓦片融合 + Online Softmax）
 Dao et al. 提出的 FlashAttention 彻底颠覆了上述流程（如**图 13-2** 所示）：
+
 - **零物化（Zero Materialization）**：**绝对不在外部 HBM 中生成完整的 $N \times N$ 矩阵！**
 - **分块载入 SRAM**：将 $Q$ 划分为行块 $Q_i \in \mathbb{R}^{B_r \times d}$，将 $K, V$ 划分为列块 $K_j, V_j \in \mathbb{R}^{B_c \times d}$。将这些紧凑的小块载入片上共享内存（SRAM）。
 - **增量式 Online Softmax**：
   在 SRAM 内部计算局部点积分数 $S_{ij} = Q_i K_j^T$，并实时维护行最大值 $m$ 与归一化分母 $\ell$。
   当遍历下一个 $K, V$ 块时，利用代数恒等式，直接将旧输出按指数比值 $\exp(m_{\text{old}} - m_{\text{new}})$ 重新缩放，就地累加新块贡献。
+
 - **计算效益**：
-  - HBM 访存量从 $O(N^2)$ 骤降至 $O(N)$；
-  - 显存占用从序列长度的二次方依赖变为严格的线性依赖；
-  - 虽然浮点计算量（FLOPs）基本一致，但由于消除了 90% 的慢速 HBM 往返，墙钟速度实现了 **$2\times \sim 4\times$ 的飞跃**！
+   - HBM 访存量从 $O(N^2)$ 骤降至 $O(N)$；
+   - 显存占用从序列长度的二次方依赖变为严格的线性依赖；
+   - 虽然浮点计算量（FLOPs）基本一致，但由于消除了 90% 的慢速 HBM 往返，墙钟速度实现了 **$2\times \sim 4\times$ 的飞跃**！
 
 ## 具体演示与数值推演
 
 以单头注意力计算为例，设输入序列长度 $N = 4096$，特征维度 $d = 128$，采用 BF16 精度（每元素 2 字节）：
 
 - **传统原生注意力的显存与访存量推演**：
-  - 中间分数矩阵 $S$ 尺寸为 $4096 \times 4096$，需物化存储：
+   - 中间分数矩阵 $S$ 尺寸为 $4096 \times 4096$，需物化存储：
     $$\text{Memory}_{S} = 4096 \times 4096 \times 2\text{ 字节} = 33,554,432\text{ 字节} \approx 32\text{ MB}$$
-  - 加上 Softmax 权重矩阵 $P$（同为 $32\text{ MB}$），单头单层即产生 $64\text{ MB}$ 的庞大临时中间显存。若网络拥有 32 个注意力头与 32 层深度，全网单样本的注意力中间激活高达：
+   - 加上 Softmax 权重矩阵 $P$（同为 $32\text{ MB}$），单头单层即产生 $64\text{ MB}$ 的庞大临时中间显存。若网络拥有 32 个注意力头与 32 层深度，全网单样本的注意力中间激活高达：
     $$\text{Total Memory} = 32 \times 32 \times 64\text{ MB} = 65,536\text{ MB} = 64\text{ GB}$$
-  - 显存直接被中间激活耗尽。同时，读写这批矩阵需要往返吞吐数百 GB 的 HBM 流量。
+   - 显存直接被中间激活耗尽。同时，读写这批矩阵需要往返吞吐数百 GB 的 HBM 流量。
 
 - **FlashAttention 分块融合推演**：
-  - 设置 SRAM 分块尺寸 $B_r = B_c = 64$。
-  - 单个分块在片上 SRAM 中仅占用：
+   - 设置 SRAM 分块尺寸 $B_r = B_c = 64$。
+   - 单个分块在片上 SRAM 中仅占用：
     $$\text{Tile Memory} = 64 \times 64 \times 2\text{ 字节} = 8192\text{ 字节} = 8\text{ KB}$$
-  - 8 KB 的小张量可以完全装进每个 SM 的 Shared Memory（容量高达 228 KB）中！
-  - 全过程零 HBM 中间写回，全网原本膨胀至 $64\text{ GB}$ 的二次方激活在 FlashAttention 内部**彻底降为 0**（仅保留线性规模的最终输出 $O$）。这不仅为训练节省出几十吉字节的显存空间，更使得注意力层从原本的访存受限（Memory Bound）彻底蜕变为纯算力受限（Compute Bound），满载释放 Tensor Core 算力。
+   - 8 KB 的小张量可以完全装进每个 SM 的 Shared Memory（容量高达 228 KB）中！
+   - 全过程零 HBM 中间写回，全网原本膨胀至 $64\text{ GB}$ 的二次方激活在 FlashAttention 内部**彻底降为 0**（仅保留线性规模的最终输出 $O$）。这不仅为训练节省出几十吉字节的显存空间，更使得注意力层从原本的访存受限（Memory Bound）彻底蜕变为纯算力受限（Compute Bound），满载释放 Tensor Core 算力。
 
 ## 代码填空题
 
@@ -152,7 +155,6 @@ Dao et al. 提出的 FlashAttention 彻底颠覆了上述流程（如**图 13-2*
 #| course_role: exercise
 import numpy as np
 
-
 def standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):
     """参照实现：物化 S 和 P。Q,K,V: (n, d)。"""
     n = Q.shape[0]
@@ -161,7 +163,6 @@ def standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):
     P = np.exp(S)
     P /= P.sum(axis=-1, keepdims=True)
     return P @ V, S
-
 
 def flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
                     block_size: int = 64) -> np.ndarray:
@@ -208,7 +209,6 @@ def flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
     # 最终归一化：O / l（把 running max 移回）
     return O / l[:, None]
 
-
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
     n, d = 256, 32
@@ -250,7 +250,6 @@ if __name__ == "__main__":
 - 认为"分别 softmax 再拼接"正确。
 - 分不清 HBM 与共享内存在带宽上的量级差异。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -260,7 +259,6 @@ if __name__ == "__main__":
 #| course_role: solution
 import numpy as np
 
-
 def standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):
     """参照实现：物化 S 和 P。Q,K,V: (n, d)。"""
     n = Q.shape[0]
@@ -269,7 +267,6 @@ def standard_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray):
     P = np.exp(S)
     P /= P.sum(axis=-1, keepdims=True)
     return P @ V, S
-
 
 def flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
                     block_size: int = 64) -> np.ndarray:
@@ -316,7 +313,6 @@ def flash_attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
     # 最终归一化：O / l（把 running max 移回）
     return O / l[:, None]
 
-
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
     n, d = 256, 32
@@ -332,7 +328,6 @@ if __name__ == "__main__":
     assert np.allclose(O_ref, O_flash, atol=1e-6)
     print("与标准注意力一致 ✓（内存从 O(n²) 降到 O(n)）")
 ```
-
 
 ## 补全后的代码（关键填空处）
 

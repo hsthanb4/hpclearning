@@ -3,19 +3,14 @@ title: "第 2 课：激活、重计算与梯度累积"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Memory usage in transformers（激活部分）/ Activation recomputation / Gradient accumulation
 - 前置：第 1 课（静态显存账本）
@@ -31,7 +26,6 @@ jupyter: python3
 - 区分"峰值显存"与"平均/静态显存"，并知道如何测量峰值。
 
 ## 核心概念
-
 
 ### 核心操作与执行流程图解
 
@@ -52,7 +46,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流</em></p>
 
-
 ### 1. 动态激活值的本质与二次方爆炸
 
 在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 $\frac{\partial L}{\partial W}$ 需要用到输入 $X$：$\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}$）。
@@ -71,11 +64,11 @@ $$m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \fra
 激活重计算的核心思想是**以算力换显存**：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如上图 2-1 所示）。
 
 - **全量重计算（Full Recomputation）**：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。  
-  - *收益*：激活显存开销直接压减为原来的约 $1/L$（几乎只剩单层激活）。  
-  - *代价*：训练计算量增加约 $30\% \sim 33\%$（因为整个前向计算被执行了两次）。
+   - *收益*：激活显存开销直接压减为原来的约 $1/L$（几乎只剩单层激活）。  
+   - *代价*：训练计算量增加约 $30\% \sim 33\%$（因为整个前向计算被执行了两次）。
 - **选择性重计算（Selective Recomputation）**：Megatron-LM 与 FlashAttention 提出的重大突破。观察表明：**注意力矩阵 $Q K^T$ 占据了 $70\%$ 以上的激活显存，但其计算 FLOPs 仅占整层计算的不到 $3\%$！** 相比之下，MLP 层的 GEMM 占据了绝大部分 FLOPs 却只贡献线性显存。因此，选择性重计算**只丢弃注意力分数与 Softmax 激活**，而保留 MLP 与投影的中间值。  
-  - *收益*：以仅 **$+2.7\%$ 的轻微计算开销**，削减了高达 **$70\%$ 的激活显存**！
-  - *与 FlashAttention 的关系*：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此**使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算**。
+   - *收益*：以仅 **$+2.7\%$ 的轻微计算开销**，削减了高达 **$70\%$ 的激活显存**！
+   - *与 FlashAttention 的关系*：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此**使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算**。
 
 ### 3. 梯度累积（Gradient Accumulation）的工作机制
 
@@ -85,15 +78,17 @@ $$\text{全局批大小 (GBS)} = \text{微批大小 (MBS)} \times \text{累积�
 
 - **执行流程**：每个 Micro-Batch 独立执行前向与反向，并将求得的梯度直接累加到一个常驻的梯度缓冲区（Grad Buffer）中；在累积满 $N_{\text{acc}}$ 步后，执行**平均化归一（除以 $N_{\text{acc}}$）**，随后触发一次优化器更新，最后清空梯度缓冲区。
 - **显存与性能权衡**：  
-  - *显存优势*：任意时刻显存中仅需保留 1 个 Micro-Batch 的动态激活，激活峰值与全局 Batch 大小完全解耦。  
-  - *性能代价*：多个 Micro-Batch 在单卡上串行执行，增加了显存中梯度缓冲区的驻留开销，且引入了微批次循环的调度开销。
+   - *显存优势*：任意时刻显存中仅需保留 1 个 Micro-Batch 的动态激活，激活峰值与全局 Batch 大小完全解耦。  
+   - *性能代价*：多个 Micro-Batch 在单卡上串行执行，增加了显存中梯度缓冲区的驻留开销，且引入了微批次循环的调度开销。
 
 ### 4. 显存峰值与“第一步成功后续 OOM”陷阱
 
 在系统调优中，经常出现“第一步训练正常通过，第二步突然报 CUDA OOM”的现象，其物理根因在于：
 
 1. **优化器状态的延迟初始化**：在标准 PyTorch 训练循环中，Adam 的动量 $m$ 和方差 $v$（共 $8N$ 字节）通常在首次调用 `optimizer.step()` 时才被惰性分配（Lazy Allocation）到显存中。第一步前向反向时这 $8N$ 字节尚未存在，第二步前向时静态底噪已暴增，从而触发 OOM。
+
 2. **Caching Allocator 预热与显存碎片**：首个 Step 会触发大量的显存池预分配，随着多步迭代中张量形状变动与张量生命周期交错，显存池碎片逐渐增多。
+
 3. **测量标准**：必须使用 `torch.cuda.max_memory_allocated()` 测量真实物理张量峰值，而非 `nvidia-smi` 报告的驱动级预留显存（Reserved Memory）。
 
 ## 具体演示：序列长度增加下的激活显存爆炸
@@ -116,7 +111,6 @@ $$\text{总激活显存} \approx 32 \times s \times 1 \times 4096 \times \left(3
 ```{python}
 #| course_role: exercise
 import torch
-
 
 def estimate_activation_memory(
     num_layers: int,
@@ -153,7 +147,6 @@ def estimate_activation_memory(
         return ______
     else:
         raise ValueError(f"unknown recompute mode: {recompute}")
-
 
 def run_gradient_accumulation(
     compute_grads,       # 函数：输入 micro-batch 编号，返回梯度 dict {name: tensor}
@@ -193,7 +186,6 @@ def run_gradient_accumulation(
             # 清零：绝不能漏
             accumulated = ______
 
-
 def demo_grad_accumulation():
     """用小例子验证：grad_accum=2 时的平均梯度 == 整批一次算出的梯度。"""
     torch.manual_seed(0)
@@ -219,7 +211,6 @@ def demo_grad_accumulation():
     print("accumulated:", accumulated.flatten()[:3])
     assert torch.allclose(full, accumulated)
     print("梯度累积（平均后）与整批一次 backward 一致 ✓")
-
 
 if __name__ == "__main__":
     # 验证激活估算的趋势：seq 翻倍时激活近似翻倍以上（二次项），而静态账本不变
@@ -254,7 +245,6 @@ Full 与 selective 重计算各存什么、丢什么、代价分别是什么？�
 - 把激活公式中的二次项忽略，声称激活随 seq 线性增长。
 - 用"第一轮成功"直接证明配置安全，未提及 optimizer 状态与缓存分配器预热。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -263,7 +253,6 @@ Full 与 selective 重计算各存什么、丢什么、代价分别是什么？�
 ```{python}
 #| course_role: solution
 import torch
-
 
 def estimate_activation_memory(
     num_layers: int,
@@ -300,7 +289,6 @@ def estimate_activation_memory(
         return base * 0.3
     else:
         raise ValueError(f"unknown recompute mode: {recompute}")
-
 
 def run_gradient_accumulation(
     compute_grads,       # 函数：输入 micro-batch 编号，返回梯度 dict {name: tensor}
@@ -340,7 +328,6 @@ def run_gradient_accumulation(
             # 清零：绝不能漏
             accumulated = None
 
-
 def demo_grad_accumulation():
     """用小例子验证：grad_accum=2 时的平均梯度 == 整批一次算出的梯度。"""
     torch.manual_seed(0)
@@ -367,7 +354,6 @@ def demo_grad_accumulation():
     assert torch.allclose(full, accumulated)
     print("梯度累积（平均后）与整批一次 backward 一致 ✓")
 
-
 if __name__ == "__main__":
     # 验证激活估算的趋势：seq 翻倍时激活近似翻倍以上（二次项），而静态账本不变
     for seq in (512, 1024, 2048, 4096):
@@ -375,7 +361,6 @@ if __name__ == "__main__":
         print(f"seq={seq:5d}  activations={act / 1e9:8.2f} GB")
     demo_grad_accumulation()
 ```
-
 
 ## 补全后的代码（关键填空处）
 

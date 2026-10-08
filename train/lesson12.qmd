@@ -3,19 +3,14 @@ title: "第 12 课：配置搜索与性能诊断"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Finding the Best Training Configuration、附录 A1（Profiling）、附录 A3（Compute/Communication Overlap Math）
 - 前置：第 11 课
@@ -31,7 +26,6 @@ jupyter: python3
 - 用 PyTorch profiler / torch.cuda.Event / ncu 定位"装得下但慢"的瓶颈。
 
 ## 核心概念
-
 
 ### 核心操作与执行流程图解
 
@@ -56,16 +50,15 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 12-2：大模型训练常见 OOM 故障根因排查与定位诊断流</em></p>
 
-
 ### 1. 工业级训练配置三步搜索法（3-Step Systematic Search）
 
 在大规模集群上配置分布式并行超参数绝不能靠盲目尝试，业内标准工程方法论遵循严格的**三步收敛法则**：
 
 1. **Step 1：显存破局（让单个训练步能装进显存）**：
    - **算力充足场景（按参数规模降阶选择）**：
-     - 若模型 $< 10\text{B}$：单技术即可满足，优先选择纯 DP（结合全激活重计算）或单机 ZeRO-3 / FSDP；
-     - 若模型处于 $10\text{B} \sim 100\text{B}$：首选机内 $\text{TP}=8$ + 跨机 $\text{PP}$，或者机内 $\text{TP}=8$ + $\text{ZeRO-3}$；
-     - 若集群规模超过 512 卡：纯 DP/ZeRO-3 因环延迟累积效率滑坡，必须引入机内 $\text{TP}=8$；若规模超过 1024 卡，推荐采用工业界黄金三角架构：$\text{TP}=8 + \text{ZeRO-2} + \text{PP}$。
+      - 若模型 $< 10\text{B}$：单技术即可满足，优先选择纯 DP（结合全激活重计算）或单机 ZeRO-3 / FSDP；
+      - 若模型处于 $10\text{B} \sim 100\text{B}$：首选机内 $\text{TP}=8$ + 跨机 $\text{PP}$，或者机内 $\text{TP}=8$ + $\text{ZeRO-3}$；
+      - 若集群规模超过 512 卡：纯 DP/ZeRO-3 因环延迟累积效率滑坡，必须引入机内 $\text{TP}=8$；若规模超过 1024 卡，推荐采用工业界黄金三角架构：$\text{TP}=8 + \text{ZeRO-2} + \text{PP}$。
    - **算力受限/显存吃紧场景**：立即开启选择性激活重计算（Selective Recomputation），并将 Micro-Batch 降至 1，利用梯度累积凑齐批次。
    - **特殊模态扩展**：遇到超长上下文（$s \ge 32\text{k}$）追加上下文并行（CP）；遇到 MoE 稀疏结构追加专家并行（EP）。
 
@@ -86,11 +79,13 @@ flowchart TD
 
 #### A. 基础理论：大模型 $6 \times P \times T$ 算力法则
 Transformer 模型中每个 Token、每个参数在一次完整的前向与反向传播中所需的理论浮点运算次数（FLOPs）严格为 **$6 \text{ FLOPs}$**：
+
 - **前向传播 GEMM**：每个权重参数对应 1 次乘法与 1 次加法（FMA 融合乘加），共计 $2\text{ FLOPs/param}$。
 - **反向传播求导 GEMM**：反向包含两个对称的矩阵乘法：
   1. 对输入激活求导：$\frac{\partial \mathcal{L}}{\partial X} = \frac{\partial \mathcal{L}}{\partial Y} \cdot W^T \implies 2\text{ FLOPs/param}$；
   2. 对模型权重求导：$\frac{\partial \mathcal{L}}{\partial W} = X^T \cdot \frac{\partial \mathcal{L}}{\partial Y} \implies 2\text{ FLOPs/param}$。
   反向合计消耗 $4\text{ FLOPs/param}$。
+
 - **单步理论必需计算量**：
   $$\text{FLOPs}_{\text{required}} = 6 \times P \times T_{\text{tokens}}$$
   *(其中 $P$ 为模型参数量，$T_{\text{tokens}} = \text{GBS} \times s$ 为整步训练的 Token 总数；非 GEMM 算子如 Norm、Softmax 占比 $<1\%$，通常忽略)*。
@@ -99,6 +94,7 @@ Transformer 模型中每个 Token、每个参数在一次完整的前向与反�
 - **MFU（模型算力利用率）**：
   仅以“算法数学上必需完成的浮点量”为分子，衡量实际软硬件实现相比理论上限的有效产出：
   $$\text{MFU} = \frac{6 \times P \times T_{\text{tokens}}}{T_{\text{step}} \times N_{\text{gpus}} \times \text{Peak\_TFLOPs}}$$
+
 - **HFU（硬件算力利用率）**：
   将显存优化所带来的额外前向重计算（Activation Recomputation）等实际发生的物理计算量全部计入分子：
   $$\text{HFU} = \frac{6 \times P \times T_{\text{tokens}} \times (1 + \alpha_{\text{recompute}})}{T_{\text{step}} \times N_{\text{gpus}} \times \text{Peak\_TFLOPs}}$$
@@ -138,7 +134,7 @@ TP 的比值 $\frac{\text{TP}-1}{2h} \cdot \frac{F}{B}$ 与数据规模毫无关
    - **第 1 步前向传播即 OOM**：说明单步显存已被击穿。根因必为单卡 $\text{MBS}$ 或序列长度 $s$ 过大，瞬间激活峰值超出硬件容量。立即降低 $\text{MBS}$ 或开启激活检查点（Activation Checkpointing）。
    - **第 1 步反向传播中途 OOM**：说明前向保留的激活值未被及时释放，或者模型未正确清空上一轮累积梯度。
    - **第 2 步初始阶段 OOM（最经典的工业踩坑点！）**：第 1 步的前向与反向均顺利通过，但在进入第 2 步时突然触发 OOM。
-     - **根因剖析**：PyTorch 的 Adam/AdamW 优化器采用了**延迟分配机制（Lazy Initialization）**！在第 1 步结束前，动量（Momentum）和方差（Variance）张量尚未在显存中物化；直到执行首次 `optimizer.step()` 时，底层才瞬时申请高达 $8P \sim 12P$ 字节的庞大显存，叠加前一步尚未完全释放的临时缓存碎片，瞬间引爆 OOM。
+      - **根因剖析**：PyTorch 的 Adam/AdamW 优化器采用了**延迟分配机制（Lazy Initialization）**！在第 1 步结束前，动量（Momentum）和方差（Variance）张量尚未在显存中物化；直到执行首次 `optimizer.step()` 时，底层才瞬时申请高达 $8P \sim 12P$ 字节的庞大显存，叠加前一步尚未完全释放的临时缓存碎片，瞬间引爆 OOM。
 
 ## 具体演示与数值推演
 
@@ -174,7 +170,6 @@ def step_flops(num_params: int, num_tokens: int) -> float:
     """
     return ______
 
-
 def mfu_hfu(
     num_params: int, num_tokens: int, step_time_s: float,
     peak_flops: float, recompute_extra: float = 0.0,
@@ -187,7 +182,6 @@ def mfu_hfu(
     mfu = required / (step_time_s * peak_flops)
     hfu = ______                      # 填空：把重计算计入真实 FLOPs
     return mfu, hfu
-
 
 def dp_overlap_ratio(
     num_params: int, num_tokens: int, dp: int,
@@ -211,7 +205,6 @@ def dp_overlap_ratio(
     t_comp = ______                # 填空：本卡 backward FLOPs/峰值算力
     return t_comm / t_comp
 
-
 def zero3_overlap_ratio(
     seq_len: int, mbs: int, dp: int,
     peak_flops: float, peak_bw: float,
@@ -228,7 +221,6 @@ def zero3_overlap_ratio(
     t_comm = ______                # 填空
     t_comp = ______                # 填空
     return t_comm / t_comp
-
 
 if __name__ == "__main__":
     H100_F, H100_B = 989e12, 900e9   # BF16 TFLOPS、NVLink GB/s
@@ -277,7 +269,6 @@ MFU 与 HFU 的分子差在哪里？教材为什么说"重计算会抬高 HFU �
 - 认为 python time 能准确测量 CUDA kernel 耗时。
 - 只会报"慢"说不出定位方法。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -292,7 +283,6 @@ def step_flops(num_params: int, num_tokens: int) -> float:
     """
     return 6 * num_tokens * num_params
 
-
 def mfu_hfu(
     num_params: int, num_tokens: int, step_time_s: float,
     peak_flops: float, recompute_extra: float = 0.0,
@@ -305,7 +295,6 @@ def mfu_hfu(
     mfu = required / (step_time_s * peak_flops)
     hfu = required * (1 + recompute_extra) / (step_time_s * peak_flops)                      # 填空：把重计算计入真实 FLOPs
     return mfu, hfu
-
 
 def dp_overlap_ratio(
     num_params: int, num_tokens: int, dp: int,
@@ -329,7 +318,6 @@ def dp_overlap_ratio(
     t_comp = 4 * num_tokens * num_params / peak_flops                # 填空：本卡 backward FLOPs/峰值算力
     return t_comm / t_comp
 
-
 def zero3_overlap_ratio(
     seq_len: int, mbs: int, dp: int,
     peak_flops: float, peak_bw: float,
@@ -346,7 +334,6 @@ def zero3_overlap_ratio(
     t_comm = 2 * layer_params * 2 * (dp - 1) / dp / peak_bw                # 填空
     t_comp = 2 * seq_len * mbs * layer_params / peak_flops                # 填空
     return t_comm / t_comp
-
 
 if __name__ == "__main__":
     H100_F, H100_B = 989e12, 900e9   # BF16 TFLOPS、NVLink GB/s
@@ -369,7 +356,6 @@ if __name__ == "__main__":
     r = zero3_overlap_ratio(4096, 2, 128, H100_F, H100_B)
     print(f"ZeRO-3(seq=4096,mbs=2,dp=128): {r:.3f}  {'可隐藏' if r <= 1 else '不可隐藏'}")
 ```
-
 
 ## 补全后的代码（关键填空处）
 
@@ -420,8 +406,11 @@ MFU/HFU 示例（每卡 31250 tokens、2.0 s/step）：MFU ≈ 0.66，HFU（+35%
 诊断流程（要点）：
 
 1. 显存：`max_memory_allocated` vs `max_memory_reserved`——差是 caching allocator 预留/碎片（大则调 `PYTORCH_CUDA_ALLOC_CONF`、减 batch、或查长驻 buffer）；
+
 2. 时间线：torch.profiler（CPU+CUDA）看通信是否与计算重叠、GPU 空闲段（等待通信/数据加载）、kernel 规模与启动开销（过小过碎 → torch.compile/融合）；
+
 3. 单 kernel：ncu 看吞吐/占用率/访存模式；
+
 4. 先算后测：用 t_comm/t_compute 预判该配置是否处在可隐藏区间，避免盲目调参。
 
 ### Q3

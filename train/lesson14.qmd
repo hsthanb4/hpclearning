@@ -3,19 +3,14 @@ title: "第 14 课：混合精度与综合面试"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Mixed precision training、Conclusion（+ 第 1 课账本回收）
 - 前置：全部课程
@@ -31,7 +26,6 @@ jupyter: python3
 - 独立完成一道"训练系统设计 + 精度选择"综合面试题。
 
 ## 核心概念
-
 
 ### 核心操作与执行流程图解
 
@@ -54,7 +48,7 @@ sequenceDiagram
     participant Scaler as Loss Scaler (损失缩放器)
     participant Back as 反向求导 (BF16)
     participant Optimizer as 优化器更新 (FP32 Master Weights)
-    
+
     Net->>Loss: 输出预测并计算标量 Loss
     Loss->>Scaler: 放大 Loss (乘以 scale_factor)
     Scaler->>Back: 反向链式求导，梯度放大避免下溢
@@ -68,7 +62,6 @@ sequenceDiagram
     end
 ```
 <p class="caption" align="center"><em>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流</em></p>
-
 
 ### 1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如**图 14-1** 所示）
 
@@ -97,18 +90,24 @@ $$v = (-1)^s \times 2^{e - \text{bias}} \times \left(1 + \sum_{i=1}^m b_i 2^{-i}
 
 #### 支柱一：FP32 主权重镜像（Master Weights）消灭更新吞噬（ULP Swallowing）
 这是混合精度训练中最经典的物理现象：
+
 - 设当前参数权重量级为 $w = 1.0$。在 BF16 格式下，1.0 处末位有效数字的单位精度（Unit in the Last Place, ULP）为 $\Delta_{\text{ULP}} = 2^{-7} \approx 7.81 \times 10^{-3}$。
 - 设当前学习率 $\eta = 10^{-4}$，优化器计算出的反向梯度为 $g = 0.5$。单步实际参数更新量应为：
   $$\Delta w = -\eta \cdot g = -5 \times 10^{-5}$$
+
 - 若直接在 BF16 上就地累加：
   $$w_{\text{new}} = 1.0 - 0.00005 \xrightarrow{\text{BF16 舍入}} 1.0$$
   因为更新量 $\Delta w$ 远远小于 BF16 当前精度的半个 ULP，**更新值在浮点舍入时被彻底“吞噬吸收”**！模型在整个训练过程中参数纹丝不动，损失函数完全无法下降。
+
 - **解决方案**：必须在优化器显存中常驻一份 **FP32 Master 权重**！前向与反向计算使用 BF16 算子跑高速 GEMM，但在 `optimizer.step()` 时，将梯度累加到 FP32 Master 权重上。FP32 的 ULP 高达 $1.19 \times 10^{-7}$，足以精准记录微小的参数累积演化，步结时再截断投影回 BF16 供下一步使用。
 
 #### 支柱二：动态损失缩放（Dynamic Loss Scaling，如**图 14-2** 所示）
 在不得不使用 FP16 的老旧硬件（如 V100）上，必须引入自适应损失缩放器（Loss Scaler）：
+
 1. **反向前放大**：在反向传播启动前，将标量损失乘以一个巨大的缩放系数 $S$（如 $S = 2^{15} = 32768$）：$\mathcal{L}_{\text{scaled}} = \mathcal{L} \times S$；
+
 2. **链式法则伴随放大**：反向传播计算出的所有梯度张量被等比放大 $S$ 倍，强行推入 FP16 的正规表示区间，规避下溢；
+
 3. **溢出检测与缩放退避**：在优化器执行更新前，检查全网梯度是否包含 `Inf` 或 `NaN`。若发生溢出，说明 $S$ 过大导致高位被击穿，立即放弃本步更新，并将 $S$ 减半（$S \leftarrow S / 2$）；若连续 $N$ 步无溢出，则尝试增大缩放因子（$S \leftarrow S \times 2$）。
 
 #### 支柱三：敏感算子的 FP32 强制累加与约简
@@ -125,6 +124,7 @@ Softmax 的分母指数累加 $\sum \exp(z_i)$、LayerNorm 的均值与方差统
 #### B. 细粒度分块量化（Tile-wise Fine-Grained Scaling）
 FP8 的最大动态范围极窄（E4M3 仅 448）。若采用全张量（Tensor-wise）量化，异常离群点（Outliers）会使整张矩阵精度崩溃。
 DeepSeek-V3 提出了**细粒度分块量化**：
+
 - 对激活张量按 $1 \times 128$ 瓦片（Token 内部特征向量）独立求缩放系数；
 - 对权重矩阵按 $128 \times 128$ 空间瓦片独立求缩放系数；
 - 配合专用的 FP8 算子，在 Hopper 架构上实现了几乎无损的 671B 庞大参数预训练。
@@ -167,7 +167,6 @@ DeepSeek-V3 提出了**细粒度分块量化**：
 #| course_role: exercise
 import torch
 
-
 def float_props(exp_bits: int, mantissa_bits: int) -> tuple[float, float, float]:
     """
     返回 (max_value, min_normal, epsilon)。
@@ -183,7 +182,6 @@ def float_props(exp_bits: int, mantissa_bits: int) -> tuple[float, float, float]
     epsilon = ______                    # 填空
     return max_value, min_normal, epsilon
 
-
 FORMATS = {
     "fp32": (8, 23),
     "fp16": (5, 10),
@@ -192,13 +190,11 @@ FORMATS = {
     "fp8_e5m2": (5, 2),
 }
 
-
 def show_formats():
     print(f"{'format':10s} {'max':>12s} {'min_normal':>12s} {'epsilon':>12s}")
     for name, (e, m) in FORMATS.items():
         mx, mn, eps = float_props(e, m)
         print(f"{name:10s} {mx:12.3e} {mn:12.3e} {eps:12.3e}")
-
 
 def simulate_absorption(w: float, update: float, dtype: torch.dtype) -> tuple[float, float, bool]:
     """
@@ -210,7 +206,6 @@ def simulate_absorption(w: float, update: float, dtype: torch.dtype) -> tuple[fl
     w_new = (torch.tensor(w, dtype=dtype) + torch.tensor(update, dtype=dtype)).float().item()
     absorbed = ______                   # 填空：更新后与更新前是否相同
     return w_low, w_new, absorbed
-
 
 def fp8_memory_ledger() -> dict[str, int]:
     """
@@ -230,7 +225,6 @@ def fp8_memory_ledger() -> dict[str, int]:
     for name, comp in schemes.items():
         totals[name] = ______           # 填空：各分量求和
     return totals
-
 
 if __name__ == "__main__":
     show_formats()
@@ -271,7 +265,6 @@ BF16 与 FP16 同为 16 位，为什么 BF16 成为预训练默认？请用"范�
 - 认为 FP8 只是"更小的 BF16"，不知道需要量化与稳定性问题。
 - 综合题中给出自相矛盾的配置（如 TP 跨节点、gbs 公式错误、静态账本漏项）。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -280,7 +273,6 @@ BF16 与 FP16 同为 16 位，为什么 BF16 成为预训练默认？请用"范�
 ```{python}
 #| course_role: solution
 import torch
-
 
 def float_props(exp_bits: int, mantissa_bits: int) -> tuple[float, float, float]:
     """
@@ -297,7 +289,6 @@ def float_props(exp_bits: int, mantissa_bits: int) -> tuple[float, float, float]
     epsilon = 2 ** (-mantissa_bits)                    # 填空
     return max_value, min_normal, epsilon
 
-
 FORMATS = {
     "fp32": (8, 23),
     "fp16": (5, 10),
@@ -306,13 +297,11 @@ FORMATS = {
     "fp8_e5m2": (5, 2),
 }
 
-
 def show_formats():
     print(f"{'format':10s} {'max':>12s} {'min_normal':>12s} {'epsilon':>12s}")
     for name, (e, m) in FORMATS.items():
         mx, mn, eps = float_props(e, m)
         print(f"{name:10s} {mx:12.3e} {mn:12.3e} {eps:12.3e}")
-
 
 def simulate_absorption(w: float, update: float, dtype: torch.dtype) -> tuple[float, float, bool]:
     """
@@ -324,7 +313,6 @@ def simulate_absorption(w: float, update: float, dtype: torch.dtype) -> tuple[fl
     w_new = (torch.tensor(w, dtype=dtype) + torch.tensor(update, dtype=dtype)).float().item()
     absorbed = w_new == w_low                   # 填空：更新后与更新前是否相同
     return w_low, w_new, absorbed
-
 
 def fp8_memory_ledger() -> dict[str, int]:
     """
@@ -345,7 +333,6 @@ def fp8_memory_ledger() -> dict[str, int]:
         totals[name] = sum(comp.values())           # 填空：各分量求和
     return totals
 
-
 if __name__ == "__main__":
     show_formats()
 
@@ -359,7 +346,6 @@ if __name__ == "__main__":
     for name, total in fp8_memory_ledger().items():
         print(f"  {name:22s} {total} bytes")
 ```
-
 
 ## 补全后的代码（关键填空处）
 

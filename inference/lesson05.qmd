@@ -3,12 +3,9 @@ title: "第 5 课：稀疏推理：权重、MoE、Sparse Attention 与 HiSparse"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ## 本课目标与通过标准
 
@@ -23,10 +20,15 @@ jupyter: python3
 源码与论文阅读路线：
 
 1. SGLang `scheduler.py` 搜索 `enable_hisparse`：看 prefill staging 如何转入 sparse decode。
+
 2. `mem_cache/allocator/hisparse.py`：区分 full logical indices、compressed indices 与 sparse device buffer。
+
 3. `hisparse_memory_pool.py`：追 index translation 与 KV transfer。
+
 4. NSA 论文：只读三分支结构、hardware-aligned block selection 与训练方式。
+
 5. SparseGPT/Wanda：比较权重评分和重构；再核对目标 runtime 是否真的有 sparse GEMM。
+
 6. MoE/DeepEP：把“每 token 激活少量专家”与 all-to-all dispatch/combine 一起分析。
 
 源码快照：SGLang `9deb6952afa4`。
@@ -59,7 +61,9 @@ flowchart LR
 ### 1. 它是什么，解决什么问题
 
 随着大模型参数量向千亿甚至万亿规模迈进、以及上下文窗口扩展至 128K~1M Tokens，传统“全密集（Dense）”计算范式面临两大约束构成的物理天花板：
+
 1. **显存容量与带宽墙（Memory Capacity & Bandwidth Wall）**：Decode 阶段属于极度访存受限（Memory-Bound）场景，每生成一个 Token 都需要将数百 GB 的全模型权重及线性膨胀的全部历史 KV Cache 从 HBM 搬运进 SRAM。
+
 2. **长序列计算复杂度墙（$\mathcal{O}(N^2)$ Complexity Wall）**：Prefill 与长上下文推理中，标准 Attention 的矩阵乘与 Softmax 计算量和显存占用随序列长度 $N$ 呈二次方增长。
 
 **稀疏推理（Sparse Inference）**旨在利用大模型表征中的自然冗余，在几乎不损失模型精度的前提下跳过无关计算与访存。如图 5-1 所示，现代工业级推理系统构建了四维协同的稀疏优化矩阵：
@@ -78,12 +82,14 @@ flowchart LR
    - 随后通过 `Scatter/Permute` 算子按目标专家对 Token 进行排序并分组打包；在专家并行（Expert Parallelism, EP）拓扑下，跨节点/跨 GPU 通过高带宽 All-to-All 通信（如 DeepEP）将 Token 分发给宿主专家卡；
    - 各卡调用优化的 Grouped GEMM 或 Batched GEMM 算子并行执行专家 FFN 计算；
    - 计算完成后再次执行 All-to-All 通信与 `Gather/Unpermute` 算子，按原始顺序还原 Token 并加权累加。
+
 2. **块稀疏 Attention 与三分支架构（NSA Architecture）**：
    - 以 Native Sparse Attention (NSA) 为代表的前沿稀疏注意力，摒弃了难以被 GPU 并行硬件加速的细粒度逐 Token 随机稀疏，转向硬件友好的粗粒度 Block 稀疏。
    - 算法通常解耦为三个互补分支：
      1. **压缩分支（Compressed Branch）**：对连续 Key-Value 块执行池化摘要，以极低显存代价捕捉全序列的长程全局上下文；
      2. **选择分支（Selected Branch）**：计算 Query 与各个 Block 摘要的注意力得分，利用 Top-$K$ 算子动态筛选出高信息量的少数关键 Block，进行硬件连续对齐的细粒度精确计算；
      3. **滑动窗口分支（Sliding Window Branch）**：始终保留紧邻当前 Query 的局部因果窗口（Local Window）以及最开头的注意力汇元（Attention Sinks），确保局部语法连贯性与语义基准。
+
 3. **HiSparse 多级 KV 管理与状态映射**：
    - 在 SGLang HiSparse 架构中，调度器与内存分配器解耦出三层状态视图：**全量逻辑索引（Full Logical Indices）**、**压缩索引（Compressed Indices）**与**设备稀疏缓冲区（Sparse Device Buffer）**。
    - Prefill 阶段保留全量状态以支撑全局选择器；进入 Decode 阶段后，仅将当前步及其窗口所需的活跃 KV 驻留在高速 GPU 显存，未命中块则驻留或分流至主机内存或压缩池，实现极高的 KV 显存压缩比。
@@ -91,32 +97,37 @@ flowchart LR
 ### 3. 正确性条件与常见误区
 
 - **因果掩码截断与未来信息泄露（Causal Boundary Invariant）**：
-  - 在展开被选中的 Block 时，即使某个 Block 的物理边界涵盖区间 $[b \cdot B, (b+1) \cdot B)$，若该 Block 跨越了当前的因果位置（即 $(b+1) \cdot B > \text{query\_pos} + 1$），则该 Block 内部位于 `query_pos` 之后的 Token 绝对禁止纳入计算：
+   - 在展开被选中的 Block 时，即使某个 Block 的物理边界涵盖区间 $[b \cdot B, (b+1) \cdot B)$，若该 Block 跨越了当前的因果位置（即 $(b+1) \cdot B > \text{query\_pos} + 1$），则该 Block 内部位于 `query_pos` 之后的 Token 绝对禁止纳入计算：
     $$\text{valid\_end} = \min((b + 1) \times \text{block\_size}, \text{query\_pos} + 1)$$
     越界访问将导致自回归时序因果性破坏，引发灾难性的训练-推理不一致。
+
 - **动态稀疏不可逆丢弃的误区**：
-  - *致命误区*：误以为当前 Token 没有选中的 KV 块，未来生成的 Token 也绝不需要，因此可以直接从显存中彻底销毁。
-  - *实际情况*：注意力的重要性分布随上下文生成呈动态漂移。当前步未被选中的背景块，完全可能在数十步后被后续 Query 重新激活。若物理销毁，后续步骤将发生无法补救的注意力缺失，模型输出崩溃。因此，HiSparse 必须维持逻辑全生命周期的元数据索引与分级换入机制。
+   - *致命误区*：误以为当前 Token 没有选中的 KV 块，未来生成的 Token 也绝不需要，因此可以直接从显存中彻底销毁。
+   - *实际情况*：注意力的重要性分布随上下文生成呈动态漂移。当前步未被选中的背景块，完全可能在数十步后被后续 Query 重新激活。若物理销毁，后续步骤将发生无法补救的注意力缺失，模型输出崩溃。因此，HiSparse 必须维持逻辑全生命周期的元数据索引与分级换入机制。
 - **“参数稀疏度 = 性能加速比”的思维陷阱**：
-  - 许多研究人员误以为 50% 的稀疏度就能带来 2 倍的吞吐。事实上，若未采用匹配硬件加速指令的稀疏格式（如 NVIDIA Ampere 架构以来的 2:4 Structured Sparse Tensor Core），稀疏带来的非连续内存跳跃访问与索引开销，会导致性能不仅无法提升，反而因破坏 Memory Coalescing 与 Warp Divergence 而显著劣化。
+   - 许多研究人员误以为 50% 的稀疏度就能带来 2 倍的吞吐。事实上，若未采用匹配硬件加速指令的稀疏格式（如 NVIDIA Ampere 架构以来的 2:4 Structured Sparse Tensor Core），稀疏带来的非连续内存跳跃访问与索引开销，会导致性能不仅无法提升，反而因破坏 Memory Coalescing 与 Warp Divergence 而显著劣化。
 
 ### 4. 性能与工程取舍
 
 - **非结构化稀疏 vs. 2:4 结构化稀疏**：
-  - 非结构化剪枝（Unstructured Pruning）由于不限制非零元素位置，模型精度极高；但通用 GPU 无法高效执行随机稀疏矩阵乘，通常沦为“零加速”。
-  - 2:4 结构化稀疏强制每连续 4 个权重元素中必须有 2 个为零，硬件 Tensor Core 可直接提供 2 倍峰值计算算力，但面临模型精度的再训练恢复挑战。
+   - 非结构化剪枝（Unstructured Pruning）由于不限制非零元素位置，模型精度极高；但通用 GPU 无法高效执行随机稀疏矩阵乘，通常沦为“零加速”。
+   - 2:4 结构化稀疏强制每连续 4 个权重元素中必须有 2 个为零，硬件 Tensor Core 可直接提供 2 倍峰值计算算力，但面临模型精度的再训练恢复挑战。
 - **MoE 专家并行中的通信与计算比（Arithmetic Intensity vs. All-to-All）**：
-  - MoE 架构将参数量扩展了数倍，激活计算量仅增加少量。但在低并发 Decode 阶段，每个专家分配到的 Token 数极少（甚至每卡仅 1~2 个 Token），矩阵乘计算时间极短，跨卡跨节点的 All-to-All 通信时延完全暴露在关键路径上；
-  - 只有在超高并发或搭配深度优化的跨卡通信重叠调度库（如 DeepEP 异步重叠）时，MoE 的吞吐优势才能完全释放。
+   - MoE 架构将参数量扩展了数倍，激活计算量仅增加少量。但在低并发 Decode 阶段，每个专家分配到的 Token 数极少（甚至每卡仅 1~2 个 Token），矩阵乘计算时间极短，跨卡跨节点的 All-to-All 通信时延完全暴露在关键路径上；
+   - 只有在超高并发或搭配深度优化的跨卡通信重叠调度库（如 DeepEP 异步重叠）时，MoE 的吞吐优势才能完全释放。
 
 ## 具体演示
 
 设当前 Query 位于位置 $\text{query\_pos} = 15$（即正在生成第 16 个 Token，从 0 计），配置 `block_size = 4`，`local_window = 3`，`sink_tokens = 2`。Top-$K$ 路由选择器选出了 Block 索引集合 `[1, 3]`：
+
 1. **Sink 分支**：访问序列头部锚点 Token 集合 $\{0, 1\}$；
+
 2. **Selected Blocks 分支**：
    - Block 1：跨度为 $[1 \times 4, 2 \times 4) = [4, 8)$，包含 Token $\{4, 5, 6, 7\}$，均满足因果约束；
    - Block 3：跨度为 $[3 \times 4, 4 \times 4) = [12, 16)$，受因果边界限制 $\min(16, 15 + 1) = 16$，包含 Token $\{12, 13, 14, 15\}$；
+
 3. **Local Window 分支**：覆盖 $[15 - 3 + 1, 15] = [13, 15]$，包含 Token $\{13, 14, 15\}$；
+
 4. **最终合并去重**：各分支集合取并集并排序：
    $$\{0, 1\} \cup \{4, 5, 6, 7\} \cup \{12, 13, 14, 15\} \cup \{13, 14, 15\} = [0, 1, 4, 5, 6, 7, 12, 13, 14, 15]$$
    总共仅需读取 10 个历史 Token 的 KV 向量，相比于全量 Dense 访问（16 个 Tokens）节省了近 40% 的访存带宽与计算，且严格遵循因果一致性。
@@ -179,7 +190,6 @@ MoE 每 token 只激活 top-2 experts，为什么高并发 decode 仍可能比 d
 - Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；
 - 一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -211,21 +221,29 @@ assert sparse_raw_kv_indices(2, [1], 4, 2, 1) == [0, 1, 2]
 ### Q1 参考答案
 
 非结构化权重稀疏（Unstructured Sparsity）在理论上减少了 50% 的浮点乘加次数（FLOPs），但在真实 GPU 硬件上不仅无法获得 2 倍加速，甚至往往比原始密集矩阵更慢：
+
 1. **访存未压缩与非连续内存访问（Memory Footprint & Uncoalesced Access）**：若未采用紧凑的稀疏格式（如 CSR/COO），权重仍以连续浮点张量存储，零值权重依然消耗 100% 的显存与 HBM 读取带宽；即使采用 CSR 等格式，为了记录非零元的位置，必须引入额外的行偏移与列索引元数据。这些元数据的读取与间接寻址（Indirect Addressing）彻底打破了 GPU 全局内存的连续合并访存（Memory Coalescing），导致缓存命中率暴跌。
+
 2. **硬件指令与 SIMT/Warp 分歧（Hardware ISA & Warp Divergence）**：现代 GPU 的算力核心是专门执行密集小矩阵乘（如 $16 \times 16 \times 16$）的 Tensor Core。在非结构化稀疏下，同一个 Warp 内的 32 个线程面对不可预测的非零元稀疏分布，会产生严重的控制流分支分歧（Warp Divergence），绝大多数计算单元处于等待空转状态。
+
 3. **真实硬件加速的前提——2:4 结构化稀疏**：只有当稀疏模式与硬件底层物理微架构原生契合（例如 NVIDIA Ampere 架构引入的 2:4 半结构化稀疏，硬件 Tensor Core 硬件级支持每连续 4 个元素中挑出 2 个非零元并使用 2-bit 相对位置编码），且矩阵尺寸 $M, N, K$ 足够大以掩盖元数据解码开销时，配合专用的 Sparse MMA 指令，才能真正获得逼近 2 倍的硬件吞吐。
 
 ### Q2 参考答案
 
 NSA / HiSparse 之所以严禁简单物理删除未选中的 KV Cache，源于大模型注意力的动态演进与因果正确性约束：
+
 1. **长程上下文的动态注意力漂移（Dynamic Attention Drift）**：大模型的自回归生成具有复杂的长程因果依赖。在生成 Token $t$ 时，未被当前 Top-$K$ 路由选中的历史片段，在生成 Token $t + \Delta t$ 时完全可能因为话题转换或回溯引用而重新成为关键注意力焦点。若在第 $t$ 步将未选中的 KV 块物理释放销毁，后续步骤将发生无法逆转的历史数据缺失，彻底破坏模型的因果注意力机制，引发胡言乱语与严重幻觉。
+
 2. **逻辑状态全量化与物理驻留稀疏化（Logical vs. Physical Decoupling）**：HiSparse 的核心系统设计原则是**“逻辑索引全生命周期维系，物理显存按需分级驻留”**。系统维护全量的序列长度、Position IDs 与逻辑 Block 映射表，并将未命中的冷数据降级留存或异步溢出（Spill）至 Host 内存；当后续 Query 重新命中该区域时，可触发后台流式预取（Prefetch）或由全局压缩分支（Compressed Summary Branch）补充粗粒度语义信息。若物理销毁，将导致底层的虚拟页表断裂、引用计数紊乱以及与 RadixAttention 前缀共享机制的冲突。
 
 ### Q3 参考答案
 
 尽管 MoE 架构下每个 Token 仅激活 2 个专家（Active Parameters 仅占全量的很小比例），但在高并发自回归 Decode 阶段，端到端时延和吞吐仍可能显著劣于 Dense 模型：
+
 1. **专家负载偏斜与掉队者效应（Load Imbalance & Straggler Bottleneck）**：真实文本分布具有强烈的语义偏置，不同专家的被激活概率极不均衡（热门专家可能接收 80% 的 Token，而冷门专家门可罗雀）。在跨卡专家并行（EP, Expert Parallelism）架构下，单步 Decode 的耗时由负载最重的卡（Straggler）决定，木桶效应导致整体吞吐受限于最慢的专家。
+
 2. **细粒度小 Batch GEMM 算力坍塌（Small-Batch GEMM Efficiency）**：在 Decode 阶段，即使总并发请求数达到上百，但在经过 Top-2 路由打散到 $E$（如 64 或 128）个专家后，单卡上分配给每个专家的有效 Token 数（M 维度）往往只有 1~4。小 Batch GEMM 处于极度访存受限（Memory-Bound）区间，Tensor Core 无法被饱和喂饱，计算利用率暴跌，远低于 Dense 模型中聚合成百上千 Token 的超大 Batch GEMM 的执行效率。
+
 3. **跨卡 All-to-All 集合通信与同步开销（Communication & Synchronization Overhead）**：MoE 必须在专家计算前后分别执行 `Dispatch` 和 `Combine` 两次跨卡/跨节点 All-to-All 集合通信。在每步仅处理极少 Token 的 Decode 场景下，通信的数据传输量很小但通信延迟与同步屏障（Synchronization Latency）占主导。若缺乏深度的通信-计算重叠（Overlap）流水线支持，通信开销将完全暴露并压垮端到端性能。
 
 ## 参考资料

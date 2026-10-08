@@ -3,19 +3,14 @@ title: "第 11 课：5D 并行"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：5D Parallelism in a Nutshell（含 Scope and focus、Summarizing it all）
 - 前置：第 4～10 课全部
@@ -31,7 +26,6 @@ jupyter: python3
 - 解释组合规则：TP 节点内、PP/ZeRO-3 跨节点、ZeRO-1/2 与 PP 兼容、ZeRO-3 与 PP 很少组合。
 
 ## 核心概念
-
 
 ### 核心操作与执行流程图解
 
@@ -57,7 +51,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 11-2：工业界大模型并行训练方案选型与切分决策树</em></p>
 
-
 ### 1. 5D 并行体系总览与切分维度正交性
 
 在超大规模基础大模型（如 70B 至 1T 参数）的分布式预训练中，没有任何单一的并行技术能够独立承载海量参数、超长上下文以及庞大批次的严苛要求。
@@ -82,15 +75,18 @@ $$N_{\text{gpus}} = N_{\text{dp}} \times N_{\text{tp}} \times N_{\text{pp}} \tim
 设计混合并行策略绝非盲目组合，其第一性原理是：**将通信频率最高、对延迟最敏感的并行维度，映射到物理带宽最高、延迟最低的硬件通信互联层级上**。
 
 现代 AI 超算集群在物理上通常具备严格的三级互联拓扑：
+
 1. **第一层：机内拓扑（Intra-Node NVLink / NVSwitch）**：
    - 物理带宽：$900 \sim 1800\text{ GB/s}$，端到端延迟 $< 1\mu s$。
    - **映射铁律**：**必须优先且仅部署张量并行（TP + SP）**。由于 TP 在每个 Transformer 层的注意力与 MLP 输出端都嵌有阻塞式集合通信，如果跨机走网卡，系统 MFU 将遭受毁灭性打击。因此通常设定 $\text{TP} \in \{2, 4, 8\}$，绝不跨越物理主机边界。
+
 2. **第二层：机间二层网络（Intra-Cluster IB / RoCE RDMA）**：
    - 物理带宽：$400 \sim 800\text{ Gbps}$（折合单向约 $50 \sim 100\text{ GB/s}$），跨交换机延迟 $\approx 2 \sim 5\mu s$。
    - **映射策略**：适合承载 **流水线并行（PP）**、**数据并行（DP/ZeRO-1/2）** 以及 **上下文并行（CP）**。
-     - PP 仅传输边界切片的激活值，带宽需求小；
-     - DP/ZeRO 的集合通信由独立通信流执行，可完全与反向求导计算异步重叠；
-     - CP 的 Ring Attention 采用双缓冲流水线，通信耗时被注意力 GEMM 完美掩盖。
+      - PP 仅传输边界切片的激活值，带宽需求小；
+      - DP/ZeRO 的集合通信由独立通信流执行，可完全与反向求导计算异步重叠；
+      - CP 的 Ring Attention 采用双缓冲流水线，通信耗时被注意力 GEMM 完美掩盖。
+
 3. **第三层：数据中心全互联横截面（East-West Spine-Leaf Fabric）**：
    - 面临跨机柜跨交换机路由，容易发生拥塞。
    - **映射策略**：承载 **专家并行（EP）** 时必须配合 DeepSeek 提出的“节点限制路由（Node-Limited Routing）”，将绝大多数 All-to-All 流量限制在局部机架内，避免打崩核心交换机。
@@ -99,8 +95,10 @@ $$N_{\text{gpus}} = N_{\text{dp}} \times N_{\text{tp}} \times N_{\text{pp}} \tim
 
 - **黄金标准架构：$\text{TP} \times \text{PP} \times \text{DP}$ (+ ZeRO-1)**：
   这是训练千亿稠密模型（如 Llama 3 405B、GPT-4）最稳健的基石体系。TP 在机内消化单层大矩阵，PP 跨机横跨数十台服务器切分层深，DP 在最外层支撑海量批次，叠加 ZeRO-1 将优化器状态切分，达成吞吐与显存的终极平衡。
+
 - **ZeRO-3 与 PP 极少同时使用**：
   两者在架构定位上高度重叠（均旨在分担模型权重）。若在同一个 PP Stage 内部再开启 ZeRO-3，会导致微批次流经该 Stage 时反复对该层权重发射 All-Gather，引发严重的冗余通信放大；工程上**PP 通常只与 ZeRO-1 或 ZeRO-2 结合**。
+
 - **CP 与 EP 的即插即用性**：
   CP 仅在输入 Context 超过单机容量时（$s \ge 32\text{k}$）引入；EP 仅在引入 MoE 稀疏结构时激活，两者与其他主并行维度均保持正交。
 
@@ -112,9 +110,11 @@ $$N_{\text{gpus}} = N_{\text{dp}} \times N_{\text{tp}} \times N_{\text{pp}} \tim
    - 检查单卡是否能容纳模型静态状态与激活。若能，首选纯 DP / ZeRO-1，系统效率最高；
    - 若单卡无法容纳，评估单机 8 卡是否能容纳：单机 8 卡放得下时，首选 $\text{ZeRO-3}$（FSDP）或机内 $\text{TP}=8$；
    - 超过单机 8 卡显存极限时（如 70B+ 模型），立即开启 **机内 $\text{TP}=8$ + 跨机 $\text{PP}=4\sim 16$**，必要时辅以选择性激活重计算。
+
 2. **第二步：吞吐配平（达到目标全局批次 GBS）**：
    - 业务算法决定了最佳训练全局批次 $\text{GBS}_{\text{tokens}}$。
    - 根据公式 $\text{GBS}_{\text{tokens}} = \text{MBS} \times \text{grad\_accum} \times N_{\text{dp}} \times s$，在给定的 GPU 规模下倒推所需的数据并行度 $N_{\text{dp}}$ 与累积步数 $\text{grad\_accum}$。
+
 3. **第三步：气泡与带宽调优（提升算力利用率 MFU）**：
    - 验证流水线气泡比例 $\frac{p-1}{m}$ 是否在 10% 以内；若气泡过大，适度增大梯度累积步数 $m$，或开启 Interleaved 1F1B / Zero-Bubble 调度。
    - 检查网络通信是否能被单层计算完全掩盖，最终输出全局稳态训练配置。
@@ -179,7 +179,6 @@ def validate_config(
 
     return (not problems), problems
 
-
 def search_configs(
     num_params: int, gpu_memory: int, num_nodes: int, gpus_per_node: int,
     num_heads: int, num_layers: int, hidden: int,
@@ -209,7 +208,6 @@ def search_configs(
                     if ok:
                         found.append((cfg, problems))
     return found
-
 
 if __name__ == "__main__":
     # 案例：70B 模型（h=8192, L=80, 头 64），16 节点 × 8×80GB H100，
@@ -250,7 +248,6 @@ if __name__ == "__main__":
 - 认为 TP 可以跨节点扩展而没有明显代价。
 - gbs 公式漏乘 dp 或 seq。
 - 说不出 ZeRO-3 与 PP 为何很少组合。
-
 
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
@@ -313,7 +310,6 @@ def validate_config(
 
     return (not problems), problems
 
-
 def search_configs(
     num_params: int, gpu_memory: int, num_nodes: int, gpus_per_node: int,
     num_heads: int, num_layers: int, hidden: int,
@@ -344,7 +340,6 @@ def search_configs(
                         found.append((cfg, problems))
     return found
 
-
 if __name__ == "__main__":
     # 案例：70B 模型（h=8192, L=80, 头 64），16 节点 × 8×80GB H100，
     # 目标 gbs = 4M tokens、seq = 4096、mbs = 1
@@ -359,7 +354,6 @@ if __name__ == "__main__":
               f"cp={cfg['cp']} zero={cfg['zero']} grad_acc={cfg['grad_acc']} "
               f"(并行度乘积 {cfg['dp']*cfg['tp']*cfg['pp']*cfg['cp']})")
 ```
-
 
 ## 补全后的代码（关键填空处）
 

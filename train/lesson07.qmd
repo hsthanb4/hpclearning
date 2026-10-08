@@ -3,19 +3,14 @@ title: "第 7 课：序列并行 SP"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Sequence parallelism
 - 前置：第 6 课（TP）
@@ -32,8 +27,12 @@ jupyter: python3
 
 ## 核心概念
 
-
 ### 核心操作与执行流程图解
+
+::: {.img-card}
+![](assets/figs/train_sp_megatron_vs_ulysses.png){width="95%"}
+<p class="caption">图 7-1：序列并行（SP）显存消除数学原理与 Megatron-SP vs DeepSpeed Ulysses 两种主流范式对比</p>
+:::
 
 ```{mermaid}
 flowchart TD
@@ -48,7 +47,7 @@ flowchart TD
         end
     end
 ```
-<p class="caption" align="center"><em>图 7-1：序列并行（SP）切分非张量并行区激活值显存分布对比</em></p>
+<p class="caption" align="center"><em>图 7-2：序列并行（SP）切分非张量并行区激活值显存分布对比</em></p>
 
 ```{mermaid}
 flowchart LR
@@ -56,13 +55,14 @@ flowchart LR
     Attn --> OutProj["Output Projection 行分片"]
     OutProj -->|ReduceScatter 通信| Dropout["Dropout (恢复序列切分 s/TP)"]
 ```
-<p class="caption" align="center"><em>图 7-2：Megatron-SP 巧妙利用 Ring 通信原语消除冗余通信的完整闭环</em></p>
-
+<p class="caption" align="center"><em>图 7-3：Megatron-SP 巧妙利用 Ring 通信原语消除冗余通信的完整闭环</em></p>
 
 ### 1. 术语澄清：Megatron-SP 与 Context Parallelism (CP) 的本质区别
 
 在大模型分布式系统领域，“序列并行（Sequence Parallelism）”这个词在历史上有两种完全不同的含义，面试与系统设计中极易混淆：
+
 1. **Megatron-SP（Korthikanti et al., 2022，本课核心）**：专指与**机内张量并行（TP）深度绑定**的优化技术。它并不改变注意力机制的计算拓扑，而是专门针对 Transformer 中未被 TP 覆盖的区域（如 LayerNorm、RMSNorm、Dropout、残差连接等），通过沿序列维度（Sequence Dimension）切分来彻底消除其显存冗余。
+
 2. **Context Parallelism（CP / 环形注意力 Ring-Attention，第 8 课）**：专指跨物理节点将全模型的长文本序列（如 32k、128k、1M 上下文）整体切分并分布式流转计算的独立并行维度。
 
 在讨论序列并行时，必须首先明确其上下文语境。
@@ -71,10 +71,12 @@ flowchart LR
 
 回顾第 6 课，张量并行（TP）成功将 MLP 和 Attention 核心的 GEMM 权重切分到各个 GPU 上，其内部中间激活张量的隐藏维度也被切分为 $\frac{h}{\text{TP}}$。
 
-然而，如**图 7-1** 的对比所示，在 GEMM 算子之外的**非 TP 区域**，系统面临严峻的显存回弹：
+然而，如**图 7-1 与图 7-2** 的对比所示，在 GEMM 算子之外的**非 TP 区域**，系统面临严峻的显存回弹：
+
 - **LayerNorm / RMSNorm 的归一化计算**：
   $$\mu = \frac{1}{h} \sum_{i=1}^h x_i, \quad \sigma^2 = \frac{1}{h} \sum_{i=1}^h (x_i - \mu)^2, \quad \text{LayerNorm}(x) = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta$$
   均值 $\mu$ 与方差 $\sigma^2$ 是沿着**整个隐藏特征维度 $h$** 进行统计约简的。若沿 $h$ 维度切分输入，各卡仅持有一部分通道特征，根本无法独立计算出正确的均值和方差，除非在 LayerNorm 内部强行插入跨卡通信。
+
 - **全量激活冗余驻留**：为了避免在每个 Norm 算子内发生低效的跨卡通信，原生 Megatron-LM 规定：在进入 LayerNorm、Dropout 以及残差连接之前，必须持有全量的特征张量 $(b, s, h)$。
 - **后果**：这意味着每个 TP 副本的 GPU 显存内都完整保存了一份完全相同的 $(b, s, h)$ 激活张量。随着模型层数 $L$ 与上下文长度 $s$ 的增长，这些未被切分的“公共激活值”占据了反向保留激活（Stored Activations）总量的 30%~50%，严重抵消了 TP 带来的显存收益。
 
@@ -85,23 +87,24 @@ Megatron-SP 捕捉到了一个核心数学事实：**LayerNorm、RMSNorm、GELU 
 
 因此，完全可以**沿序列维度 $s$ 将非 TP 区域的张量均分为 $\frac{s}{\text{TP}}$ 块**，让每张卡仅驻留 $(b, \frac{s}{\text{TP}}, h)$ 的局部序列激活！
 
-为了在 SP 区域（序列切分）与 TP 区域（隐藏维切分）之间无缝转换，Megatron 引入了优雅的**共轭算子对（Conjugate Operator Pairs）**，其执行拓扑如**图 7-2** 所示：
+为了在 SP 区域（序列切分）与 TP 区域（隐藏维切分）之间无缝转换，Megatron 引入了优雅的**共轭算子对（Conjugate Operator Pairs）**，其执行拓扑如**图 7-1 与图 7-3** 所示：
 
 #### A. $g$ 与 $g^*$ 算子对（SP 与 TP 区域的转换核心）
 - **前向转入 TP 区域（$g$ 算子）**：
-  - 在进入 Attention / MLP 的列并行矩阵乘之前，算子需要完整的 Token 语义（例如 Attention QKV 投影需与整体位置编码配合）。
-  - 系统发起一次 **All-Gather(沿序列维度 $s$)**：
+   - 在进入 Attention / MLP 的列并行矩阵乘之前，算子需要完整的 Token 语义（例如 Attention QKV 投影需与整体位置编码配合）。
+   - 系统发起一次 **All-Gather(沿序列维度 $s$)**：
     $$(b, \frac{s}{\text{TP}}, h) \xrightarrow{g = \text{All-Gather}(s)} (b, s, h)$$
-  - 随后直接送入列并行线性层，输出沿隐藏维切分的张量 $(b, s, \frac{h}{\text{TP}})$。
+   - 随后直接送入列并行线性层，输出沿隐藏维切分的张量 $(b, s, \frac{h}{\text{TP}})$。
 - **前向转出 TP 区域（$g^*$ 算子）**：
-  - 行并行线性层计算后，各卡产生了部分和张量 $(b, s, h)$。
-  - 在原生 TP 中，此处必须执行一次 AllReduce 沿 $h$ 恢复完整和。
-  - **而在 SP 中，此处直接替换为 Reduce-Scatter(沿序列维度 $s$)**：
+   - 行并行线性层计算后，各卡产生了部分和张量 $(b, s, h)$。
+   - 在原生 TP 中，此处必须执行一次 AllReduce 沿 $h$ 恢复完整和。
+   - **而在 SP 中，此处直接替换为 Reduce-Scatter(沿序列维度 $s$)**：
     $$(b, s, \frac{h}{\text{TP}}) \xrightarrow{\text{Row Linear}} (b, s, h) \xrightarrow{g^* = \text{Reduce-Scatter}(s)} (b, \frac{s}{\text{TP}}, h)$$
-  - **一石二鸟**：`Reduce-Scatter` 既完成了行并行部分和的累加求和，又顺手将输出张量切分回了 $(b, \frac{s}{\text{TP}}, h)$，直接喂给后续的 LayerNorm 与 Dropout！
+   - **一石二鸟**：`Reduce-Scatter` 既完成了行并行部分和的累加求和，又顺手将输出张量切分回了 $(b, \frac{s}{\text{TP}}, h)$，直接喂给后续的 LayerNorm 与 Dropout！
 
 #### B. 共轭算子的反向行为与对偶性
 在自动微分（Autograd）中，反向求导是前向有向无环图的伴随转置：
+
 - 前向执行 $g$（All-Gather 沿 $s$），反向求导对应的梯度汇聚算子正是其转置对偶：**Reduce-Scatter 沿 $s$**。
 - 前向执行 $g^*$（Reduce-Scatter 沿 $s$），反向求导对应的梯度恢复算子正是其转置对偶：**All-Gather 沿 $s$**。
 - 这种代数上的高度自洽保证了前向与反向在数学上严格等价，完全无须破坏自动求导链条。
@@ -118,14 +121,15 @@ $$V_{\text{AllReduce}} = 2 \times \frac{\text{TP} - 1}{\text{TP}} \times \text{S
 - **纯 TP 模式每 Block 通信量**：
   前向包含 2 次 AllReduce（Attention 输出 + MLP 输出）：
   $$V_{\text{TP}} = 2 \times V_{\text{AllReduce}} = 4 \times \frac{\text{TP}-1}{\text{TP}} \times (b \cdot s \cdot h \cdot 2)$$
+
 - **TP + SP 模式每 Block 通信量**：
   前向包含 2 次 All-Gather（进入 Col Linear）+ 2 次 Reduce-Scatter（退出 Row Linear）：
   $$V_{\text{TP+SP}} = 2 \times (V_{\text{All-Gather}} + V_{\text{Reduce-Scatter}}) = 4 \times \frac{\text{TP}-1}{\text{TP}} \times (b \cdot s \cdot h \cdot 2)$$
 
 - **重要结论**：$V_{\text{TP+SP}} \equiv V_{\text{TP}}$！两者的**通信总量完全相等**。
-  - 虽然网络操作次数翻倍（从 2 次大包变成 4 次半包），但通信数据量被严格均摊。
-  - 在机内高速 NVLink 环境下，多出发射两次小集合通信的延迟开销（约 $2\mu s$）微乎其微。
-  - 作为回报，模型所有非 TP 区域的驻留激活显存被**直接消减了 $\text{TP}$ 倍**（例如 8 卡下直接砍掉 87.5% 激活显存）。
+   - 虽然网络操作次数翻倍（从 2 次大包变成 4 次半包），但通信数据量被严格均摊。
+   - 在机内高速 NVLink 环境下，多出发射两次小集合通信的延迟开销（约 $2\mu s$）微乎其微。
+   - 作为回报，模型所有非 TP 区域的驻留激活显存被**直接消减了 $\text{TP}$ 倍**（例如 8 卡下直接砍掉 87.5% 激活显存）。
 
 ## 具体演示与数值推演
 
@@ -207,7 +211,6 @@ def trace_block(
             trace.append(("g* (reduce-scatter seq)", s, h, False))
     return trace
 
-
 def max_activation_bytes(trace: list[tuple[str, int, int, bool]], batch: int) -> int:
     """
     峰值【驻留】激活 = max(需要保存给反向的激活字节数)，BF16 每元素 2 字节。
@@ -220,10 +223,8 @@ def max_activation_bytes(trace: list[tuple[str, int, int, bool]], batch: int) ->
         if stored
     )
 
-
 def bf16_bytes(s: int, h: int, batch: int) -> int:
     return batch * s * h * 2
-
 
 if __name__ == "__main__":
     seq, hidden, tp, bs = 4096, 4096, 8, 1
@@ -272,7 +273,6 @@ if __name__ == "__main__":
 - 认为 SP 沿隐藏维切分 LayerNorm 的输入。
 - 说不出 g\* 是 reduce-scatter（把 row-linear 的求和与序列切分合并）或方向错误。
 - 声称 SP 增加了通信量（而非通信次数增加、总量等价）。
-
 
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
@@ -339,7 +339,6 @@ def trace_block(
             trace.append(("g* (reduce-scatter seq)", s, h, False))
     return trace
 
-
 def max_activation_bytes(trace: list[tuple[str, int, int, bool]], batch: int) -> int:
     """
     峰值【驻留】激活 = max(需要保存给反向的激活字节数)，BF16 每元素 2 字节。
@@ -352,10 +351,8 @@ def max_activation_bytes(trace: list[tuple[str, int, int, bool]], batch: int) ->
         if stored
     )
 
-
 def bf16_bytes(s: int, h: int, batch: int) -> int:
     return batch * s * h * 2
-
 
 if __name__ == "__main__":
     seq, hidden, tp, bs = 4096, 4096, 8, 1
@@ -379,7 +376,6 @@ if __name__ == "__main__":
     assert m_sp * tp == m_tp
     print("验证：TP+SP 峰值激活 = TP-only 的 1/tp ✓")
 ```
-
 
 ## 补全后的代码（关键填空处）
 

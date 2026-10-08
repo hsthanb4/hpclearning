@@ -3,19 +3,14 @@ title: "第 10 课：专家并行 EP"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Expert Parallelism
 - 前置：第 3 课（all-to-all 概念）、《Switch Transformers》等 MoE 基础（教材要求读者先了解 MoE）
@@ -31,7 +26,6 @@ jupyter: python3
 - 解释 DeepSeek-V3 的节点限制路由（每 token ≤ M 个节点）的设计动机。
 
 ## 核心概念
-
 
 ### 核心操作与执行流程图解
 
@@ -53,7 +47,7 @@ sequenceDiagram
     participant A2A1 as All-to-All 调度通信
     participant Exp as 跨卡 Expert FFN
     participant A2A2 as All-to-All 恢复通信
-    
+
     T->>R: 计算各 Token 对各专家的亲和度分数
     R->>A2A1: 将 Token 打包根据专家所在 Rank 进行 All-to-All 分发
     A2A1->>Exp: 各卡专家并行计算前向 FFN
@@ -62,34 +56,37 @@ sequenceDiagram
 ```
 <p class="caption" align="center"><em>图 10-2：MoE 专家并行双向 All-to-All 通信与计算全流程</em></p>
 
-
 ### 1. 混合专家架构（MoE）与专家并行（EP）的本质语义
 
 混合专家模型（Mixture-of-Experts, MoE）是当前前沿大模型（如 DeepSeek-V3/R1、Mixtral、Grok）实现“超级参数容量（Trillion-scale Parameters）”与“可控计算预算（Constant FLOPs）”解耦的核心技术。
 
 在标准 Transformer 架构中，全连接层（FFN/MLP）消耗了全网约 $\frac{2}{3}$ 的参数量。MoE 将单一密集的 FFN 替换为一个**门控路由网络（Gating Router）**与 $E$ 个结构同构的**独立专家网络（Expert FFNs）**：
+
 - 给定输入 Token 特征向量 $x \in \mathbb{R}^h$，Router 计算该 Token 对各专家的匹配亲和度分数：
   $$s(x) = \text{Softmax}(\text{TopK}(x \cdot W_g, \ K)) \quad \text{或采用 Sigmoid 归一化}$$
+
 - 系统仅激活得分最高的 $K$ 个专家（如 Top-2，或 DeepSeek-V3 的 Top-8 细粒度专家），最终输出为激活专家输出的加权求和：
   $$y = \sum_{i \in \text{TopK}} s_i(x) \cdot \text{FFN}_i(x)$$
 
 **专家并行（Expert Parallelism, EP）的切分维度**：
 如**图 10-1** 所示，EP 既不切分矩阵乘法（不同于 TP），也不切分序列层深（不同于 PP），而是**沿着“专家索引维度（Expert Dimension）”进行切分**。
+
 - 设集群中有 $N_{\text{ep}}$ 张 GPU，模型拥有 $E$ 个专家，则每张 GPU 常驻持有 $\frac{E}{N_{\text{ep}}}$ 个完整的专家模型权重。
 - **与张量并行（TP）的关键区别**：
-  - 在 TP 中，算子权重矩阵被强行拆散，各卡执行局部矩阵乘并产出“不完整的碎片（部分和 Partial Sum）”，必须通过阻塞式 AllReduce 沿特征维累加求和。
-  - 在 EP 中，**每张 GPU 上的专家权重是 100% 完整且独立的**！矩阵乘法在本地全量执行。EP 的本质是**“计算不动，数据动”**——根据 Router 的决策，将不同卡上的 Token 动态投递搬迁到对应专家所在的 GPU 上。
+   - 在 TP 中，算子权重矩阵被强行拆散，各卡执行局部矩阵乘并产出“不完整的碎片（部分和 Partial Sum）”，必须通过阻塞式 AllReduce 沿特征维累加求和。
+   - 在 EP 中，**每张 GPU 上的专家权重是 100% 完整且独立的**！矩阵乘法在本地全量执行。EP 的本质是**“计算不动，数据动”**——根据 Router 的决策，将不同卡上的 Token 动态投递搬迁到对应专家所在的 GPU 上。
 
 ### 2. 为什么 EP 必须与数据并行（DP）深度绑定（2D $\text{DP} \times \text{EP}$ 网格）
 
 大模型中除了 MoE FFN 层之外，还包含大量的密集模块（Dense Layers）：Embedding 词表、多头自注意力（Attention）、RMSNorm 归一化等。
 
 如果仅仅孤立地做专家并行而不引入数据并行：
+
 - 整个集群只能处理单份样本，这会导致所有 GPU 必须在非 MoE 区域完全冗余地重复计算相同的 Token 特征，造成严重的算力雪崩。
 - 因此，工业界标准架构必然采用 **$\text{DP} \times \text{EP}$ 二维网格拓扑**：
-  - 在全局层面上，各个 GPU 接收互不重叠的批次样本（承担数据并行 DP 角色）；
-  - 进入非 MoE 区域（如 Attention）时，各卡在本地独立前向计算；
-  - 一旦执行到 MoE 层，系统切换为 EP 语义：各卡本地样本产出的 Token 根据 Router 派发目标，跨卡重组并打散投递到各个专家卡上。
+   - 在全局层面上，各个 GPU 接收互不重叠的批次样本（承担数据并行 DP 角色）；
+   - 进入非 MoE 区域（如 Attention）时，各卡在本地独立前向计算；
+   - 一旦执行到 MoE 层，系统切换为 EP 语义：各卡本地样本产出的 Token 根据 Router 派发目标，跨卡重组并打散投递到各个专家卡上。
 
 ### 3. 双向 All-to-All 通信原语与流转闭环
 
@@ -100,12 +97,15 @@ sequenceDiagram
    - 系统将发往远端各个 Rank 的 Token 特征向量分别打包（Pack）。
    - 发起一次非均匀的全交换通信算子（`dist.all_to_all_single` 或带偏移量的 Ragged All-to-All）：
      每个 Rank 将本地收集的 Token 交换给持有对应专家的目标 GPU。
+
 2. **专家局部批量计算（Local Batched GEMM）**：
    - 经过 All-to-All 后，每张 GPU 收到了来自全网各卡、且指名由自身管辖专家计算的所有 Token。
    - GPU 将这些 Token 按本地专家索引分流聚类，调用 Grouped GEMM 连续执行前向推理。
+
 3. **结果汇聚送回阶段（Combine All-to-All）**：
    - 本地专家计算完毕后，产出的特征张量必须原路返回其“发源地”Rank！
    - 系统再次发射反向的 **All-to-All**，将特征向量送回原始 Token 所在的 GPU。
+
 4. **门控加权求和（Weighted Summation）**：
    - 原始 GPU 收到返回的 $K$ 个专家计算结果后，乘上第一步中留存的门控权重 $s_i(x)$，累加合并后输出，无缝接入下一层网络。
 
@@ -118,37 +118,39 @@ $$V_{\text{MoE\_Comm}} = 2 \times \underbrace{\text{Tokens}}_{\text{总数}} \ti
 
 - **木桶短板灾难（The Straggler Problem）**：
   若专家 0 接收到 10 倍于均值的 Token，则持有专家 0 的 GPU 计算耗时将飙升 10 倍。而在分布式执行中，第二阶段的 Combine All-to-All 必须等待最慢的卡算完才能汇聚！**单卡过载将拖垮整个万卡集群的时钟步长**。
+
 - **经典对抗方案**：
-  - **负载均衡辅助损失（Auxiliary Loss）**：在总损失中加入正则项 $\mathcal{L}_{\text{aux}} = \alpha E \sum_{i=1}^E f_i P_i$（$f_i$ 为路由频率，$P_i$ 为概率均值），惩罚扎堆现象。但强加 Aux Loss 往往会损伤模型的语言建模精度。
-  - **容量因子截断（Capacity Factor, CF）**：为每个专家设置缓冲上限 $C = \text{CF} \times \frac{K \cdot T}{E}$。超出上限的 Token 直接被强行丢弃（Drop Tokens）或旁路跳过。虽然保证了计算时间确定，但在推理和长推理时丢 Token 会引发严峻的幻觉。
+   - **负载均衡辅助损失（Auxiliary Loss）**：在总损失中加入正则项 $\mathcal{L}_{\text{aux}} = \alpha E \sum_{i=1}^E f_i P_i$（$f_i$ 为路由频率，$P_i$ 为概率均值），惩罚扎堆现象。但强加 Aux Loss 往往会损伤模型的语言建模精度。
+   - **容量因子截断（Capacity Factor, CF）**：为每个专家设置缓冲上限 $C = \text{CF} \times \frac{K \cdot T}{E}$。超出上限的 Token 直接被强行丢弃（Drop Tokens）或旁路跳过。虽然保证了计算时间确定，但在推理和长推理时丢 Token 会引发严峻的幻觉。
 
 ### 5. 架构革新：节点限制路由（Node-Limited Routing，DeepSeek-V3 核心发明）
 
 在大规模跨机训练中（如 2048 卡），全量 All-to-All 会对数据中心机间交换机网络造成近乎崩溃的横断面流量压力（East-West Bisection Bandwidth）。如果一个 Token 激活了 8 个专家，且这 8 个专家散落在 8 个不同的物理机柜中，该 Token 将产生 8 次跨机网络传输！
 
 DeepSeek-V3 提出了颠覆性的 **节点限制路由（Node-Limited Routing）**：
+
 - **核心约束**：在选择 Top-$K$（如 $K=8$）个专家时，强制施加硬件拓扑亲和性约束——**每个 Token 选出的所有专家，最多只能分布在 $M$ 个物理节点之内（例如 $M \le 4$）**。
 - **系统红利**：
-  - 路由选择被高概率锚定在机内（NVLink 域）或极少数跨机节点内。
-  - 极大地将跨节点 RDMA 网络通信流量截留或压缩了近 50%！
-  - 彻底规避了网络链路争抢和交换机拥塞，使万卡规模下的 EP 吞吐提升至前所未有的高度。
+   - 路由选择被高概率锚定在机内（NVLink 域）或极少数跨机节点内。
+   - 极大地将跨节点 RDMA 网络通信流量截留或压缩了近 50%！
+   - 彻底规避了网络链路争抢和交换机拥塞，使万卡规模下的 EP 吞吐提升至前所未有的高度。
 
 ## 具体演示与数值推演
 
 设集群规模为 2 张 GPU（Rank 0 与 Rank 1），模型共配置 4 个专家（每张卡部署 2 个专家：Rank 0 持有 Expert 0, 1；Rank 1 持有 Expert 2, 3）。总批次输入 16 个 Token：
 
 - **理想均匀路由分布（Balanced Routing）**：
-  - 4 个专家各分得 4 个 Token（即 `[4, 4, 4, 4]`）。
-  - Rank 0 的专家计算负载：$4 + 4 = 8$ 个 Token；
-  - Rank 1 的专家计算负载：$4 + 4 = 8$ 个 Token；
-  - **失衡比（Imbalance Ratio）**：$\frac{\max(8, 8)}{\text{mean}(8, 8)} = \frac{8}{8} = 1.00$（完美线性加速）。
+   - 4 个专家各分得 4 个 Token（即 `[4, 4, 4, 4]`）。
+   - Rank 0 的专家计算负载：$4 + 4 = 8$ 个 Token；
+   - Rank 1 的专家计算负载：$4 + 4 = 8$ 个 Token；
+   - **失衡比（Imbalance Ratio）**：$\frac{\max(8, 8)}{\text{mean}(8, 8)} = \frac{8}{8} = 1.00$（完美线性加速）。
 
 - **极端失衡路由分布（Skewed Routing）**：
-  - 专家 0 成为热门专家，分得 10 个 Token；其余专家分别分得 4, 4, 2 个 Token（即 `[10, 4, 4, 2]`）。
-  - Rank 0 的专家计算负载：$10 + 4 = 14$ 个 Token；
-  - Rank 1 的专家计算负载：$4 + 2 = 6$ 个 Token；
-  - **失衡比**：$\frac{\max(14, 6)}{\text{mean}(14, 6)} = \frac{14}{10} = 1.40$。
-  - **耗时推演**：由于跨卡 Combine All-to-All 必须等待 Rank 0 算完全部 14 个 Token，Rank 1 即使早已算完 6 个 Token 也必须在网络同步点挂起等待。整步耗时由 14 决定，硬件整体有效算力利用率暴跌至 $\frac{14 + 6}{2 \times 14} = \frac{20}{28} \approx 71.4\%$。
+   - 专家 0 成为热门专家，分得 10 个 Token；其余专家分别分得 4, 4, 2 个 Token（即 `[10, 4, 4, 2]`）。
+   - Rank 0 的专家计算负载：$10 + 4 = 14$ 个 Token；
+   - Rank 1 的专家计算负载：$4 + 2 = 6$ 个 Token；
+   - **失衡比**：$\frac{\max(14, 6)}{\text{mean}(14, 6)} = \frac{14}{10} = 1.40$。
+   - **耗时推演**：由于跨卡 Combine All-to-All 必须等待 Rank 0 算完全部 14 个 Token，Rank 1 即使早已算完 6 个 Token 也必须在网络同步点挂起等待。整步耗时由 14 决定，硬件整体有效算力利用率暴跌至 $\frac{14 + 6}{2 \times 14} = \frac{20}{28} \approx 71.4\%$。
 
 ## 代码填空题
 
@@ -163,7 +165,6 @@ def expert_to_rank(num_experts: int, experts_per_rank: int) -> dict[int, int]:
         mapping[e] = ______      # 填空：专家 e 所属的 rank
     return mapping
 
-
 def load_per_rank(tokens_per_expert: list[int], experts_per_rank: int) -> list[int]:
     """每 rank 的专家负载 = 其专家收到的 token 总数。"""
     num_experts = len(tokens_per_expert)
@@ -173,11 +174,9 @@ def load_per_rank(tokens_per_expert: list[int], experts_per_rank: int) -> list[i
         rank_load[r] += ______   # 填空：累加
     return rank_load
 
-
 def imbalance(loads: list[int]) -> float:
     """失衡比 = 最大负载 / 平均负载。"""
     return ______                # 填空
-
 
 def routing_volume(tokens_per_expert: list[int]) -> int:
     """
@@ -187,7 +186,6 @@ def routing_volume(tokens_per_expert: list[int]) -> int:
     这里先返回"被路由的 token 总数"作为上界，远程占比写在注释里。
     """
     return ______                # 填空
-
 
 if __name__ == "__main__":
     # 均匀路由：每专家 4 token
@@ -229,7 +227,6 @@ EP 的 all-to-all 通信发生在什么时机、传输什么数据？DeepSeek-V3
 - 把 EP 通信说成 all-reduce 权重同步（是 all-to-all 路由）。
 - 意识不到负载均衡问题及其与路由设计的耦合。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -244,7 +241,6 @@ def expert_to_rank(num_experts: int, experts_per_rank: int) -> dict[int, int]:
         mapping[e] = e // experts_per_rank      # 填空：专家 e 所属的 rank
     return mapping
 
-
 def load_per_rank(tokens_per_expert: list[int], experts_per_rank: int) -> list[int]:
     """每 rank 的专家负载 = 其专家收到的 token 总数。"""
     num_experts = len(tokens_per_expert)
@@ -254,13 +250,11 @@ def load_per_rank(tokens_per_expert: list[int], experts_per_rank: int) -> list[i
         rank_load[r] += tokens   # 填空：累加
     return rank_load
 
-
 def imbalance(loads: list[int]) -> float:
     """失衡比 = 最大负载 / 平均负载。"""
     if not loads or sum(loads) == 0:
         raise ValueError("loads must be non-empty with positive total")
     return max(loads) / (sum(loads) / len(loads))                # 填空
-
 
 def routing_volume(tokens_per_expert: list[int]) -> int:
     """
@@ -270,7 +264,6 @@ def routing_volume(tokens_per_expert: list[int]) -> int:
     这里先返回"被路由的 token 总数"作为上界，远程占比写在注释里。
     """
     return sum(tokens_per_expert)                # 填空
-
 
 if __name__ == "__main__":
     # 均匀路由：每专家 4 token
@@ -287,22 +280,18 @@ if __name__ == "__main__":
     print("专家映射示例:", expert_to_rank(256, 32))   # 每 rank 32 个专家
 ```
 
-
 ## 补全后的代码（关键填空处）
 
 ```python
 def expert_to_rank(num_experts, experts_per_rank):
     mapping[e] = e // experts_per_rank      # rank r 持有 [r*e, (r+1)*e)
 
-
 def load_per_rank(tokens_per_expert, experts_per_rank):
     rank_load[r] += tokens                  # 累加该 rank 所有专家的 token
-
 
 def imbalance(loads):
     mean = sum(loads) / len(loads)
     return max(loads) / mean
-
 
 def routing_volume(tokens_per_expert):
     return sum(tokens_per_expert)           # 全部被路由 token 的上界

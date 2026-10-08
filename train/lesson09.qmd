@@ -3,19 +3,14 @@ title: "第 9 课：流水线并行 PP"
 jupyter: python3
 ---
 
-
 ::: {.callout-note appearance="simple"}
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
-
-
 
 ::: {.callout-important title="统一完成标准与及格线"}
 代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、显存/通信公式中的单位与分片维度；未实际运行的内容只能标记为静态审查。
 
 :::
-
-
 
 - 对应官方章节：Pipeline Parallelism（AFAB、1F1B、Interleaving、Zero bubble & DualPipe）
 - 前置：第 2 课（激活）、第 3 课（P2P 通信）、第 5 课（与 ZeRO-3 的对比）
@@ -33,7 +28,6 @@ jupyter: python3
 
 ## 核心概念
 
-
 ### 核心操作与执行流程图解
 
 ::: {.img-card}
@@ -46,16 +40,16 @@ jupyter: python3
 <p class="caption">图 9-2：1F1B 调度器稳态执行与微批次（Micro-Batch）显存收敛机制（Anthropic 风格架构图）</p>
 :::
 
-
 ### 1. 流水线并行（PP）的核心本质与通信优势
 
 流水线并行（Pipeline Parallelism, PP）是超大规模深度学习训练中历史悠久且极为高效的模型并行范式。
 与张量并行（TP，在单个网络层内部切分矩阵）和数据并行/ZeRO（在样本 Batch 维度切分）截然不同，**PP 沿着模型的“深度方向（层数维度）”进行网络切分**：
+
 - 设模型共有 $L$ 个 Transformer Block，流水线并行度为 $p$。整个模型被切分为 $p$ 个连续的 Stage（阶段），分配给 $p$ 张独立的 GPU（或节点），每个 Stage 仅常驻持有 $\frac{L}{p}$ 层模型权重。
 - **点对点低带宽通信（P2P Communication）**：
-  - 数据的流转仅发生在相邻 Stage 之间（从 Stage $k$ 到 Stage $k+1$）。
-  - 在前向传播中，Stage $k$ 仅需将其最后一层的输出激活值 $(b, s, h)$ 发送给 Stage $k+1$；反向传播中，Stage $k+1$ 仅需将输入梯度反向传递给 Stage $k$。
-  - **关键优势**：通信仅发生在 Stage 边界，通信频次极低（每微批次仅 1 次 P2P 发送与接收）。相比 TP 动辄在单层内部发起 2 次跨卡阻塞式 AllReduce，PP 对网络带宽的要求大幅降低十余倍。因此，**流水线并行是跨物理节点（Cross-Node）进行模型切分扩展的首选利器**。
+   - 数据的流转仅发生在相邻 Stage 之间（从 Stage $k$ 到 Stage $k+1$）。
+   - 在前向传播中，Stage $k$ 仅需将其最后一层的输出激活值 $(b, s, h)$ 发送给 Stage $k+1$；反向传播中，Stage $k+1$ 仅需将输入梯度反向传递给 Stage $k$。
+   - **关键优势**：通信仅发生在 Stage 边界，通信频次极低（每微批次仅 1 次 P2P 发送与接收）。相比 TP 动辄在单层内部发起 2 次跨卡阻塞式 AllReduce，PP 对网络带宽的要求大幅降低十余倍。因此，**流水线并行是跨物理节点（Cross-Node）进行模型切分扩展的首选利器**。
 
 ### 2. 流水线气泡（Pipeline Bubble）的严格数学推导
 
@@ -64,18 +58,21 @@ jupyter: python3
 
 为了压制气泡，工程上将一个全局批次进一步切分为 $m$ 个微批次（Micro-Batches, MBS）。
 设单个微批次的前向计算时间为 $t_f$，反向计算时间为 $t_b \approx 2 t_f$：
+
 - **无等待的理想执行总时长**：
   若所有 GPU 的 Tensor Core 处于 100% 满载无空闲，总有效计算耗时为：
   $$T_{\text{ideal}} = m \times (t_f + t_b)$$
+
 - **气泡空闲时长的几何推导**：
-  - **预热气泡（Warmup Bubble）**：在流水线启动初期，Stage 0 正在计算第 1 个微批次的前向时，后续的 Stage 1 至 Stage $p-1$ 处于空闲状态。首个微批次传至 Stage $p-1$ 总共需要消耗 $(p-1) \times t_f$ 的空闲等待时间。
-  - **清空降温气泡（Cooldown Bubble）**：在流水线收尾阶段，当最后一个微批次的反向梯度从 Stage $p-1$ 逐步回传给 Stage 0 时，较深层次的 Stage 陆续结束计算进入空闲，累计产生 $(p-1) \times t_b$ 的空转等待。
-  - **总空闲气泡时长**：
+   - **预热气泡（Warmup Bubble）**：在流水线启动初期，Stage 0 正在计算第 1 个微批次的前向时，后续的 Stage 1 至 Stage $p-1$ 处于空闲状态。首个微批次传至 Stage $p-1$ 总共需要消耗 $(p-1) \times t_f$ 的空闲等待时间。
+   - **清空降温气泡（Cooldown Bubble）**：在流水线收尾阶段，当最后一个微批次的反向梯度从 Stage $p-1$ 逐步回传给 Stage 0 时，较深层次的 Stage 陆续结束计算进入空闲，累计产生 $(p-1) \times t_b$ 的空转等待。
+   - **总空闲气泡时长**：
     $$T_{\text{bubble}} = (p - 1) \times (t_f + t_b)$$
+
 - **气泡率计算（Bubble Ratio）**：
-  - 气泡相对理想计算时间的比率为：
+   - 气泡相对理想计算时间的比率为：
     $$r_{\text{bubble}} = \frac{T_{\text{bubble}}}{T_{\text{ideal}}} = \frac{(p - 1)(t_f + t_b)}{m(t_f + t_b)} = \frac{p - 1}{m}$$
-  - 气泡占整步墙钟时间（Wall-Clock Time）的实际比例为：
+   - 气泡占整步墙钟时间（Wall-Clock Time）的实际比例为：
     $$\eta_{\text{bubble}} = \frac{T_{\text{bubble}}}{T_{\text{ideal}} + T_{\text{bubble}}} = \frac{p - 1}{m + p - 1}$$
 
 如**图 9-1** 所示，气泡率完全由“流水线级数 $p$”与“微批次数 $m$”的比值决定。只要将微批次切得足够细（例如 $m \ge 4p$ 乃至 $m \ge 8p$），气泡占比就会迅速被稀释到 10% 以下。
@@ -83,25 +80,29 @@ jupyter: python3
 ### 3. AFAB（All-Forward-All-Backward）调度的显存爆炸缺陷
 
 在早期的 GPipe 调度中，采用的是 **AFAB（先执行完全部前向，再执行完全部反向）** 策略：
+
 - **执行逻辑**：Stage 0 连续发射 $m$ 个微批次的前向计算（$F_1, F_2, \dots, F_m$）；当所有前向数据流过流水线末端后，再倒序执行所有微批次的反向求导（$B_m, B_{m-1}, \dots, B_1$）。
 - **致命缺陷：激活显存失控**：
-  - 反向传播求导必须依赖前向时保存的中间激活值。
-  - 在 AFAB 下，第 1 个微批次 $F_1$ 产生的激活值，必须一直保留在 GPU 显存中，直到所有 $m$ 个前向全部算完、并且开始执行 $B_1$ 时才能被释放！
-  - 这导致每个 GPU 必须**同时在显存中驻留全部 $m$ 个微批次的中间激活**！
-  - **悖论爆发**：为了减小气泡率，工程师希望将 $m$ 设得尽可能大；然而 $m$ 越大，单卡显存中的激活积累就呈线性暴增，导致系统迅速遭遇 OOM 崩溃。AFAB 使得 PP 丧失了节省显存的意义。
+   - 反向传播求导必须依赖前向时保存的中间激活值。
+   - 在 AFAB 下，第 1 个微批次 $F_1$ 产生的激活值，必须一直保留在 GPU 显存中，直到所有 $m$ 个前向全部算完、并且开始执行 $B_1$ 时才能被释放！
+   - 这导致每个 GPU 必须**同时在显存中驻留全部 $m$ 个微批次的中间激活**！
+   - **悖论爆发**：为了减小气泡率，工程师希望将 $m$ 设得尽可能大；然而 $m$ 越大，单卡显存中的激活积累就呈线性暴增，导致系统迅速遭遇 OOM 崩溃。AFAB 使得 PP 丧失了节省显存的意义。
 
 ### 4. 1F1B 调度（One-Forward-One-Backward）：显存收敛机制
 
 为了斩断 $m$ 对激活显存的绑架，Megatron-LM 提出了划时代的 **1F1B 稳态调度算法**。
 
 如**图 9-2** 所示，1F1B 将每个 Stage 的生命周期清晰解耦为三个阶段：
+
 1. **预热阶段（Warmup）**：
    - 处于 Stage $k$ 的 GPU 首先连续执行若干个前向微批次，以确保流水线通道被数据填满。
    - 随着 Stage 深度递增，预热步数逐渐递减（Stage $k$ 预热 $p - 1 - k$ 步）。
+
 2. **稳态阶段（Steady State, 1F1B）**：
    - **核心设计**：GPU 每执行一个新微批次的前向计算（$F_i$），紧接着就必须执行一个最早就绪微批次的反向求导（$B_j$）。
    - **显存出入守恒**：$F_i$ 产生了一份新的微批次激活，但紧随其后的 $B_j$ **立即彻底消费并销毁了一份旧的微批次激活**！
    - 显存池中的活跃微批次数在整个稳态期间**恒定维持在 $p$ 份**，绝不随微批次总数 $m$ 的增加而上涨！
+
 3. **清空降温阶段（Cooldown）**：
    - 当所有前向微批次发射完毕后，GPU 连续计算剩余的反向求导，将显存中的剩余激活全部释放归零。
 
@@ -115,6 +116,7 @@ jupyter: python3
 - 微批次在物理卡环之间流动 $v$ 圈。每个子块的计算粒度缩小为原来的 $1/v$。
 - **气泡率倍数下降**：
   $$r_{\text{bubble}} = \frac{p - 1}{v \cdot m}$$
+
 - **代价权衡**：微批次在物理设备边界之间来回穿梭的次数增加了 $v$ 倍，点对点通信总量相应扩大至 $v$ 倍。要求机间网络具备足够高的带宽支持。
 
 ### 6. 前沿调度革新：Zero-Bubble (ZB) 与 DualPipe（DeepSeek-V3 核心）
@@ -123,12 +125,16 @@ jupyter: python3
 
 #### A. 梯度计算拆分（B/W Separation）与 Zero-Bubble (ZB)
 传统调度将反向传播视为一个不可分割的整体算子 $B$。但现代编译原理揭示反向传播在底层严格包含两个无数据依赖的独立矩阵乘：
+
 1. **$B$ 算子（Activation Gradient，激活梯度）**：计算 $\frac{\partial \mathcal{L}}{\partial X_{\text{in}}} = \frac{\partial \mathcal{L}}{\partial X_{\text{out}}} \cdot W^T$。它必须严格按反向顺序立即传给上一层 Stage，位于流水线关键路径上。
+
 2. **$W$ 算子（Weight Gradient，权重梯度）**：计算 $\frac{\partial \mathcal{L}}{\partial W} = X_{\text{in}}^T \cdot \frac{\partial \mathcal{L}}{\partial X_{\text{out}}}$。它仅用于在 Step 末尾更新本地权重，**对后续各层前向/反向的数据流向毫无依赖**！
+
 - **Zero-Bubble 调度思想**：将 $W$ 的计算从反向关键路径上完全剥离，将其作为“填充物”延迟调度插进 Warmup 和 Cooldown 期间原本彻底闲置的气泡时间槽中，使硬件利用率逼近理论极限（Bubble $\approx 0$）。
 
 #### B. DualPipe 双向双流调度（DeepSeek-V3）
 DeepSeek-V3 在极低通信预算下实现了超大规模流水线并行，其核心正是 **DualPipe**：
+
 - 在物理流水线两端**同时注入两个相反方向的微批次数据流**（正向流从 Stage 0 向右推，反向流从 Stage $p-1$ 向左推）。
 - 巧妙将 Forward、Backward $B$、Backward $W$ 以及跨机通信交织排布，用相反方向计算互相填补对方的气泡，最终在万卡集群上实现了“近乎零气泡与零显存额外膨胀”的工程奇迹。
 
@@ -151,21 +157,21 @@ DeepSeek-V3 在极低通信预算下实现了超大规模流水线并行，其�
   若不进行微批次划分（$m=1$），总耗时为 $p \times (t_f + t_b) = 4 \times 3 t_f = 12 t_f$。有效计算仅为 $3 t_f$，气泡时间高达 $9 t_f$，算力有效率仅 $25\%$。
 
 - **标准 1F1B 调度（1F1B Schedule）**：
-  - 理想无气泡计算时长：
+   - 理想无气泡计算时长：
     $$T_{\text{ideal}} = 8 \times (t_f + 2t_f) = 24 t_f$$
-  - 空转气泡时长：
+   - 空转气泡时长：
     $$T_{\text{bubble}} = (4 - 1) \times (t_f + 2t_f) = 3 \times 3 t_f = 9 t_f$$
-  - 气泡相对理想时间的比率（教材标准度量）：
+   - 气泡相对理想时间的比率（教材标准度量）：
     $$r_{\text{bubble}} = \frac{p - 1}{m} = \frac{4 - 1}{8} = \frac{3}{8} = 37.5\%$$
-  - 气泡占实际总运行时间的比例：
+   - 气泡占实际总运行时间的比例：
     $$\eta_{\text{bubble}} = \frac{9 t_f}{24 t_f + 9 t_f} = \frac{9}{33} \approx 27.27\%$$
 
 - **引入交错分片（Interleaved 1F1B, $v=2$）**：
-  - 气泡相对比率直接减半：
+   - 气泡相对比率直接减半：
     $$r_{\text{bubble}} = \frac{p - 1}{v \cdot m} = \frac{3}{2 \times 8} = \frac{3}{16} = 18.75\%$$
-  - 实际气泡墙钟占比降至：
+   - 实际气泡墙钟占比降至：
     $$\eta_{\text{bubble}} = \frac{3}{16 + 3} = \frac{3}{19} \approx 15.79\%$$
-  - **显存与扩展性印证**：在 1F1B 调度下，单卡最大激活驻留量被严格锁定在 $p=4$ 个微批次之内。当微批次扩大至 $m=32$ 时，气泡占比降至 $\approx 8.5\%$，跨节点集群效率达到最佳工业甜蜜点。
+   - **显存与扩展性印证**：在 1F1B 调度下，单卡最大激活驻留量被严格锁定在 $p=4$ 个微批次之内。当微批次扩大至 $m=32$ 时，气泡占比降至 $\approx 8.5\%$，跨节点集群效率达到最佳工业甜蜜点。
 
 ## 代码填空题
 
@@ -188,7 +194,6 @@ def bubble_ratio(scheme: str, p: int, m: int, v: int = 1) -> float:
     if scheme == "interleaved":
         return ______          # 填空
     raise ValueError(scheme)
-
 
 def afab_schedule(p: int, m: int, tf: int = 1, tb: int = 1) -> list[list[int]]:
     """
@@ -213,13 +218,11 @@ def afab_schedule(p: int, m: int, tf: int = 1, tb: int = 1) -> list[list[int]]:
                 busy[i][t_b + u] = 1
     return busy
 
-
 def idle_fraction(busy: list[list[int]]) -> float:
     """空闲槽位占比。"""
     total = sum(len(row) for row in busy)
     work = sum(sum(row) for row in busy)
     return ______                            # 填空
-
 
 if __name__ == "__main__":
     p, m = 4, 8
@@ -264,7 +267,6 @@ zero bubble 的核心观察是什么？为什么 backward 中 W（权重梯度�
 - 把 zero bubble 说成"消除了通信"（消除的是 bubble 空闲）。
 - 认为 PP 会降低激活显存（PP 按层分片，激活不省）。
 
-
 ::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
 ## 参考答案（仅 answer 分支）
 
@@ -287,7 +289,6 @@ def bubble_ratio(scheme: str, p: int, m: int, v: int = 1) -> float:
     if scheme == "interleaved":
         return (p - 1) / (v * m)          # 填空
     raise ValueError(scheme)
-
 
 def afab_schedule(p: int, m: int, tf: int = 1, tb: int = 1) -> list[list[int]]:
     """
@@ -312,13 +313,11 @@ def afab_schedule(p: int, m: int, tf: int = 1, tb: int = 1) -> list[list[int]]:
                 busy[i][t_b + u] = 1
     return busy
 
-
 def idle_fraction(busy: list[list[int]]) -> float:
     """空闲槽位占比。"""
     total = sum(len(row) for row in busy)
     work = sum(sum(row) for row in busy)
     return (total - work) / total                            # 填空
-
 
 if __name__ == "__main__":
     p, m = 4, 8
@@ -336,7 +335,6 @@ if __name__ == "__main__":
     print("m=32:", f"{bubble_ratio('1f1b', 8, 32):.3f}")
     print("v=2 interleaved, m=32:", f"{bubble_ratio('interleaved', 8, 32, 2):.3f}")
 ```
-
 
 ## 补全后的代码（关键填空处）
 
