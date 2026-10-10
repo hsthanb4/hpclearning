@@ -481,7 +481,6 @@ window.Quarto = {
   <li><a href="#与既有六条主线的边界" id="toc-与既有六条主线的边界" class="nav-link" data-scroll-target="#与既有六条主线的边界">与既有六条主线的边界</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -544,8 +543,22 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在万卡级大模型分布式训练（如 405B 参数量级）与海量多模态数据处理集群中，存储与 IO 子系统面临两大极其苛刻的性能与稳定性挑战：</p>
+<ol type="1">
+<li><p><strong>千亿大模型超大 Checkpoint 突发与训练停顿气泡（Checkpoint IO Bubble）</strong>：<br>
+对于一个 405B 参数的大模型，全量训练状态包括 FP16 模型权重、FP32 主权重、Adam 动量与二阶方差矩、优化器状态与学习率调度器状态，单次 Checkpoint 物理体积高达 <span class="math inline">\(3\sim 5\text{ TB}\)</span> 甚至更多。若采用传统的全局同步阻塞保存方式，全集群成千上万张 GPU 必须全部挂起等待磁盘写入完成，单次保存耗时可达数十分钟，导致数以千计的昂贵 GPU 在 10%～30% 的时间里处于纯等待的“存储气泡”中。此外，数千个 Rank 在整点时刻同时向存储发起写入，瞬时聚合写带宽洪峰会瞬间击穿分布式存储的交换机与网络端口。</p></li>
+<li><p><strong>海量样本训练数据的元数据雪崩与吞吐饥饿</strong>：<br>
+TB 至 PB 级的预训练与多模态语料库若以未经打包的零散小文件形式存放，并发读取将引发每秒数万次的元数据检索请求，直接压垮中央存储元数据服务，导致 GPU 算力因数据供给不及时而陷入长期饥饿。</p></li>
+</ol>
+<p>本课通过解析现代 AI 基础设施的五级存储金字塔（如图 3-1 所示），建立“GPU 显存快照 <span class="math inline">\(\rightarrow\)</span> Host RAM 缓冲 <span class="math inline">\(\rightarrow\)</span> 本地 NVMe 暂存 <span class="math inline">\(\rightarrow\)</span> 中央持久对象存储”的多级非阻塞异步 Checkpoint 架构（如图 3-2 所示），将训练阻断时间从几十分钟骤降至秒级。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<section id="五级存储金字塔与跨层级带宽断层" class="level4">
+<h4 class="anchored" data-anchor-id="五级存储金字塔与跨层级带宽断层">(1) 五级存储金字塔与跨层级带宽断层</h4>
+<p>如图 3-1 所示，现代超算存储架构呈现出严密的五级金字塔分层：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -565,6 +578,17 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 3-1：大模型集群五级存储金字塔层次与带宽特性</em>
 </p>
+<ul>
+<li><strong>L1：GPU 显存（HBM3e）</strong>：单卡带宽高达 <span class="math inline">\(3\sim 8\text{ TB/s}\)</span>，但容量昂贵且受限（80～144 GB），专供 SM 计算核心以纳秒级延迟高频访存；</li>
+<li><strong>L2：Host 主内存（DDR5 RAM）</strong>：单节点带宽 <span class="math inline">\(200\sim 400\text{ GB/s}\)</span>，容量达数 TB，作为 CPU 与 GPU 之间的高速弹性缓冲垫（Bounce Buffer）；</li>
+<li><strong>L3：节点本地 NVMe SSD</strong>：单节点通过 PCIe Gen5 x4 / NVMe 阵列提供 <span class="math inline">\(10\sim 50\text{ GB/s}\)</span> 的本地顺序写带宽与超高 IOPS，容量达数十 TB，具备低时延并发暂存能力；</li>
+<li><strong>L4：共享并行分布式文件系统（如 Lustre / GPFS / WekaFS / JuiceFS）</strong>：提供集群全局统一的 POSIX 命名空间，单节点接入带宽通常为 <span class="math inline">\(1\sim 10\text{ GB/s}\)</span>，集群聚合带宽可达数 TB/s；</li>
+<li><strong>L5：冷数据归档对象存储（如 S3 / Ceph / OSS）</strong>：单节点访问延迟较高（<span class="math inline">\(10\sim 50\text{ ms}\)</span>），但提供跨数据中心、高持久性（11 个 9）且成本极其低廉的弹性无限容量。</li>
+</ul>
+</section>
+<section id="多级非阻塞异步-checkpoint-保存流水线" class="level4">
+<h4 class="anchored" data-anchor-id="多级非阻塞异步-checkpoint-保存流水线">(2) 多级非阻塞异步 Checkpoint 保存流水线</h4>
+<p>如图 3-2 所示，为消除显卡保存 Checkpoint 时的阻塞停顿，工业界采用多级流水线解耦计算与存储持久化：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -584,34 +608,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 3-2：非阻塞异步多级 Checkpoint 保存流水线与持久化工作流</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在万卡级大模型分布式训练（如 405B 参数量级）与海量多模态数据处理集群中，存储与 IO 子系统面临两大极其苛刻的性能与稳定性挑战：</p>
-<ol type="1">
-<li><p><strong>千亿大模型超大 Checkpoint 突发与训练停顿气泡（Checkpoint IO Bubble）</strong>：<br>
-对于一个 405B 参数的大模型，全量训练状态包括 FP16 模型权重、FP32 主权重、Adam 动量与二阶方差矩、优化器状态与学习率调度器状态，单次 Checkpoint 物理体积高达 <span class="math inline">\(3\sim 5\text{ TB}\)</span> 甚至更多。若采用传统的全局同步阻塞保存方式，全集群成千上万张 GPU 必须全部挂起等待磁盘写入完成，单次保存耗时可达数十分钟，导致数以千计的昂贵 GPU 在 10%～30% 的时间里处于纯等待的“存储气泡”中。此外，数千个 Rank 在整点时刻同时向存储发起写入，瞬时聚合写带宽洪峰会瞬间击穿分布式存储的交换机与网络端口。</p></li>
-<li><p><strong>海量样本训练数据的元数据雪崩与吞吐饥饿</strong>：<br>
-TB 至 PB 级的预训练与多模态语料库若以未经打包的零散小文件形式存放，并发读取将引发每秒数万次的元数据检索请求，直接压垮中央存储元数据服务，导致 GPU 算力因数据供给不及时而陷入长期饥饿。</p></li>
-</ol>
-<p>本课通过解析现代 AI 基础设施的五级存储金字塔（如图 3-1 所示），建立“GPU 显存快照 <span class="math inline">\(\rightarrow\)</span> Host RAM 缓冲 <span class="math inline">\(\rightarrow\)</span> 本地 NVMe 暂存 <span class="math inline">\(\rightarrow\)</span> 中央持久对象存储”的多级非阻塞异步 Checkpoint 架构（如图 3-2 所示），将训练阻断时间从几十分钟骤降至秒级。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<section id="五级存储金字塔与跨层级带宽断层" class="level4">
-<h4 class="anchored" data-anchor-id="五级存储金字塔与跨层级带宽断层">(1) 五级存储金字塔与跨层级带宽断层</h4>
-<p>如图 3-1 所示，现代超算存储架构呈现出严密的五级金字塔分层：</p>
-<ul>
-<li><strong>L1：GPU 显存（HBM3e）</strong>：单卡带宽高达 <span class="math inline">\(3\sim 8\text{ TB/s}\)</span>，但容量昂贵且受限（80～144 GB），专供 SM 计算核心以纳秒级延迟高频访存；</li>
-<li><strong>L2：Host 主内存（DDR5 RAM）</strong>：单节点带宽 <span class="math inline">\(200\sim 400\text{ GB/s}\)</span>，容量达数 TB，作为 CPU 与 GPU 之间的高速弹性缓冲垫（Bounce Buffer）；</li>
-<li><strong>L3：节点本地 NVMe SSD</strong>：单节点通过 PCIe Gen5 x4 / NVMe 阵列提供 <span class="math inline">\(10\sim 50\text{ GB/s}\)</span> 的本地顺序写带宽与超高 IOPS，容量达数十 TB，具备低时延并发暂存能力；</li>
-<li><strong>L4：共享并行分布式文件系统（如 Lustre / GPFS / WekaFS / JuiceFS）</strong>：提供集群全局统一的 POSIX 命名空间，单节点接入带宽通常为 <span class="math inline">\(1\sim 10\text{ GB/s}\)</span>，集群聚合带宽可达数 TB/s；</li>
-<li><strong>L5：冷数据归档对象存储（如 S3 / Ceph / OSS）</strong>：单节点访问延迟较高（<span class="math inline">\(10\sim 50\text{ ms}\)</span>），但提供跨数据中心、高持久性（11 个 9）且成本极其低廉的弹性无限容量。</li>
-</ul>
-</section>
-<section id="多级非阻塞异步-checkpoint-保存流水线" class="level4">
-<h4 class="anchored" data-anchor-id="多级非阻塞异步-checkpoint-保存流水线">(2) 多级非阻塞异步 Checkpoint 保存流水线</h4>
-<p>如图 3-2 所示，为消除显卡保存 Checkpoint 时的阻塞停顿，工业界采用多级流水线解耦计算与存储持久化：</p>
 <ol type="1">
 <li><p><strong>步骤 1：显存快照同步转储（In-Memory Snapshot，耗时 <span class="math inline">\(\sim 1\)</span> 秒）</strong><br>
 当到达 Checkpoint 保存步数时，主计算流暂停，利用高带宽 PCIe Gen5 D2H 通道（单机聚合可达数代总线带宽），将当前迭代步的权重与优化器状态以只读内存快照形式瞬间拷贝至 Host DDR5 内存中。</p></li>
@@ -665,7 +661,7 @@ GDS 利用 PCIe 直通绕过 CPU，在大块（<span class="math inline">\(\ge 1
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 checkpoint 写入时间与周期内最低平均带宽。</p>
 <p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
-<div id="2e7b3dda" class="cell" data-course_role="exercise">
+<div id="30c8310c" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> checkpoint_io(checkpoint_bytes, backend_Bps, write_amplification, interval_s):</span>
@@ -723,7 +719,7 @@ GDS 利用 PCIe 直通绕过 CPU，在大块（<span class="math inline">\(\ge 1
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先独立完成。核对后请改变一个规模或故障条件重新推演。</p>
-<div id="b14b48a9" class="cell" data-course_role="solution">
+<div id="f23afdf4" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> checkpoint_io(checkpoint_bytes, backend_Bps, write_amplification, interval_s):</span>
@@ -1272,53 +1268,53 @@ GDS 利用 PCIe 直通绕过 CPU，在大块（<span class="math inline">\(\ge 1
 <span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>    L1[<span class="ot">"</span><span class="st">GPU 显存 (HBM3e: 3~8 TB/s)</span><span class="ot">"</span>] --&gt; L2[<span class="ot">"</span><span class="st">Host 内存 (DDR5: 200~400 GB/s)</span><span class="ot">"</span>]</span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>    L2 --&gt; L3[<span class="ot">"</span><span class="st">节点本地 NVMe SSD (PCIe Gen5: 10~50 GB/s)</span><span class="ot">"</span>]</span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>    L3 --&gt; L4[<span class="ot">"</span><span class="st">共享并行分布式存储 (Lustre / GPFS / JuiceFS: 1~10 GB/s)</span><span class="ot">"</span>]</span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>    L4 --&gt; L5[<span class="ot">"</span><span class="st">冷数据归档对象存储 (S3 / OSS: 0.1~1 GB/s)</span><span class="ot">"</span>]</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：大模型集群五级存储金字塔层次与带宽特性<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>    Trigger[<span class="ot">"</span><span class="st">触发 Checkpoint 存档</span><span class="ot">"</span>] --&gt; DumpMem[<span class="ot">"</span><span class="st">步骤 1: 内存级快照 (GPU -&gt; CPU RAM, ~1秒)</span><span class="ot">"</span>]</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>    DumpMem --&gt; ResumeTrain[<span class="ot">"</span><span class="st">立即恢复训练正反向计算，训练零气泡阻塞</span><span class="ot">"</span>]</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    DumpMem --&gt; AsyncDisk[<span class="ot">"</span><span class="st">步骤 2: 后台后台线程异步将 RAM 刷写至本地 NVMe</span><span class="ot">"</span>]</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    AsyncDisk --&gt; AsyncRemote[<span class="ot">"</span><span class="st">步骤 3: 异步流式上传至中央共享对象存储</span><span class="ot">"</span>]</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：非阻塞异步多级 Checkpoint 保存流水线与持久化工作流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>在万卡级大模型分布式训练（如 405B 参数量级）与海量多模态数据处理集群中，存储与 IO 子系统面临两大极其苛刻的性能与稳定性挑战：</span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**千亿大模型超大 Checkpoint 突发与训练停顿气泡（Checkpoint IO Bubble）**：  </span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>   对于一个 405B 参数的大模型，全量训练状态包括 FP16 模型权重、FP32 主权重、Adam 动量与二阶方差矩、优化器状态与学习率调度器状态，单次 Checkpoint 物理体积高达 $3\sim 5\text{ TB}$ 甚至更多。若采用传统的全局同步阻塞保存方式，全集群成千上万张 GPU 必须全部挂起等待磁盘写入完成，单次保存耗时可达数十分钟，导致数以千计的昂贵 GPU 在 10%～30% 的时间里处于纯等待的“存储气泡”中。此外，数千个 Rank 在整点时刻同时向存储发起写入，瞬时聚合写带宽洪峰会瞬间击穿分布式存储的交换机与网络端口。</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**海量样本训练数据的元数据雪崩与吞吐饥饿**：  </span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>   TB 至 PB 级的预训练与多模态语料库若以未经打包的零散小文件形式存放，并发读取将引发每秒数万次的元数据检索请求，直接压垮中央存储元数据服务，导致 GPU 算力因数据供给不及时而陷入长期饥饿。</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>本课通过解析现代 AI 基础设施的五级存储金字塔（如图 3-1 所示），建立“GPU 显存快照 $\rightarrow$ Host RAM 缓冲 $\rightarrow$ 本地 NVMe 暂存 $\rightarrow$ 中央持久对象存储”的多级非阻塞异步 Checkpoint 架构（如图 3-2 所示），将训练阻断时间从几十分钟骤降至秒级。</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>在万卡级大模型分布式训练（如 405B 参数量级）与海量多模态数据处理集群中，存储与 IO 子系统面临两大极其苛刻的性能与稳定性挑战：</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**千亿大模型超大 Checkpoint 突发与训练停顿气泡（Checkpoint IO Bubble）**：  </span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>   对于一个 405B 参数的大模型，全量训练状态包括 FP16 模型权重、FP32 主权重、Adam 动量与二阶方差矩、优化器状态与学习率调度器状态，单次 Checkpoint 物理体积高达 $3\sim 5\text{ TB}$ 甚至更多。若采用传统的全局同步阻塞保存方式，全集群成千上万张 GPU 必须全部挂起等待磁盘写入完成，单次保存耗时可达数十分钟，导致数以千计的昂贵 GPU 在 10%～30% 的时间里处于纯等待的“存储气泡”中。此外，数千个 Rank 在整点时刻同时向存储发起写入，瞬时聚合写带宽洪峰会瞬间击穿分布式存储的交换机与网络端口。</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**海量样本训练数据的元数据雪崩与吞吐饥饿**：  </span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>   TB 至 PB 级的预训练与多模态语料库若以未经打包的零散小文件形式存放，并发读取将引发每秒数万次的元数据检索请求，直接压垮中央存储元数据服务，导致 GPU 算力因数据供给不及时而陷入长期饥饿。</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>本课通过解析现代 AI 基础设施的五级存储金字塔（如图 3-1 所示），建立“GPU 显存快照 $\rightarrow$ Host RAM 缓冲 $\rightarrow$ 本地 NVMe 暂存 $\rightarrow$ 中央持久对象存储”的多级非阻塞异步 Checkpoint 架构（如图 3-2 所示），将训练阻断时间从几十分钟骤降至秒级。</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 五级存储金字塔与跨层级带宽断层</span></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>如图 3-1 所示，现代超算存储架构呈现出严密的五级金字塔分层：</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    L1[<span class="ot">"</span><span class="st">GPU 显存 (HBM3e: 3~8 TB/s)</span><span class="ot">"</span>] --&gt; L2[<span class="ot">"</span><span class="st">Host 内存 (DDR5: 200~400 GB/s)</span><span class="ot">"</span>]</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    L2 --&gt; L3[<span class="ot">"</span><span class="st">节点本地 NVMe SSD (PCIe Gen5: 10~50 GB/s)</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    L3 --&gt; L4[<span class="ot">"</span><span class="st">共享并行分布式存储 (Lustre / GPFS / JuiceFS: 1~10 GB/s)</span><span class="ot">"</span>]</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    L4 --&gt; L5[<span class="ot">"</span><span class="st">冷数据归档对象存储 (S3 / OSS: 0.1~1 GB/s)</span><span class="ot">"</span>]</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：大模型集群五级存储金字塔层次与带宽特性<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L1：GPU 显存（HBM3e）**：单卡带宽高达 $3\sim 8\text{ TB/s}$，但容量昂贵且受限（80～144 GB），专供 SM 计算核心以纳秒级延迟高频访存；</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L2：Host 主内存（DDR5 RAM）**：单节点带宽 $200\sim 400\text{ GB/s}$，容量达数 TB，作为 CPU 与 GPU 之间的高速弹性缓冲垫（Bounce Buffer）；</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L3：节点本地 NVMe SSD**：单节点通过 PCIe Gen5 x4 / NVMe 阵列提供 $10\sim 50\text{ GB/s}$ 的本地顺序写带宽与超高 IOPS，容量达数十 TB，具备低时延并发暂存能力；</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L4：共享并行分布式文件系统（如 Lustre / GPFS / WekaFS / JuiceFS）**：提供集群全局统一的 POSIX 命名空间，单节点接入带宽通常为 $1\sim 10\text{ GB/s}$，集群聚合带宽可达数 TB/s；</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L5：冷数据归档对象存储（如 S3 / Ceph / OSS）**：单节点访问延迟较高（$10\sim 50\text{ ms}$），但提供跨数据中心、高持久性（11 个 9）且成本极其低廉的弹性无限容量。</span>
 <span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 多级非阻塞异步 Checkpoint 保存流水线</span></span>
 <span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 五级存储金字塔与跨层级带宽断层</span></span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>如图 3-2 所示，为消除显卡保存 Checkpoint 时的阻塞停顿，工业界采用多级流水线解耦计算与存储持久化：</span>
 <span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>如图 3-1 所示，现代超算存储架构呈现出严密的五级金字塔分层：</span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L1：GPU 显存（HBM3e）**：单卡带宽高达 $3\sim 8\text{ TB/s}$，但容量昂贵且受限（80～144 GB），专供 SM 计算核心以纳秒级延迟高频访存；</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L2：Host 主内存（DDR5 RAM）**：单节点带宽 $200\sim 400\text{ GB/s}$，容量达数 TB，作为 CPU 与 GPU 之间的高速弹性缓冲垫（Bounce Buffer）；</span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L3：节点本地 NVMe SSD**：单节点通过 PCIe Gen5 x4 / NVMe 阵列提供 $10\sim 50\text{ GB/s}$ 的本地顺序写带宽与超高 IOPS，容量达数十 TB，具备低时延并发暂存能力；</span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L4：共享并行分布式文件系统（如 Lustre / GPFS / WekaFS / JuiceFS）**：提供集群全局统一的 POSIX 命名空间，单节点接入带宽通常为 $1\sim 10\text{ GB/s}$，集群聚合带宽可达数 TB/s；</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**L5：冷数据归档对象存储（如 S3 / Ceph / OSS）**：单节点访问延迟较高（$10\sim 50\text{ ms}$），但提供跨数据中心、高持久性（11 个 9）且成本极其低廉的弹性无限容量。</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 多级非阻塞异步 Checkpoint 保存流水线</span></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>如图 3-2 所示，为消除显卡保存 Checkpoint 时的阻塞停顿，工业界采用多级流水线解耦计算与存储持久化：</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>    Trigger[<span class="ot">"</span><span class="st">触发 Checkpoint 存档</span><span class="ot">"</span>] --&gt; DumpMem[<span class="ot">"</span><span class="st">步骤 1: 内存级快照 (GPU -&gt; CPU RAM, ~1秒)</span><span class="ot">"</span>]</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>    DumpMem --&gt; ResumeTrain[<span class="ot">"</span><span class="st">立即恢复训练正反向计算，训练零气泡阻塞</span><span class="ot">"</span>]</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>    DumpMem --&gt; AsyncDisk[<span class="ot">"</span><span class="st">步骤 2: 后台后台线程异步将 RAM 刷写至本地 NVMe</span><span class="ot">"</span>]</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>    AsyncDisk --&gt; AsyncRemote[<span class="ot">"</span><span class="st">步骤 3: 异步流式上传至中央共享对象存储</span><span class="ot">"</span>]</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：非阻塞异步多级 Checkpoint 保存流水线与持久化工作流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**步骤 1：显存快照同步转储（In-Memory Snapshot，耗时 $\sim 1$ 秒）**  </span>
 <span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>   当到达 Checkpoint 保存步数时，主计算流暂停，利用高带宽 PCIe Gen5 D2H 通道（单机聚合可达数代总线带宽），将当前迭代步的权重与优化器状态以只读内存快照形式瞬间拷贝至 Host DDR5 内存中。</span>

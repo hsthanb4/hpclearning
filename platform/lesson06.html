@@ -481,7 +481,6 @@ window.Quarto = {
   <li><a href="#与既有六条主线的边界" id="toc-与既有六条主线的边界" class="nav-link" data-scroll-target="#与既有六条主线的边界">与既有六条主线的边界</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -544,8 +543,23 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在多团队共享的大规模企业级 AI 算力中心（通常汇聚数百至数千张高端 GPU，单卡硬件与能耗成本极高），平台运营与调度系统面临着三大核心诉求的激烈博弈：</p>
+<ol type="1">
+<li><p><strong>多租户保底配额与商业公平性（Guaranteed Quota &amp; Tenancy Isolation）</strong>：<br>
+团队 A 采购了 400 张 GPU，团队 B 采购了 400 张 GPU。平台必须确保任何团队随时都能兑现其购买的“保证配额（Guaranteed Quota）”，杜绝因某一团队恶意突发提交上千任务而将其他团队完全挤占；同时，在某些团队配额闲置时，应允许其他团队弹性突发超售（Elastic Bursting / Oversubscription）借用，极大化集群资产的投资回报率（ROI，如图 6-1 所示）。</p></li>
+<li><p><strong>多维异构资源的瓶颈均衡（Multi-Resource Fair Allocation）</strong>：<br>
+大模型端到端工作流不仅需要 GPU，还重度消耗 CPU 核心（负责数据解压、Tokenization 与分词）、Host 内存（用于显存溢出与 Page Cache）、以及 RDMA 网络带宽。传统单一维度的配额无法解决“CPU 被打满而 GPU 闲置”的资源倾斜，需要引入主导资源公平调度算法（Dominant Resource Fairness, DRF）。</p></li>
+<li><p><strong>高优先级大作业等待与算力空洞（The Reservation vs.&nbsp;Utilization Dilemma）</strong>：<br>
+当一个千亿大模型训练任务（如申请 64 卡或 512 卡）到达队首时，当前集群仅有部分卡空闲（例如 8 张卡空闲，其余 56 张卡需等待 30 分钟后正在运行的前序任务释放）。若为了等待该大任务而将这 8 张卡完全闲置 30 分钟，集群利用率将发生断崖式下跌；若直接把这 8 张卡分配给一个运行 10 小时的普通长任务，大任务的启动时刻将被严重延误！</p></li>
+</ol>
+<p><strong>回填调度（Backfill Scheduling）</strong>通过计算确定性的“保留时间窗口（Reservation Window）”，利用时间与空间维度上的缝隙，精准调度短小作业填充算力空洞（如图 6-2 所示），在零推迟大作业启动的前提下最大化集群利用率。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<section id="多租户配额模型与主导资源公平drf如图-6-1-所示" class="level4">
+<h4 class="anchored" data-anchor-id="多租户配额模型与主导资源公平drf如图-6-1-所示">(1) 多租户配额模型与主导资源公平（DRF，如图 6-1 所示）</h4>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -570,6 +584,17 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 6-1：多租户配额保障、弹性突发超售与 DRF 资源公平模型</em>
 </p>
+<ul>
+<li><p><strong>分层配额池设计（Hierarchical Quota Pools）</strong>：<br>
+平台将物理卡池划分为“保证配额（Guaranteed）”与“共享突发池（Shared Elastic Pool）”。租户在保证限额内提交的任务享有最高优先级；超出保证限额的任务只能作为“可抢占突发任务（Preemptible Burst Jobs）”在共享池中运行。一旦保证配额的合法持有者提交新作业，突发任务将被优雅回收退让。</p></li>
+<li><p><strong>主导资源公平算法（Dominant Resource Fairness, DRF）</strong>：<br>
+设集群总资源向量为 <span class="math inline">\(\mathbf{R} = \langle R_{\text{GPU}}, R_{\text{CPU}}, R_{\text{Mem}} \rangle\)</span>。<br>
+对于租户 <span class="math inline">\(i\)</span>，其当前已占用的资源向量为 <span class="math inline">\(\mathbf{U}_i = \langle U_{i,\text{GPU}}, U_{i,\text{CPU}}, U_{i,\text{Mem}} \rangle\)</span>。<br>
+租户 <span class="math inline">\(i\)</span> 的<strong>主导资源份额（Dominant Share）</strong>定义为其占全集群比例最高的那项资源的份额： <span class="math display">\[s_i = \max \left( \frac{U_{i,\text{GPU}}}{R_{\text{GPU}}}, \frac{U_{i,\text{CPU}}}{R_{\text{CPU}}}, \frac{U_{i,\text{Mem}}}{R_{\text{Mem}}} \right)\]</span> 调度器在每一轮调度中，始终优先为当前主导份额 <span class="math inline">\(s_i\)</span> 最小的租户分发资源，从而在多维异构环境下严格实现帕累托最优与无嫉妒性（Envy-Freeness）。</p></li>
+</ul>
+</section>
+<section id="回填调度算法与保留时间窗口填充backfill-scheduling如图-6-2-所示" class="level4">
+<h4 class="anchored" data-anchor-id="回填调度算法与保留时间窗口填充backfill-scheduling如图-6-2-所示">(2) 回填调度算法与保留时间窗口填充（Backfill Scheduling，如图 6-2 所示）</h4>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -590,35 +615,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 6-2：回填调度 (Backfill Scheduling) 与保留时间窗口填充工作流</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在多团队共享的大规模企业级 AI 算力中心（通常汇聚数百至数千张高端 GPU，单卡硬件与能耗成本极高），平台运营与调度系统面临着三大核心诉求的激烈博弈：</p>
-<ol type="1">
-<li><p><strong>多租户保底配额与商业公平性（Guaranteed Quota &amp; Tenancy Isolation）</strong>：<br>
-团队 A 采购了 400 张 GPU，团队 B 采购了 400 张 GPU。平台必须确保任何团队随时都能兑现其购买的“保证配额（Guaranteed Quota）”，杜绝因某一团队恶意突发提交上千任务而将其他团队完全挤占；同时，在某些团队配额闲置时，应允许其他团队弹性突发超售（Elastic Bursting / Oversubscription）借用，极大化集群资产的投资回报率（ROI，如图 6-1 所示）。</p></li>
-<li><p><strong>多维异构资源的瓶颈均衡（Multi-Resource Fair Allocation）</strong>：<br>
-大模型端到端工作流不仅需要 GPU，还重度消耗 CPU 核心（负责数据解压、Tokenization 与分词）、Host 内存（用于显存溢出与 Page Cache）、以及 RDMA 网络带宽。传统单一维度的配额无法解决“CPU 被打满而 GPU 闲置”的资源倾斜，需要引入主导资源公平调度算法（Dominant Resource Fairness, DRF）。</p></li>
-<li><p><strong>高优先级大作业等待与算力空洞（The Reservation vs.&nbsp;Utilization Dilemma）</strong>：<br>
-当一个千亿大模型训练任务（如申请 64 卡或 512 卡）到达队首时，当前集群仅有部分卡空闲（例如 8 张卡空闲，其余 56 张卡需等待 30 分钟后正在运行的前序任务释放）。若为了等待该大任务而将这 8 张卡完全闲置 30 分钟，集群利用率将发生断崖式下跌；若直接把这 8 张卡分配给一个运行 10 小时的普通长任务，大任务的启动时刻将被严重延误！</p></li>
-</ol>
-<p><strong>回填调度（Backfill Scheduling）</strong>通过计算确定性的“保留时间窗口（Reservation Window）”，利用时间与空间维度上的缝隙，精准调度短小作业填充算力空洞（如图 6-2 所示），在零推迟大作业启动的前提下最大化集群利用率。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<section id="多租户配额模型与主导资源公平drf如图-6-1-所示" class="level4">
-<h4 class="anchored" data-anchor-id="多租户配额模型与主导资源公平drf如图-6-1-所示">(1) 多租户配额模型与主导资源公平（DRF，如图 6-1 所示）</h4>
-<ul>
-<li><p><strong>分层配额池设计（Hierarchical Quota Pools）</strong>：<br>
-平台将物理卡池划分为“保证配额（Guaranteed）”与“共享突发池（Shared Elastic Pool）”。租户在保证限额内提交的任务享有最高优先级；超出保证限额的任务只能作为“可抢占突发任务（Preemptible Burst Jobs）”在共享池中运行。一旦保证配额的合法持有者提交新作业，突发任务将被优雅回收退让。</p></li>
-<li><p><strong>主导资源公平算法（Dominant Resource Fairness, DRF）</strong>：<br>
-设集群总资源向量为 <span class="math inline">\(\mathbf{R} = \langle R_{\text{GPU}}, R_{\text{CPU}}, R_{\text{Mem}} \rangle\)</span>。<br>
-对于租户 <span class="math inline">\(i\)</span>，其当前已占用的资源向量为 <span class="math inline">\(\mathbf{U}_i = \langle U_{i,\text{GPU}}, U_{i,\text{CPU}}, U_{i,\text{Mem}} \rangle\)</span>。<br>
-租户 <span class="math inline">\(i\)</span> 的<strong>主导资源份额（Dominant Share）</strong>定义为其占全集群比例最高的那项资源的份额： <span class="math display">\[s_i = \max \left( \frac{U_{i,\text{GPU}}}{R_{\text{GPU}}}, \frac{U_{i,\text{CPU}}}{R_{\text{CPU}}}, \frac{U_{i,\text{Mem}}}{R_{\text{Mem}}} \right)\]</span> 调度器在每一轮调度中，始终优先为当前主导份额 <span class="math inline">\(s_i\)</span> 最小的租户分发资源，从而在多维异构环境下严格实现帕累托最优与无嫉妒性（Envy-Freeness）。</p></li>
-</ul>
-</section>
-<section id="回填调度算法与保留时间窗口填充backfill-scheduling如图-6-2-所示" class="level4">
-<h4 class="anchored" data-anchor-id="回填调度算法与保留时间窗口填充backfill-scheduling如图-6-2-所示">(2) 回填调度算法与保留时间窗口填充（Backfill Scheduling，如图 6-2 所示）</h4>
 <p>如图 6-2 所示，Backfill 调度的核心执行流水线分为三步：</p>
 <ol type="1">
 <li><p><strong>建立大作业未来预留点（Reservation Window）</strong>：<br>
@@ -676,7 +672,7 @@ Backfill 的正确性前提是“回填作业绝不推迟大作业的启动时�
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐确定性 backfill：选择可完成候选中 GPU-time 最大者。</p>
 <p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
-<div id="2ff8131c" class="cell" data-course_role="exercise">
+<div id="67b655ae" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> choose_backfill(candidates, free_gpus, gap_minutes):</span>
@@ -735,7 +731,7 @@ Backfill 的正确性前提是“回填作业绝不推迟大作业的启动时�
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先独立完成。核对后请改变一个规模或故障条件重新推演。</p>
-<div id="d40c25be" class="cell" data-course_role="solution">
+<div id="d157827b" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> choose_backfill(candidates, free_gpus, gap_minutes):</span>
@@ -1291,62 +1287,62 @@ Backfill 回填机制的核心契约是“绝对不推迟队首大作业的启�
 <span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>    subgraph QuotaPool[<span class="ot">"</span><span class="st">集群总资源配额池 (1000 GPUs)</span><span class="ot">"</span>]</span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>        TeamA[<span class="ot">"</span><span class="st">部门 A 保证配额 (Guaranteed: 400 GPUs)</span><span class="ot">"</span>]</span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>        TeamB[<span class="ot">"</span><span class="st">部门 B 保证配额 (Guaranteed: 400 GPUs)</span><span class="ot">"</span>]</span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>        Shared[<span class="ot">"</span><span class="st">共享空闲与突发池 (Oversubscription: 200 GPUs)</span><span class="ot">"</span>]</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>    subgraph DRF[<span class="ot">"</span><span class="st">主导资源公平调度 (Dominant Resource Fairness)</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>        Dominant[<span class="ot">"</span><span class="st">根据 CPU、GPU、内存中占比最高的主导份额实现均衡分配</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    QuotaPool --&gt; DRF</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-1：多租户配额保障、弹性突发超售与 DRF 资源公平模型<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    LargeJob[<span class="ot">"</span><span class="st">高优先级大作业等待 64 卡 (预计 30 分钟后到位)</span><span class="ot">"</span>] --&gt; LockTime[<span class="ot">"</span><span class="st">调度器计算预留时间窗口 (Reservation Window)</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    LockTime --&gt; ScanSmall[<span class="ot">"</span><span class="st">扫描等待队列中的碎片小作业 (如 4 卡、运行 15 分钟)</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    ScanSmall --&gt; BackfillCheck{<span class="ot">"</span><span class="st">小作业是否能在预留时间前结束?</span><span class="ot">"</span>}</span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    BackfillCheck --&gt;|是| RunNow[<span class="ot">"</span><span class="st">立即回填调度 (Backfill) 启动小作业，极大化集群利用率</span><span class="ot">"</span>]</span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>    BackfillCheck --&gt;|否| WaitSmall[<span class="ot">"</span><span class="st">小作业保持等待，确保绝不推迟大作业启动时刻</span><span class="ot">"</span>]</span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-2：回填调度 (Backfill Scheduling) 与保留时间窗口填充工作流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>在多团队共享的大规模企业级 AI 算力中心（通常汇聚数百至数千张高端 GPU，单卡硬件与能耗成本极高），平台运营与调度系统面临着三大核心诉求的激烈博弈：</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**多租户保底配额与商业公平性（Guaranteed Quota &amp; Tenancy Isolation）**：  </span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>   团队 A 采购了 400 张 GPU，团队 B 采购了 400 张 GPU。平台必须确保任何团队随时都能兑现其购买的“保证配额（Guaranteed Quota）”，杜绝因某一团队恶意突发提交上千任务而将其他团队完全挤占；同时，在某些团队配额闲置时，应允许其他团队弹性突发超售（Elastic Bursting / Oversubscription）借用，极大化集群资产的投资回报率（ROI，如图 6-1 所示）。</span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**多维异构资源的瓶颈均衡（Multi-Resource Fair Allocation）**：  </span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>   大模型端到端工作流不仅需要 GPU，还重度消耗 CPU 核心（负责数据解压、Tokenization 与分词）、Host 内存（用于显存溢出与 Page Cache）、以及 RDMA 网络带宽。传统单一维度的配额无法解决“CPU 被打满而 GPU 闲置”的资源倾斜，需要引入主导资源公平调度算法（Dominant Resource Fairness, DRF）。</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**高优先级大作业等待与算力空洞（The Reservation vs. Utilization Dilemma）**：  </span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>   当一个千亿大模型训练任务（如申请 64 卡或 512 卡）到达队首时，当前集群仅有部分卡空闲（例如 8 张卡空闲，其余 56 张卡需等待 30 分钟后正在运行的前序任务释放）。若为了等待该大任务而将这 8 张卡完全闲置 30 分钟，集群利用率将发生断崖式下跌；若直接把这 8 张卡分配给一个运行 10 小时的普通长任务，大任务的启动时刻将被严重延误！</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>**回填调度（Backfill Scheduling）**通过计算确定性的“保留时间窗口（Reservation Window）”，利用时间与空间维度上的缝隙，精准调度短小作业填充算力空洞（如图 6-2 所示），在零推迟大作业启动的前提下最大化集群利用率。</span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 多租户配额模型与主导资源公平（DRF，如图 6-1 所示）</span></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**分层配额池设计（Hierarchical Quota Pools）**：  </span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>  平台将物理卡池划分为“保证配额（Guaranteed）”与“共享突发池（Shared Elastic Pool）”。租户在保证限额内提交的任务享有最高优先级；超出保证限额的任务只能作为“可抢占突发任务（Preemptible Burst Jobs）”在共享池中运行。一旦保证配额的合法持有者提交新作业，突发任务将被优雅回收退让。</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**主导资源公平算法（Dominant Resource Fairness, DRF）**：  </span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>  设集群总资源向量为 $\mathbf{R} = \langle R_{\text{GPU}}, R_{\text{CPU}}, R_{\text{Mem}} \rangle$。  </span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>  对于租户 $i$，其当前已占用的资源向量为 $\mathbf{U}_i = \langle U_{i,\text{GPU}}, U_{i,\text{CPU}}, U_{i,\text{Mem}} \rangle$。  </span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>  租户 $i$ 的**主导资源份额（Dominant Share）**定义为其占全集群比例最高的那项资源的份额：</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>  $$s_i = \max \left( \frac{U_{i,\text{GPU}}}{R_{\text{GPU}}}, \frac{U_{i,\text{CPU}}}{R_{\text{CPU}}}, \frac{U_{i,\text{Mem}}}{R_{\text{Mem}}} \right)$$</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>  调度器在每一轮调度中，始终优先为当前主导份额 $s_i$ 最小的租户分发资源，从而在多维异构环境下严格实现帕累托最优与无嫉妒性（Envy-Freeness）。</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 回填调度算法与保留时间窗口填充（Backfill Scheduling，如图 6-2 所示）</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>在多团队共享的大规模企业级 AI 算力中心（通常汇聚数百至数千张高端 GPU，单卡硬件与能耗成本极高），平台运营与调度系统面临着三大核心诉求的激烈博弈：</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**多租户保底配额与商业公平性（Guaranteed Quota &amp; Tenancy Isolation）**：  </span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>   团队 A 采购了 400 张 GPU，团队 B 采购了 400 张 GPU。平台必须确保任何团队随时都能兑现其购买的“保证配额（Guaranteed Quota）”，杜绝因某一团队恶意突发提交上千任务而将其他团队完全挤占；同时，在某些团队配额闲置时，应允许其他团队弹性突发超售（Elastic Bursting / Oversubscription）借用，极大化集群资产的投资回报率（ROI，如图 6-1 所示）。</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**多维异构资源的瓶颈均衡（Multi-Resource Fair Allocation）**：  </span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>   大模型端到端工作流不仅需要 GPU，还重度消耗 CPU 核心（负责数据解压、Tokenization 与分词）、Host 内存（用于显存溢出与 Page Cache）、以及 RDMA 网络带宽。传统单一维度的配额无法解决“CPU 被打满而 GPU 闲置”的资源倾斜，需要引入主导资源公平调度算法（Dominant Resource Fairness, DRF）。</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**高优先级大作业等待与算力空洞（The Reservation vs. Utilization Dilemma）**：  </span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>   当一个千亿大模型训练任务（如申请 64 卡或 512 卡）到达队首时，当前集群仅有部分卡空闲（例如 8 张卡空闲，其余 56 张卡需等待 30 分钟后正在运行的前序任务释放）。若为了等待该大任务而将这 8 张卡完全闲置 30 分钟，集群利用率将发生断崖式下跌；若直接把这 8 张卡分配给一个运行 10 小时的普通长任务，大任务的启动时刻将被严重延误！</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>**回填调度（Backfill Scheduling）**通过计算确定性的“保留时间窗口（Reservation Window）”，利用时间与空间维度上的缝隙，精准调度短小作业填充算力空洞（如图 6-2 所示），在零推迟大作业启动的前提下最大化集群利用率。</span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) 多租户配额模型与主导资源公平（DRF，如图 6-1 所示）</span></span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    subgraph QuotaPool[<span class="ot">"</span><span class="st">集群总资源配额池 (1000 GPUs)</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>        TeamA[<span class="ot">"</span><span class="st">部门 A 保证配额 (Guaranteed: 400 GPUs)</span><span class="ot">"</span>]</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>        TeamB[<span class="ot">"</span><span class="st">部门 B 保证配额 (Guaranteed: 400 GPUs)</span><span class="ot">"</span>]</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>        Shared[<span class="ot">"</span><span class="st">共享空闲与突发池 (Oversubscription: 200 GPUs)</span><span class="ot">"</span>]</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    subgraph DRF[<span class="ot">"</span><span class="st">主导资源公平调度 (Dominant Resource Fairness)</span><span class="ot">"</span>]</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>        Dominant[<span class="ot">"</span><span class="st">根据 CPU、GPU、内存中占比最高的主导份额实现均衡分配</span><span class="ot">"</span>]</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    QuotaPool --&gt; DRF</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-1：多租户配额保障、弹性突发超售与 DRF 资源公平模型<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**分层配额池设计（Hierarchical Quota Pools）**：  </span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>  平台将物理卡池划分为“保证配额（Guaranteed）”与“共享突发池（Shared Elastic Pool）”。租户在保证限额内提交的任务享有最高优先级；超出保证限额的任务只能作为“可抢占突发任务（Preemptible Burst Jobs）”在共享池中运行。一旦保证配额的合法持有者提交新作业，突发任务将被优雅回收退让。</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**主导资源公平算法（Dominant Resource Fairness, DRF）**：  </span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>  设集群总资源向量为 $\mathbf{R} = \langle R_{\text{GPU}}, R_{\text{CPU}}, R_{\text{Mem}} \rangle$。  </span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>  对于租户 $i$，其当前已占用的资源向量为 $\mathbf{U}_i = \langle U_{i,\text{GPU}}, U_{i,\text{CPU}}, U_{i,\text{Mem}} \rangle$。  </span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>  租户 $i$ 的**主导资源份额（Dominant Share）**定义为其占全集群比例最高的那项资源的份额：</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>  $$s_i = \max \left( \frac{U_{i,\text{GPU}}}{R_{\text{GPU}}}, \frac{U_{i,\text{CPU}}}{R_{\text{CPU}}}, \frac{U_{i,\text{Mem}}}{R_{\text{Mem}}} \right)$$</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>  调度器在每一轮调度中，始终优先为当前主导份额 $s_i$ 最小的租户分发资源，从而在多维异构环境下严格实现帕累托最优与无嫉妒性（Envy-Freeness）。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 回填调度算法与保留时间窗口填充（Backfill Scheduling，如图 6-2 所示）</span></span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>    LargeJob[<span class="ot">"</span><span class="st">高优先级大作业等待 64 卡 (预计 30 分钟后到位)</span><span class="ot">"</span>] --&gt; LockTime[<span class="ot">"</span><span class="st">调度器计算预留时间窗口 (Reservation Window)</span><span class="ot">"</span>]</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>    LockTime --&gt; ScanSmall[<span class="ot">"</span><span class="st">扫描等待队列中的碎片小作业 (如 4 卡、运行 15 分钟)</span><span class="ot">"</span>]</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>    ScanSmall --&gt; BackfillCheck{<span class="ot">"</span><span class="st">小作业是否能在预留时间前结束?</span><span class="ot">"</span>}</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>    BackfillCheck --&gt;|是| RunNow[<span class="ot">"</span><span class="st">立即回填调度 (Backfill) 启动小作业，极大化集群利用率</span><span class="ot">"</span>]</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>    BackfillCheck --&gt;|否| WaitSmall[<span class="ot">"</span><span class="st">小作业保持等待，确保绝不推迟大作业启动时刻</span><span class="ot">"</span>]</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-2：回填调度 (Backfill Scheduling) 与保留时间窗口填充工作流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>如图 6-2 所示，Backfill 调度的核心执行流水线分为三步：</span>
 <span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a></span>

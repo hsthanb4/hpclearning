@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -581,8 +580,13 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在深度学习的前向与反向计算中，线性层（Linear Layer）的输出通常需要加上偏置向量：<span class="math inline">\(Y = X + B\)</span>，其中 <span class="math inline">\(X \in \mathbb{R}^{M \times N}\)</span>，<span class="math inline">\(B \in \mathbb{R}^{N}\)</span>。 根据 NumPy/PyTorch 广播语义，长度为 <span class="math inline">\(N\)</span> 的偏置向量 <span class="math inline">\(B\)</span> 需要沿行维度（<span class="math inline">\(M\)</span> 维度）复制并与每一行相加。如果显式将 <span class="math inline">\(B\)</span> 复制成 <span class="math inline">\(M \times N\)</span> 的稠密矩阵，将浪费大量全局显存并引入无谓的内存搬运。 本课解决的核心工程问题是：如何在 Triton 中通过将 Program 映射到二维逻辑网格（或一维 Program 处理一整行），结合张量的物理跨步（Stride）代数，实现<strong>零内存开销的隐式广播（Implicit In-Register Broadcasting）</strong>，并深刻辨析“逻辑维度边界（Logical Shape）”与“物理内存步长（Physical Stride）”的本质解耦。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>二维 Stride 寻址与广播的数据通路如图 4-1 与图 4-2 所示：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -619,14 +623,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 4-2：Triton 广播机制（Broadcasting）执行流</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在深度学习的前向与反向计算中，线性层（Linear Layer）的输出通常需要加上偏置向量：<span class="math inline">\(Y = X + B\)</span>，其中 <span class="math inline">\(X \in \mathbb{R}^{M \times N}\)</span>，<span class="math inline">\(B \in \mathbb{R}^{N}\)</span>。 根据 NumPy/PyTorch 广播语义，长度为 <span class="math inline">\(N\)</span> 的偏置向量 <span class="math inline">\(B\)</span> 需要沿行维度（<span class="math inline">\(M\)</span> 维度）复制并与每一行相加。如果显式将 <span class="math inline">\(B\)</span> 复制成 <span class="math inline">\(M \times N\)</span> 的稠密矩阵，将浪费大量全局显存并引入无谓的内存搬运。 本课解决的核心工程问题是：如何在 Triton 中通过将 Program 映射到二维逻辑网格（或一维 Program 处理一整行），结合张量的物理跨步（Stride）代数，实现<strong>零内存开销的隐式广播（Implicit In-Register Broadcasting）</strong>，并深刻辨析“逻辑维度边界（Logical Shape）”与“物理内存步长（Physical Stride）”的本质解耦。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>二维 Stride 寻址与广播的数据通路如图 4-1 与图 4-2 所示：</p>
 <ol type="1">
 <li><p><strong>网格与行映射</strong>：主机端发射 <span class="math inline">\(M\)</span> 个 Program 块：<code>grid = (M,)</code>。每个 Program 的 <code>row = tl.program_id(0)</code> 精准负责矩阵的一整行。</p></li>
 <li><p><strong>列向量与步长寻址</strong>： 通过 <code>cols = tl.arange(0, BLOCK)</code> 生成列索引向量，计算输入矩阵的物理偏移量： <span class="math display">\[ \text{xoffs} = \text{row} \times s_{xm} + \text{cols} \times s_{xn} \]</span> 其中 <span class="math inline">\(s_{xm}\)</span> 为行步长（跨行跳跃的元素个数），<span class="math inline">\(s_{xn}\)</span> 为列步长（通常为 1）。这使得内核天然兼容任意内存布局（如连续、转置或带 Padding 的对齐内存）。</p></li>
@@ -672,7 +668,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 bias 地址。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="155cbfa7" class="cell" data-course_role="exercise">
+<div id="948d0c84" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -747,7 +743,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="fe9dc657" class="cell" data-course_role="solution">
+<div id="9d5b5d2f" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1319,33 +1315,33 @@ window.Quarto = {
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    subgraph Stride2D[<span class="ot">"</span><span class="st">二维张量行优先 Stride 映射</span><span class="ot">"</span>]</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>        Coord[<span class="ot">"</span><span class="st">二维坐标 (row, col)</span><span class="ot">"</span>] --&gt; Formula[<span class="ot">"</span><span class="st">一维物理下标 = row * stride_row + col * stride_col</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>        Formula --&gt; Mem[<span class="ot">"</span><span class="st">连续跨步读取二维矩阵块</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-1：Triton 二维 Block 与行优先 Stride 计算代数<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    Bias[<span class="ot">"</span><span class="st">1D 偏置 (BLOCK_N,)</span><span class="ot">"</span>] --&gt; Expand[<span class="ot">"</span><span class="st">切片扩展维度 [None, :] 变成 (1, BLOCK_N)</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Expand --&gt; Broad[<span class="ot">"</span><span class="st">沿行方向自动广播与 (BLOCK_M, BLOCK_N) 矩阵相加</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-2：Triton 广播机制（Broadcasting）执行流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>在深度学习的前向与反向计算中，线性层（Linear Layer）的输出通常需要加上偏置向量：$Y = X + B$，其中 $X \in \mathbb{R}^{M \times N}$，$B \in \mathbb{R}^{N}$。</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>根据 NumPy/PyTorch 广播语义，长度为 $N$ 的偏置向量 $B$ 需要沿行维度（$M$ 维度）复制并与每一行相加。如果显式将 $B$ 复制成 $M \times N$ 的稠密矩阵，将浪费大量全局显存并引入无谓的内存搬运。</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：如何在 Triton 中通过将 Program 映射到二维逻辑网格（或一维 Program 处理一整行），结合张量的物理跨步（Stride）代数，实现**零内存开销的隐式广播（Implicit In-Register Broadcasting）**，并深刻辨析“逻辑维度边界（Logical Shape）”与“物理内存步长（Physical Stride）”的本质解耦。</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>在深度学习的前向与反向计算中，线性层（Linear Layer）的输出通常需要加上偏置向量：$Y = X + B$，其中 $X \in \mathbb{R}^{M \times N}$，$B \in \mathbb{R}^{N}$。</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>根据 NumPy/PyTorch 广播语义，长度为 $N$ 的偏置向量 $B$ 需要沿行维度（$M$ 维度）复制并与每一行相加。如果显式将 $B$ 复制成 $M \times N$ 的稠密矩阵，将浪费大量全局显存并引入无谓的内存搬运。</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：如何在 Triton 中通过将 Program 映射到二维逻辑网格（或一维 Program 处理一整行），结合张量的物理跨步（Stride）代数，实现**零内存开销的隐式广播（Implicit In-Register Broadcasting）**，并深刻辨析“逻辑维度边界（Logical Shape）”与“物理内存步长（Physical Stride）”的本质解耦。</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>二维 Stride 寻址与广播的数据通路如图 4-1 与图 4-2 所示：</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>    subgraph Stride2D[<span class="ot">"</span><span class="st">二维张量行优先 Stride 映射</span><span class="ot">"</span>]</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>        Coord[<span class="ot">"</span><span class="st">二维坐标 (row, col)</span><span class="ot">"</span>] --&gt; Formula[<span class="ot">"</span><span class="st">一维物理下标 = row * stride_row + col * stride_col</span><span class="ot">"</span>]</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>        Formula --&gt; Mem[<span class="ot">"</span><span class="st">连续跨步读取二维矩阵块</span><span class="ot">"</span>]</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-1：Triton 二维 Block 与行优先 Stride 计算代数<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    Bias[<span class="ot">"</span><span class="st">1D 偏置 (BLOCK_N,)</span><span class="ot">"</span>] --&gt; Expand[<span class="ot">"</span><span class="st">切片扩展维度 [None, :] 变成 (1, BLOCK_N)</span><span class="ot">"</span>]</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    Expand --&gt; Broad[<span class="ot">"</span><span class="st">沿行方向自动广播与 (BLOCK_M, BLOCK_N) 矩阵相加</span><span class="ot">"</span>]</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-2：Triton 广播机制（Broadcasting）执行流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>二维 Stride 寻址与广播的数据通路如图 4-1 与图 4-2 所示：</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**网格与行映射**：主机端发射 $M$ 个 Program 块：<span class="in">`grid = (M,)`</span>。每个 Program 的 <span class="in">`row = tl.program_id(0)`</span> 精准负责矩阵的一整行。</span>
 <span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>

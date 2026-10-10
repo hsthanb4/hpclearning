@@ -499,7 +499,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -570,8 +569,21 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个<strong>分布式异构流式流水线（Heterogeneous Streaming Pipeline）</strong>。 在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：</p>
+<ul>
+<li><strong>算力瓶颈转移（生成延迟主导）</strong>：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。<strong>超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段</strong>；</li>
+<li><strong>推理与训练的物理资源冲突</strong>：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。</li>
+</ul>
+<p>大规模 RL 系统解决的核心工程问题是：<strong>通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化</strong>。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：</p>
+<ol type="1">
+<li><strong>Rollout 与 Learner 物理双集群解耦架构（图 12-1）</strong>：</li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -601,6 +613,15 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构</em>
 </p>
+<ul>
+<li><strong>Rollout 生成集群（Inference Workers）</strong>：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；</li>
+<li><strong>解耦中转缓冲层（Buffer Queue）</strong>：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；</li>
+<li><strong>训练优化集群（Learner Workers）</strong>：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；</li>
+<li><strong>权重热加载同步环（Weight Sync Ring）</strong>：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。</li>
+</ul>
+<ol start="2" type="1">
+<li><strong>策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）</strong>：</li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -621,33 +642,8 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个<strong>分布式异构流式流水线（Heterogeneous Streaming Pipeline）</strong>。 在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：</p>
-<ul>
-<li><strong>算力瓶颈转移（生成延迟主导）</strong>：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。<strong>超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段</strong>；</li>
-<li><strong>推理与训练的物理资源冲突</strong>：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。</li>
-</ul>
-<p>大规模 RL 系统解决的核心工程问题是：<strong>通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化</strong>。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：</p>
-<ol type="1">
-<li><p><strong>Rollout 与 Learner 物理双集群解耦架构（图 12-1）</strong>：</p>
-<ul>
-<li><strong>Rollout 生成集群（Inference Workers）</strong>：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；</li>
-<li><strong>解耦中转缓冲层（Buffer Queue）</strong>：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；</li>
-<li><strong>训练优化集群（Learner Workers）</strong>：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；</li>
-<li><strong>权重热加载同步环（Weight Sync Ring）</strong>：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。</li>
-</ul></li>
-<li><p><strong>策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）</strong>： 在完全异步或流水线并行的架构中，当 Worker 依据权重版本 <span class="math inline">\(v_{\text{sample}}\)</span> 采样出一条长达 8192 Token 的轨迹推入队列时，Learner 可能已经完成了 <span class="math inline">\(k\)</span> 步梯度更新，当前最新模型版本已演化至 <span class="math inline">\(v_{\text{current}}\)</span>。 定义策略版本陈旧度： <span class="math display">\[ \text{Staleness} = v_{\text{current}} - v_{\text{sample}} \]</span></p>
-<ul>
-<li>若 <span class="math inline">\(\text{Staleness} \le \tau_{\text{max}}\)</span>（在容忍阈值内，通常 <span class="math inline">\(\tau \le 1 \sim 2\)</span>）：样本被合法消费；</li>
-<li>若 <span class="math inline">\(\text{Staleness} &gt; \tau_{\text{max}}\)</span>：说明该样本严重过期，强行消费会引发严重的 Off-Policy 梯度震荡，系统在队列头部将其<strong>主动丢弃（Drop Outdated Trajectory）</strong>；</li>
-<li>若 <span class="math inline">\(v_{\text{sample}} &gt; v_{\text{current}}\)</span>：属于严重的系统时序悖论错误，必须立即阻断报错。</li>
-</ul></li>
+<p>在完全异步或流水线并行的架构中，当 Worker 依据权重版本 <span class="math inline">\(v_{\text{sample}}\)</span> 采样出一条长达 8192 Token 的轨迹推入队列时，Learner 可能已经完成了 <span class="math inline">\(k\)</span> 步梯度更新，当前最新模型版本已演化至 <span class="math inline">\(v_{\text{current}}\)</span>。 定义策略版本陈旧度： <span class="math display">\[ \text{Staleness} = v_{\text{current}} - v_{\text{sample}} \]</span> - 若 <span class="math inline">\(\text{Staleness} \le \tau_{\text{max}}\)</span>（在容忍阈值内，通常 <span class="math inline">\(\tau \le 1 \sim 2\)</span>）：样本被合法消费； - 若 <span class="math inline">\(\text{Staleness} &gt; \tau_{\text{max}}\)</span>：说明该样本严重过期，强行消费会引发严重的 Off-Policy 梯度震荡，系统在队列头部将其<strong>主动丢弃（Drop Outdated Trajectory）</strong>； - 若 <span class="math inline">\(v_{\text{sample}} &gt; v_{\text{current}}\)</span>：属于严重的系统时序悖论错误，必须立即阻断报错。</p>
+<ol start="3" type="1">
 <li><p><strong>两类微观分布漂移的双重校准（Dual-Distribution Decomposition）</strong>： 在严苛工业实践中，即使版本号相同（<span class="math inline">\(\text{Staleness}=0\)</span>），推理集群与训练集群也可能因推理引擎采用 FP8/INT8 量化、非确定性 FlashAttention Kernel 或不同的解码随机种子导致微观概率不一致。定义真实比率为双重展开： <span class="math display">\[ \frac{\pi_\theta(y_t)}{\pi_{\text{rollout}}(y_t)} = \underbrace{\frac{\pi_\theta(y_t)}{\pi_{\text{old}}(y_t)}}_{\text{PPO 优化更新比率}} \times \underbrace{\frac{\pi_{\text{old}}(y_t)}{\pi_{\text{rollout}}(y_t)}}_{\text{引擎后端微观校正项}} \]</span> 系统通过截断重要性采样（Truncated Importance Sampling, TIS）对后端漂移进行微调校正，杜绝因引擎实现差异导致的静默梯度偏差。</p></li>
 <li><p><strong>多轮 Agent 数据契约（Multi-turn Data Contract）</strong>： 在 Tool Use 与 Agent 系统中，上下文由交织的交互块构成：<code>[Prompt, Agent_Call, Tool_Observation, Agent_Answer, Padding]</code>。 数据契约必须保证：<strong>只有由当前模型自主生成的 Token（<code>Agent_Call</code> 与 <code>Agent_Answer</code>）其动作掩码置为 1，外部环境或工具返回的 Observation 必须严格置 0</strong>。工具结果只能作为上下文参与后续注意力计算，绝对不能对工具输出计算策略梯度！</p></li>
 </ol>
@@ -689,7 +685,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐版本陈旧度并拒绝未来版本。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="d65cecdd" class="cell" data-course_role="exercise">
+<div id="f09a3a75" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> policy_staleness(current_version, sample_version):</span>
@@ -762,7 +758,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="3be25cd6" class="cell" data-course_role="solution">
+<div id="4b2fd7aa" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> policy_staleness(current_version, sample_version):</span>
@@ -1352,58 +1348,58 @@ window.Quarto = {
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    subgraph InferenceCluster[<span class="ot">"</span><span class="st">Rollout 生成集群 (vLLM / SGLang)</span><span class="ot">"</span>]</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>        W1[<span class="ot">"</span><span class="st">Worker 1 (Prompt 吞吐)</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>        W2[<span class="ot">"</span><span class="st">Worker 2 (KV Cache 优化)</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    subgraph StorageQueue[<span class="ot">"</span><span class="st">解耦中转层</span><span class="ot">"</span>]</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>        Queue[<span class="ot">"</span><span class="st">高吞吐经验队列 (Shared Memory / Redis / Ray Object Store)</span><span class="ot">"</span>]</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>    subgraph TrainingCluster[<span class="ot">"</span><span class="st">训练更新集群 (Megatron / ZeRO-3)</span><span class="ot">"</span>]</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>        L1[<span class="ot">"</span><span class="st">Learner GPU 0</span><span class="ot">"</span>]</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>        L2[<span class="ot">"</span><span class="st">Learner GPU 1</span><span class="ot">"</span>]</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    W1 &amp; W2 --&gt;|推送采样轨迹| Queue</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Queue --&gt;|拉取 Batch 经验| L1 &amp; L2</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    L1 -.-&gt;|异步参数广播 / 权重热加载| W1 &amp; W2</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    Gen[<span class="ot">"</span><span class="st">Rollout 引擎并发生成轨迹</span><span class="ot">"</span>] --&gt; Put[<span class="ot">"</span><span class="st">压入异步 FIFO 轨迹队列</span><span class="ot">"</span>]</span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    Put --&gt; CheckStaleness{<span class="ot">"</span><span class="st">轨迹延迟 Staleness ≤ 阈值?</span><span class="ot">"</span>}</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    CheckStaleness --&gt;|有效| Train[<span class="ot">"</span><span class="st">Learner 取出执行并行梯度计算</span><span class="ot">"</span>]</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    CheckStaleness --&gt;|过期| Drop[<span class="ot">"</span><span class="st">丢弃过期轨迹，防止策略梯度发散</span><span class="ot">"</span>]</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>    Train --&gt; WeightSync[<span class="ot">"</span><span class="st">NCCL 广播最新权重至 Rollout Worker 内存</span><span class="ot">"</span>]</span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个**分布式异构流式流水线（Heterogeneous Streaming Pipeline）**。</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**算力瓶颈转移（生成延迟主导）**：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。**超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段**；</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**推理与训练的物理资源冲突**：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>大规模 RL 系统解决的核心工程问题是：**通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化**。</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Rollout 与 Learner 物理双集群解耦架构（图 12-1）**：</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    subgraph InferenceCluster[<span class="ot">"</span><span class="st">Rollout 生成集群 (vLLM / SGLang)</span><span class="ot">"</span>]</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>        W1[<span class="ot">"</span><span class="st">Worker 1 (Prompt 吞吐)</span><span class="ot">"</span>]</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>        W2[<span class="ot">"</span><span class="st">Worker 2 (KV Cache 优化)</span><span class="ot">"</span>]</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    subgraph StorageQueue[<span class="ot">"</span><span class="st">解耦中转层</span><span class="ot">"</span>]</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>        Queue[<span class="ot">"</span><span class="st">高吞吐经验队列 (Shared Memory / Redis / Ray Object Store)</span><span class="ot">"</span>]</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    subgraph TrainingCluster[<span class="ot">"</span><span class="st">训练更新集群 (Megatron / ZeRO-3)</span><span class="ot">"</span>]</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>        L1[<span class="ot">"</span><span class="st">Learner GPU 0</span><span class="ot">"</span>]</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>        L2[<span class="ot">"</span><span class="st">Learner GPU 1</span><span class="ot">"</span>]</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>    W1 &amp; W2 --&gt;|推送采样轨迹| Queue</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>    Queue --&gt;|拉取 Batch 经验| L1 &amp; L2</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>    L1 -.-&gt;|异步参数广播 / 权重热加载| W1 &amp; W2</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个**分布式异构流式流水线（Heterogeneous Streaming Pipeline）**。</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**算力瓶颈转移（生成延迟主导）**：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。**超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段**；</span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**推理与训练的物理资源冲突**：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>大规模 RL 系统解决的核心工程问题是：**通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化**。</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Rollout 与 Learner 物理双集群解耦架构（图 12-1）**：</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Rollout 生成集群（Inference Workers）**：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**解耦中转缓冲层（Buffer Queue）**：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**训练优化集群（Learner Workers）**：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**权重热加载同步环（Weight Sync Ring）**：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）**：</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Rollout 生成集群（Inference Workers）**：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**解耦中转缓冲层（Buffer Queue）**：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**训练优化集群（Learner Workers）**：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**权重热加载同步环（Weight Sync Ring）**：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）**：</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>    Gen[<span class="ot">"</span><span class="st">Rollout 引擎并发生成轨迹</span><span class="ot">"</span>] --&gt; Put[<span class="ot">"</span><span class="st">压入异步 FIFO 轨迹队列</span><span class="ot">"</span>]</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>    Put --&gt; CheckStaleness{<span class="ot">"</span><span class="st">轨迹延迟 Staleness ≤ 阈值?</span><span class="ot">"</span>}</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>    CheckStaleness --&gt;|有效| Train[<span class="ot">"</span><span class="st">Learner 取出执行并行梯度计算</span><span class="ot">"</span>]</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>    CheckStaleness --&gt;|过期| Drop[<span class="ot">"</span><span class="st">丢弃过期轨迹，防止策略梯度发散</span><span class="ot">"</span>]</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>    Train --&gt; WeightSync[<span class="ot">"</span><span class="st">NCCL 广播最新权重至 Rollout Worker 内存</span><span class="ot">"</span>]</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>   在完全异步或流水线并行的架构中，当 Worker 依据权重版本 $v_{\text{sample}}$ 采样出一条长达 8192 Token 的轨迹推入队列时，Learner 可能已经完成了 $k$ 步梯度更新，当前最新模型版本已演化至 $v_{\text{current}}$。</span>
 <span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>   定义策略版本陈旧度：</span>
 <span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>   $$ \text{Staleness} = v_{\text{current}} - v_{\text{sample}} $$</span>

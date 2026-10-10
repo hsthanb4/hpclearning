@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -581,8 +580,17 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>矩阵转置（Matrix Transpose: <span class="math inline">\(Y = X^T\)</span>）是最基础但对硬件内存层次极具杀伤力的内存重排算子。 在行优先（Row-Major）物理存储下，如果直接按标量或朴素方式转置，面临非此即彼的内存性能断崖：</p>
+<ul>
+<li>若以行连续方式<strong>合并读取（Coalesced Read）</strong>，则写回目标矩阵时将跨行跨列产生巨大的跨步写入（Strided Write），导致 L2 缓存行污染与极低的写带宽；</li>
+<li>反之，若写回保持合并，则读取必定离散跨步。 在传统 CUDA 编程中，解决此问题的标准范式是使用带 <code>+1</code> Padding 的共享内存（Shared Memory）充当片上数据交换中转站，极度繁琐且容易引发 Bank Conflict。 本课解决的核心工程问题是：<strong>在 Triton 中如何使用二维广播语法构建高维 Pointer Tensor 与二维谓词掩码，并借助原生编译原语 <code>tl.trans</code> 将复杂的片上寄存器/共享内存转置重排交给编译器自动优化，实现非方阵与任意步长下的安全合并读写</strong>。</li>
+</ul>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>2D 分块转置与内存步长重塑架构如图 8-1 与图 8-2 所示：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -620,18 +628,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 8-2：2D 分块转置全局合并读写流程</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>矩阵转置（Matrix Transpose: <span class="math inline">\(Y = X^T\)</span>）是最基础但对硬件内存层次极具杀伤力的内存重排算子。 在行优先（Row-Major）物理存储下，如果直接按标量或朴素方式转置，面临非此即彼的内存性能断崖：</p>
-<ul>
-<li>若以行连续方式<strong>合并读取（Coalesced Read）</strong>，则写回目标矩阵时将跨行跨列产生巨大的跨步写入（Strided Write），导致 L2 缓存行污染与极低的写带宽；</li>
-<li>反之，若写回保持合并，则读取必定离散跨步。 在传统 CUDA 编程中，解决此问题的标准范式是使用带 <code>+1</code> Padding 的共享内存（Shared Memory）充当片上数据交换中转站，极度繁琐且容易引发 Bank Conflict。 本课解决的核心工程问题是：<strong>在 Triton 中如何使用二维广播语法构建高维 Pointer Tensor 与二维谓词掩码，并借助原生编译原语 <code>tl.trans</code> 将复杂的片上寄存器/共享内存转置重排交给编译器自动优化，实现非方阵与任意步长下的安全合并读写</strong>。</li>
-</ul>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>2D 分块转置与内存步长重塑架构如图 8-1 与图 8-2 所示：</p>
 <ol type="1">
 <li><p><strong>二维网格分块映射</strong>： 发射网格为 <code>grid = (cdiv(M, BM), cdiv(N, BN))</code>。每个 Program 处理一个形状为 <code>(BM, BN)</code> 的二维 Tile。</p></li>
 <li><p><strong>二维广播指针与双向掩码构造</strong>：</p>
@@ -691,7 +687,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐转置值。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="a8dab29e" class="cell" data-course_role="exercise">
+<div id="44498d16" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -770,7 +766,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="1bf2bc00" class="cell" data-course_role="solution">
+<div id="33771374" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1341,38 +1337,38 @@ window.Quarto = {
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    subgraph TileSwap[<span class="ot">"</span><span class="st">2D Tile 坐标与指针轴交换</span><span class="ot">"</span>]</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>        InTile[<span class="ot">"</span><span class="st">输入分块 (BLOCK_M, BLOCK_N)</span><span class="ot">"</span>] --&gt; Trans[<span class="ot">"</span><span class="st">转置操作 tl.trans(x) ➔ (BLOCK_N, BLOCK_M)</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>        Trans --&gt; OutTile[<span class="ot">"</span><span class="st">按列转置写回目标地址</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-1：二维分块转置与内存步长重塑架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    Program2D[<span class="ot">"</span><span class="st">2D Program 划分 (pid_m, pid_n)</span><span class="ot">"</span>] --&gt; Load[<span class="ot">"</span><span class="st">合并加载源矩阵分块</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Load --&gt; SMemTrans[<span class="ot">"</span><span class="st">Triton 编译器自动在片上执行无冲突转置</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    SMemTrans --&gt; Store[<span class="ot">"</span><span class="st">合并写回目标转置矩阵</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-2：2D 分块转置全局合并读写流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>矩阵转置（Matrix Transpose: $Y = X^T$）是最基础但对硬件内存层次极具杀伤力的内存重排算子。</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>在行优先（Row-Major）物理存储下，如果直接按标量或朴素方式转置，面临非此即彼的内存性能断崖：</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>若以行连续方式**合并读取（Coalesced Read）**，则写回目标矩阵时将跨行跨列产生巨大的跨步写入（Strided Write），导致 L2 缓存行污染与极低的写带宽；</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>反之，若写回保持合并，则读取必定离散跨步。</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>在传统 CUDA 编程中，解决此问题的标准范式是使用带 <span class="in">`+1`</span> Padding 的共享内存（Shared Memory）充当片上数据交换中转站，极度繁琐且容易引发 Bank Conflict。</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**在 Triton 中如何使用二维广播语法构建高维 Pointer Tensor 与二维谓词掩码，并借助原生编译原语 `tl.trans` 将复杂的片上寄存器/共享内存转置重排交给编译器自动优化，实现非方阵与任意步长下的安全合并读写**。</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>2D 分块转置与内存步长重塑架构如图 8-1 与图 8-2 所示：</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    subgraph TileSwap[<span class="ot">"</span><span class="st">2D Tile 坐标与指针轴交换</span><span class="ot">"</span>]</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>        InTile[<span class="ot">"</span><span class="st">输入分块 (BLOCK_M, BLOCK_N)</span><span class="ot">"</span>] --&gt; Trans[<span class="ot">"</span><span class="st">转置操作 tl.trans(x) ➔ (BLOCK_N, BLOCK_M)</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>        Trans --&gt; OutTile[<span class="ot">"</span><span class="st">按列转置写回目标地址</span><span class="ot">"</span>]</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-1：二维分块转置与内存步长重塑架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>矩阵转置（Matrix Transpose: $Y = X^T$）是最基础但对硬件内存层次极具杀伤力的内存重排算子。</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>在行优先（Row-Major）物理存储下，如果直接按标量或朴素方式转置，面临非此即彼的内存性能断崖：</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>若以行连续方式**合并读取（Coalesced Read）**，则写回目标矩阵时将跨行跨列产生巨大的跨步写入（Strided Write），导致 L2 缓存行污染与极低的写带宽；</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>反之，若写回保持合并，则读取必定离散跨步。</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>在传统 CUDA 编程中，解决此问题的标准范式是使用带 <span class="in">`+1`</span> Padding 的共享内存（Shared Memory）充当片上数据交换中转站，极度繁琐且容易引发 Bank Conflict。</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**在 Triton 中如何使用二维广播语法构建高维 Pointer Tensor 与二维谓词掩码，并借助原生编译原语 `tl.trans` 将复杂的片上寄存器/共享内存转置重排交给编译器自动优化，实现非方阵与任意步长下的安全合并读写**。</span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    Program2D[<span class="ot">"</span><span class="st">2D Program 划分 (pid_m, pid_n)</span><span class="ot">"</span>] --&gt; Load[<span class="ot">"</span><span class="st">合并加载源矩阵分块</span><span class="ot">"</span>]</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    Load --&gt; SMemTrans[<span class="ot">"</span><span class="st">Triton 编译器自动在片上执行无冲突转置</span><span class="ot">"</span>]</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>    SMemTrans --&gt; Store[<span class="ot">"</span><span class="st">合并写回目标转置矩阵</span><span class="ot">"</span>]</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-2：2D 分块转置全局合并读写流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>2D 分块转置与内存步长重塑架构如图 8-1 与图 8-2 所示：</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**二维网格分块映射**：</span>
 <span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>   发射网格为 <span class="in">`grid = (cdiv(M, BM), cdiv(N, BN))`</span>。每个 Program 处理一个形状为 <span class="in">`(BM, BN)`</span> 的二维 Tile。</span>

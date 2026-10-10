@@ -486,21 +486,9 @@ window.Quarto = {
   <li><a href="#源码版本与阅读方法" id="toc-源码版本与阅读方法" class="nav-link" data-scroll-target="#源码版本与阅读方法">源码版本与阅读方法</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
-  <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
-  <li><a href="#性能与工程取舍" id="toc-性能与工程取舍" class="nav-link" data-scroll-target="#性能与工程取舍">4. 性能与工程取舍</a></li>
   </ul></li>
-  <li><a href="#具体演示单请求执行取消与控制流跟踪演练" id="toc-具体演示单请求执行取消与控制流跟踪演练" class="nav-link" data-scroll-target="#具体演示单请求执行取消与控制流跟踪演练">具体演示：单请求执行取消与控制流跟踪演练</a></li>
-  <li><a href="#实践任务唯一代码填空题" id="toc-实践任务唯一代码填空题" class="nav-link" data-scroll-target="#实践任务唯一代码填空题">实践任务：唯一代码填空题</a>
-  <ul class="collapse">
-  <li><a href="#检查方法" id="toc-检查方法" class="nav-link" data-scroll-target="#检查方法">检查方法</a></li>
-  <li><a href="#q1" id="toc-q1" class="nav-link" data-scroll-target="#q1">Q1</a></li>
-  <li><a href="#q2" id="toc-q2" class="nav-link" data-scroll-target="#q2">Q2</a></li>
-  <li><a href="#q3" id="toc-q3" class="nav-link" data-scroll-target="#q3">Q3</a></li>
-  </ul></li>
-  <li><a href="#评分规则" id="toc-评分规则" class="nav-link" data-scroll-target="#评分规则">评分规则</a></li>
   </ul>
 <div class="toc-actions"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></nav>
     </div>
@@ -591,14 +579,11 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
-<div class="img-card">
-<img src="assets/figs/inference_prefill_vs_decode_math.png" class="img-fluid" style="width:95.0%">
-<p class="caption">
-图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）
-</p>
-</div>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p><strong>vLLM V1 架构</strong>是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。</p>
+<p>为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：</p>
+<p>:::</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -628,6 +613,31 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 1-2：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)</em>
 </p>
+<ul>
+<li><strong><code>AsyncLLM</code>（前端服务层）</strong>：面向客户端的异步 HTTP/gRPC/SSE 接入网关，负责请求接入、Tokenization 分词、流式输出解包与取消信号监听；</li>
+<li><strong><code>EngineCore</code> / <code>EngineCoreProc</code>（调度核心内核层）</strong>：运行在完全物理隔离的独立进程中，由单事件循环主导，独占全局请求生命周期调度器（<code>Scheduler</code>）与显存逻辑账本（<code>KVCacheManager</code>）；</li>
+<li><strong><code>Worker</code> / <code>GPUModelRunner</code>（设备执行层）</strong>：由分布式并行（TP/PP）驱动的执行引擎，独占物理 GPU 张量、物理 KV Block 内存池与 CUDA Graph 捕获环境。</li>
+</ul>
+<p>它解决的核心工程问题是：<strong>通过清晰的单写者状态所有权（Single-Writer State Ownership）与轻量化 IPC 进程解耦，将 CPU 控制侧的每步调度耗时压制在微秒级，实现调度步频与 GPU 硬件峰值吞吐的完全匹配</strong>。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored">2. 它如何工作</h3>
+<p>端到端请求流转与核心控制循环如图 1-1 至图 1-3 所示：</p>
+<div class="img-card">
+<img src="assets/figs/inference_prefill_vs_decode_math.png" class="img-fluid" style="width:95.0%">
+<p class="caption">
+图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）
+</p>
+<ol type="1">
+<li><strong>三段式步进迭代循环（Schedule <span class="math inline">\(\to\)</span> Execute <span class="math inline">\(\to\)</span> Update）</strong>： 在 <code>EngineCore.step()</code> 内部，系统严格遵循严谨的时序管道：
+<ul>
+<li><strong>调度阶段（Schedule）</strong>：<code>Scheduler</code> 消费输入队列，根据全局 Token 预算（Token Budget）生成本次批次的执行计划 <code>plan = scheduler.schedule()</code>；</li>
+<li><strong>异步发射与计算重叠（Async Execute &amp; Overlap）</strong>：通过 <code>model_executor.execute_model(plan, non_block=True)</code> 非阻塞地向 GPU Worker 广播执行指令。在 GPU 执行 Heavy GEMM 与 Attention 的微小间隙，CPU 主线程并发执行结构化输出的 Grammar 状态机掩码提取；</li>
+<li><strong>等待同步与取消处理（Wait &amp; Abort Drain）</strong>：同步等待 Worker 的 <code>future()</code> 返回本次推理结果；在应用输出前，优先消费清空执行期间积累的取消请求队列 <code>process_aborts()</code>；</li>
+<li><strong>状态递推更新（Update）</strong>：调用 <code>scheduler.update_from_output(plan, model_output)</code>，更新每个请求的已计算 Token 计数并回收已完结请求的逻辑 KV 块。</li>
+</ul></li>
+<li><strong>端到端流水线推进（图 1-3）</strong>：</li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -648,32 +658,7 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 1-3：vLLM V1 端到端请求流转与异构协同执行流水线</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p><strong>vLLM V1 架构</strong>是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。</p>
-<p>为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：</p>
-<ul>
-<li><strong><code>AsyncLLM</code>（前端服务层）</strong>：面向客户端的异步 HTTP/gRPC/SSE 接入网关，负责请求接入、Tokenization 分词、流式输出解包与取消信号监听；</li>
-<li><strong><code>EngineCore</code> / <code>EngineCoreProc</code>（调度核心内核层）</strong>：运行在完全物理隔离的独立进程中，由单事件循环主导，独占全局请求生命周期调度器（<code>Scheduler</code>）与显存逻辑账本（<code>KVCacheManager</code>）；</li>
-<li><strong><code>Worker</code> / <code>GPUModelRunner</code>（设备执行层）</strong>：由分布式并行（TP/PP）驱动的执行引擎，独占物理 GPU 张量、物理 KV Block 内存池与 CUDA Graph 捕获环境。</li>
-</ul>
-<p>它解决的核心工程问题是：<strong>通过清晰的单写者状态所有权（Single-Writer State Ownership）与轻量化 IPC 进程解耦，将 CPU 控制侧的每步调度耗时压制在微秒级，实现调度步频与 GPU 硬件峰值吞吐的完全匹配</strong>。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>端到端请求流转与核心控制循环如图 1-1 至图 1-3 所示：</p>
-<ol type="1">
-<li><strong>三段式步进迭代循环（Schedule <span class="math inline">\(\to\)</span> Execute <span class="math inline">\(\to\)</span> Update）</strong>： 在 <code>EngineCore.step()</code> 内部，系统严格遵循严谨的时序管道：
-<ul>
-<li><strong>调度阶段（Schedule）</strong>：<code>Scheduler</code> 消费输入队列，根据全局 Token 预算（Token Budget）生成本次批次的执行计划 <code>plan = scheduler.schedule()</code>；</li>
-<li><strong>异步发射与计算重叠（Async Execute &amp; Overlap）</strong>：通过 <code>model_executor.execute_model(plan, non_block=True)</code> 非阻塞地向 GPU Worker 广播执行指令。在 GPU 执行 Heavy GEMM 与 Attention 的微小间隙，CPU 主线程并发执行结构化输出的 Grammar 状态机掩码提取；</li>
-<li><strong>等待同步与取消处理（Wait &amp; Abort Drain）</strong>：同步等待 Worker 的 <code>future()</code> 返回本次推理结果；在应用输出前，优先消费清空执行期间积累的取消请求队列 <code>process_aborts()</code>；</li>
-<li><strong>状态递推更新（Update）</strong>：调用 <code>scheduler.update_from_output(plan, model_output)</code>，更新每个请求的已计算 Token 计数并回收已完结请求的逻辑 KV 块。</li>
-</ul></li>
-<li><strong>端到端流水线推进（图 1-3）</strong>： HTTP 请求到达后，<code>AsyncLLM</code> 完成异步分词，将 <code>EngineCoreRequest</code> 推入无锁共享内存队列；<code>EngineCore</code> 批量消费并驱动 GPU ModelRunner 并发前向传播；采样完成后的 Token 结果以流式事件（SSE）的形式逆向实时推送回前端。</li>
-</ol>
-</section>
+<p>HTTP 请求到达后，<code>AsyncLLM</code> 完成异步分词，将 <code>EngineCoreRequest</code> 推入无锁共享内存队列；<code>EngineCore</code> 批量消费并驱动 GPU ModelRunner 并发前向传播；采样完成后的 Token 结果以流式事件（SSE）的形式逆向实时推送回前端。</p>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
 <ul>
@@ -693,7 +678,6 @@ window.Quarto = {
 <li><p><strong>进程解耦带来的 IPC 序列化开销 vs GIL 消除红利</strong>： 将 EngineCore 独立为子进程彻底释放了 Python GIL 的并发阻塞，但引入了进程间通信开销。vLLM V1 采用极简的扁平 C-struct 内存布局与共享内存（Shared Memory）通道，将跨进程数据传输延迟压缩至十微秒级，使架构收益显著超越通信开销。</p></li>
 <li><p><strong>Grammar 准备与 GPU 计算的精妙重叠</strong>： 在 JSON 等强约束解码（Structured Outputs）中，计算下一个合法 Token 的 Bitmask 极其消耗 CPU 算力。通过在 <code>execute_model(non_block=True)</code> 发射后立即开始计算 Grammar，系统完美地将 CPU 纯逻辑与 GPU 算力执行掩盖在同一时序窗口内，实现了近乎零气泡的控制流水线。</p></li>
 </ul>
-</section>
 </section>
 <section id="具体演示单请求执行取消与控制流跟踪演练" class="level2">
 <h2 class="anchored" data-anchor-id="具体演示单请求执行取消与控制流跟踪演练">具体演示：单请求执行取消与控制流跟踪演练</h2>
@@ -716,7 +700,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐一个最小 <code>EngineCore.step</code> 控制流模型。重点不是模拟 GPU，而是保持官方源码中的顺序合同；不得删除 trace 断言。</p>
 <p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
-<div id="acbad9d5" class="cell" data-course_role="exercise">
+<div id="e77e9b30" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> engine_core_step(has_requests, schedule, execute_async,</span>
@@ -796,7 +780,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先独立完成。核对后请更换一个 batch、cache 或硬件条件重新推演，不能只复制。</p>
-<div id="ee77a5cf" class="cell" data-course_role="solution">
+<div id="1182be47" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> engine_core_step(has_requests, schedule, execute_async,</span>
@@ -904,6 +888,9 @@ window.Quarto = {
 
 <!-- -->
 
+</section>
+</div>
+</section>
 </section>
 
 </main> <!-- /main -->
@@ -1404,269 +1391,271 @@ window.Quarto = {
 <span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/inference_prefill_vs_decode_math.png)</span>{width="95%"}</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    subgraph Frontend[<span class="ot">"</span><span class="st">API Server / Frontend</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>        AsyncLLM[<span class="ot">"</span><span class="st">AsyncLLM 异步服务接口</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>        ReqQueue[<span class="ot">"</span><span class="st">输入请求队列 (Input Queue)</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    subgraph Core[<span class="ot">"</span><span class="st">EngineCore (单事件循环单线程)</span><span class="ot">"</span>]</span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>        Scheduler[<span class="ot">"</span><span class="st">Unified Scheduler (统一调度器)</span><span class="ot">"</span>]</span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>        KVManager[<span class="ot">"</span><span class="st">KVCacheManager (显存块分配)</span><span class="ot">"</span>]</span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    subgraph Backend[<span class="ot">"</span><span class="st">分布式 Worker 集群 (WorkerPool)</span><span class="ot">"</span>]</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>        W0[<span class="ot">"</span><span class="st">ModelRunner (GPU 0 - TP Rank 0)</span><span class="ot">"</span>]</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>        W1[<span class="ot">"</span><span class="st">ModelRunner (GPU 1 - TP Rank 1)</span><span class="ot">"</span>]</span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    AsyncLLM --&gt;|ZMQ / IPC 无锁通道| Core</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    Scheduler &amp; KVManager --&gt;|发送执行指令| Backend</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-2：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>    Req[<span class="ot">"</span><span class="st">HTTP 请求到达</span><span class="ot">"</span>] --&gt; Tokenize[<span class="ot">"</span><span class="st">分词器编码 Tokens</span><span class="ot">"</span>]</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>    Tokenize --&gt; PutReq[<span class="ot">"</span><span class="st">压入 EngineCore 请求队列</span><span class="ot">"</span>]</span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>    PutReq --&gt; Step[<span class="ot">"</span><span class="st">EngineCore::step() 统一调度决策</span><span class="ot">"</span>]</span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a>    Step --&gt; Forward[<span class="ot">"</span><span class="st">GPU ModelRunner 并行前向推理 (TP AllReduce)</span><span class="ot">"</span>]</span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>    Forward --&gt; Detokenize[<span class="ot">"</span><span class="st">采样器输出 Token 解码并流式回传 SSE</span><span class="ot">"</span>]</span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-3：vLLM V1 端到端请求流转与异构协同执行流水线<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>**vLLM V1 架构**是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：</span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    subgraph Frontend[<span class="ot">"</span><span class="st">API Server / Frontend</span><span class="ot">"</span>]</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>        AsyncLLM[<span class="ot">"</span><span class="st">AsyncLLM 异步服务接口</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>        ReqQueue[<span class="ot">"</span><span class="st">输入请求队列 (Input Queue)</span><span class="ot">"</span>]</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>    subgraph Core[<span class="ot">"</span><span class="st">EngineCore (单事件循环单线程)</span><span class="ot">"</span>]</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>        Scheduler[<span class="ot">"</span><span class="st">Unified Scheduler (统一调度器)</span><span class="ot">"</span>]</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>        KVManager[<span class="ot">"</span><span class="st">KVCacheManager (显存块分配)</span><span class="ot">"</span>]</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    subgraph Backend[<span class="ot">"</span><span class="st">分布式 Worker 集群 (WorkerPool)</span><span class="ot">"</span>]</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>        W0[<span class="ot">"</span><span class="st">ModelRunner (GPU 0 - TP Rank 0)</span><span class="ot">"</span>]</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>        W1[<span class="ot">"</span><span class="st">ModelRunner (GPU 1 - TP Rank 1)</span><span class="ot">"</span>]</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    AsyncLLM --&gt;|ZMQ / IPC 无锁通道| Core</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>    Scheduler &amp; KVManager --&gt;|发送执行指令| Backend</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-2：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**`AsyncLLM`（前端服务层）**：面向客户端的异步 HTTP/gRPC/SSE 接入网关，负责请求接入、Tokenization 分词、流式输出解包与取消信号监听；</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**`EngineCore` / `EngineCoreProc`（调度核心内核层）**：运行在完全物理隔离的独立进程中，由单事件循环主导，独占全局请求生命周期调度器（<span class="in">`Scheduler`</span>）与显存逻辑账本（<span class="in">`KVCacheManager`</span>）；</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**`Worker` / `GPUModelRunner`（设备执行层）**：由分布式并行（TP/PP）驱动的执行引擎，独占物理 GPU 张量、物理 KV Block 内存池与 CUDA Graph 捕获环境。</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a>它解决的核心工程问题是：**通过清晰的单写者状态所有权（Single-Writer State Ownership）与轻量化 IPC 进程解耦，将 CPU 控制侧的每步调度耗时压制在微秒级，实现调度步频与 GPU 硬件峰值吞吐的完全匹配**。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>端到端请求流转与核心控制循环如图 1-1 至图 1-3 所示：</span>
 <span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>**vLLM V1 架构**是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/inference_prefill_vs_decode_math.png)</span>{width="95%"}</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a>为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**`AsyncLLM`（前端服务层）**：面向客户端的异步 HTTP/gRPC/SSE 接入网关，负责请求接入、Tokenization 分词、流式输出解包与取消信号监听；</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**`EngineCore` / `EngineCoreProc`（调度核心内核层）**：运行在完全物理隔离的独立进程中，由单事件循环主导，独占全局请求生命周期调度器（<span class="in">`Scheduler`</span>）与显存逻辑账本（<span class="in">`KVCacheManager`</span>）；</span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**`Worker` / `GPUModelRunner`（设备执行层）**：由分布式并行（TP/PP）驱动的执行引擎，独占物理 GPU 张量、物理 KV Block 内存池与 CUDA Graph 捕获环境。</span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>它解决的核心工程问题是：**通过清晰的单写者状态所有权（Single-Writer State Ownership）与轻量化 IPC 进程解耦，将 CPU 控制侧的每步调度耗时压制在微秒级，实现调度步频与 GPU 硬件峰值吞吐的完全匹配**。</span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**三段式步进迭代循环（Schedule $\to$ Execute $\to$ Update）**：</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>   在 <span class="in">`EngineCore.step()`</span> 内部，系统严格遵循严谨的时序管道：</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**调度阶段（Schedule）**：<span class="in">`Scheduler`</span> 消费输入队列，根据全局 Token 预算（Token Budget）生成本次批次的执行计划 <span class="in">`plan = scheduler.schedule()`</span>；</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**异步发射与计算重叠（Async Execute &amp; Overlap）**：通过 <span class="in">`model_executor.execute_model(plan, non_block=True)`</span> 非阻塞地向 GPU Worker 广播执行指令。在 GPU 执行 Heavy GEMM 与 Attention 的微小间隙，CPU 主线程并发执行结构化输出的 Grammar 状态机掩码提取；</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**等待同步与取消处理（Wait &amp; Abort Drain）**：同步等待 Worker 的 <span class="in">`future()`</span> 返回本次推理结果；在应用输出前，优先消费清空执行期间积累的取消请求队列 <span class="in">`process_aborts()`</span>；</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**状态递推更新（Update）**：调用 <span class="in">`scheduler.update_from_output(plan, model_output)`</span>，更新每个请求的已计算 Token 计数并回收已完结请求的逻辑 KV 块。</span>
 <span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**端到端流水线推进（图 1-3）**：</span>
 <span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a>端到端请求流转与核心控制循环如图 1-1 至图 1-3 所示：</span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**三段式步进迭代循环（Schedule $\to$ Execute $\to$ Update）**：</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>   在 <span class="in">`EngineCore.step()`</span> 内部，系统严格遵循严谨的时序管道：</span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**调度阶段（Schedule）**：<span class="in">`Scheduler`</span> 消费输入队列，根据全局 Token 预算（Token Budget）生成本次批次的执行计划 <span class="in">`plan = scheduler.schedule()`</span>；</span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**异步发射与计算重叠（Async Execute &amp; Overlap）**：通过 <span class="in">`model_executor.execute_model(plan, non_block=True)`</span> 非阻塞地向 GPU Worker 广播执行指令。在 GPU 执行 Heavy GEMM 与 Attention 的微小间隙，CPU 主线程并发执行结构化输出的 Grammar 状态机掩码提取；</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**等待同步与取消处理（Wait &amp; Abort Drain）**：同步等待 Worker 的 <span class="in">`future()`</span> 返回本次推理结果；在应用输出前，优先消费清空执行期间积累的取消请求队列 <span class="in">`process_aborts()`</span>；</span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**状态递推更新（Update）**：调用 <span class="in">`scheduler.update_from_output(plan, model_output)`</span>，更新每个请求的已计算 Token 计数并回收已完结请求的逻辑 KV 块。</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**端到端流水线推进（图 1-3）**：</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>   HTTP 请求到达后，<span class="in">`AsyncLLM`</span> 完成异步分词，将 <span class="in">`EngineCoreRequest`</span> 推入无锁共享内存队列；<span class="in">`EngineCore`</span> 批量消费并驱动 GPU ModelRunner 并发前向传播；采样完成后的 Token 结果以流式事件（SSE）的形式逆向实时推送回前端。</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>    Req[<span class="ot">"</span><span class="st">HTTP 请求到达</span><span class="ot">"</span>] --&gt; Tokenize[<span class="ot">"</span><span class="st">分词器编码 Tokens</span><span class="ot">"</span>]</span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>    Tokenize --&gt; PutReq[<span class="ot">"</span><span class="st">压入 EngineCore 请求队列</span><span class="ot">"</span>]</span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>    PutReq --&gt; Step[<span class="ot">"</span><span class="st">EngineCore::step() 统一调度决策</span><span class="ot">"</span>]</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    Step --&gt; Forward[<span class="ot">"</span><span class="st">GPU ModelRunner 并行前向推理 (TP AllReduce)</span><span class="ot">"</span>]</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    Forward --&gt; Detokenize[<span class="ot">"</span><span class="st">采样器输出 Token 解码并流式回传 SSE</span><span class="ot">"</span>]</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-3：vLLM V1 端到端请求流转与异构协同执行流水线<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a>   HTTP 请求到达后，<span class="in">`AsyncLLM`</span> 完成异步分词，将 <span class="in">`EngineCoreRequest`</span> 推入无锁共享内存队列；<span class="in">`EngineCore`</span> 批量消费并驱动 GPU ModelRunner 并发前向传播；采样完成后的 Token 结果以流式事件（SSE）的形式逆向实时推送回前端。</span>
 <span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**严格的单写者状态所有权（Single Writer Discipline）**：</span>
-<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a>  整个系统中每个核心对象的状态拥有唯一的权威写入者：</span>
-<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`AsyncLLM`</span> 独占流式传输通道与输入请求缓冲，严禁越权修改内部 KV 账本；</span>
-<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`EngineCore`</span> 与 <span class="in">`Scheduler`</span> 独占跨步请求生命周期（Waiting, Running, Swapped, Finished），严禁 Worker 擅自更改请求状态；</span>
-<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`GPUModelRunner`</span> 独占物理显存与算子 Kernel 执行。若跨进程试图共享可变全局对象，会导致灾难性的数据竞争与状态错位。</span>
-<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Abort 取消处理的原子时序边界**：</span>
-<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a>  若请求在 GPU 执行前向传播期间被客户端主动取消（如用户关闭网页），<span class="in">`EngineCore`</span> 必须在**调用 `scheduler.update_from_output` 之前**彻底消费并处理取消信号！若顺序颠倒（先更新再取消），模型刚生成的 Token 会被误推送给已断开的客户端，甚至引起已被释放的物理 Block 发生二次读写踩内存。</span>
-<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**计划与执行结果的版本一致性不变量**：</span>
-<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a>  <span class="in">`SchedulerOutput`</span> 与 <span class="in">`ModelRunnerOutput`</span> 必须严格属于同一个迭代步骤。严禁在 Worker 执行失败时返回伪造的静默空输出，必须通过强类型异常驱动全局容错与降级。</span>
-<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性条件与常见误区</span></span>
+<span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**严格的单写者状态所有权（Single Writer Discipline）**：</span>
+<span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>  整个系统中每个核心对象的状态拥有唯一的权威写入者：</span>
+<span id="cb3-106"><a href="#cb3-106" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`AsyncLLM`</span> 独占流式传输通道与输入请求缓冲，严禁越权修改内部 KV 账本；</span>
+<span id="cb3-107"><a href="#cb3-107" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`EngineCore`</span> 与 <span class="in">`Scheduler`</span> 独占跨步请求生命周期（Waiting, Running, Swapped, Finished），严禁 Worker 擅自更改请求状态；</span>
+<span id="cb3-108"><a href="#cb3-108" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`GPUModelRunner`</span> 独占物理显存与算子 Kernel 执行。若跨进程试图共享可变全局对象，会导致灾难性的数据竞争与状态错位。</span>
+<span id="cb3-109"><a href="#cb3-109" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Abort 取消处理的原子时序边界**：</span>
+<span id="cb3-110"><a href="#cb3-110" aria-hidden="true" tabindex="-1"></a>  若请求在 GPU 执行前向传播期间被客户端主动取消（如用户关闭网页），<span class="in">`EngineCore`</span> 必须在**调用 `scheduler.update_from_output` 之前**彻底消费并处理取消信号！若顺序颠倒（先更新再取消），模型刚生成的 Token 会被误推送给已断开的客户端，甚至引起已被释放的物理 Block 发生二次读写踩内存。</span>
+<span id="cb3-111"><a href="#cb3-111" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-112"><a href="#cb3-112" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**计划与执行结果的版本一致性不变量**：</span>
+<span id="cb3-113"><a href="#cb3-113" aria-hidden="true" tabindex="-1"></a>  <span class="in">`SchedulerOutput`</span> 与 <span class="in">`ModelRunnerOutput`</span> 必须严格属于同一个迭代步骤。严禁在 Worker 执行失败时返回伪造的静默空输出，必须通过强类型异常驱动全局容错与降级。</span>
 <span id="cb3-114"><a href="#cb3-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**进程解耦带来的 IPC 序列化开销 vs GIL 消除红利**：</span>
-<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a>  将 EngineCore 独立为子进程彻底释放了 Python GIL 的并发阻塞，但引入了进程间通信开销。vLLM V1 采用极简的扁平 C-struct 内存布局与共享内存（Shared Memory）通道，将跨进程数据传输延迟压缩至十微秒级，使架构收益显著超越通信开销。</span>
-<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Grammar 准备与 GPU 计算的精妙重叠**：</span>
-<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a>  在 JSON 等强约束解码（Structured Outputs）中，计算下一个合法 Token 的 Bitmask 极其消耗 CPU 算力。通过在 <span class="in">`execute_model(non_block=True)`</span> 发射后立即开始计算 Grammar，系统完美地将 CPU 纯逻辑与 GPU 算力执行掩盖在同一时序窗口内，实现了近乎零气泡的控制流水线。</span>
-<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：单请求执行取消与控制流跟踪演练</span></span>
+<span id="cb3-115"><a href="#cb3-115" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程取舍</span></span>
+<span id="cb3-116"><a href="#cb3-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-117"><a href="#cb3-117" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**进程解耦带来的 IPC 序列化开销 vs GIL 消除红利**：</span>
+<span id="cb3-118"><a href="#cb3-118" aria-hidden="true" tabindex="-1"></a>  将 EngineCore 独立为子进程彻底释放了 Python GIL 的并发阻塞，但引入了进程间通信开销。vLLM V1 采用极简的扁平 C-struct 内存布局与共享内存（Shared Memory）通道，将跨进程数据传输延迟压缩至十微秒级，使架构收益显著超越通信开销。</span>
+<span id="cb3-119"><a href="#cb3-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-120"><a href="#cb3-120" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Grammar 准备与 GPU 计算的精妙重叠**：</span>
+<span id="cb3-121"><a href="#cb3-121" aria-hidden="true" tabindex="-1"></a>  在 JSON 等强约束解码（Structured Outputs）中，计算下一个合法 Token 的 Bitmask 极其消耗 CPU 算力。通过在 <span class="in">`execute_model(non_block=True)`</span> 发射后立即开始计算 Grammar，系统完美地将 CPU 纯逻辑与 GPU 算力执行掩盖在同一时序窗口内，实现了近乎零气泡的控制流水线。</span>
 <span id="cb3-122"><a href="#cb3-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a>考虑一个典型的并发取消场景：</span>
+<span id="cb3-123"><a href="#cb3-123" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示：单请求执行取消与控制流跟踪演练</span></span>
 <span id="cb3-124"><a href="#cb3-124" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>请求 $R_0$ 被调度进入当前批次，调度计划为 <span class="in">`{"scheduled_tokens": 4}`</span>；</span>
+<span id="cb3-125"><a href="#cb3-125" aria-hidden="true" tabindex="-1"></a>考虑一个典型的并发取消场景：</span>
 <span id="cb3-126"><a href="#cb3-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>系统调用 <span class="in">`execute_async`</span> 向 GPU 发射异步推理任务，GPU 开始执行前向注意力计算；</span>
+<span id="cb3-127"><a href="#cb3-127" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>请求 $R_0$ 被调度进入当前批次，调度计划为 <span class="in">`{"scheduled_tokens": 4}`</span>；</span>
 <span id="cb3-128"><a href="#cb3-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>在 GPU 计算尚未结束的窗口内，客户端由于超时断开了 HTTP 连接，取消信号进入待处理队列；</span>
+<span id="cb3-129"><a href="#cb3-129" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>系统调用 <span class="in">`execute_async`</span> 向 GPU 发射异步推理任务，GPU 开始执行前向注意力计算；</span>
 <span id="cb3-130"><a href="#cb3-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>核心调度流程执行控制：</span>
-<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>首先执行 <span class="in">`grammar = get_grammar(plan)`</span>，准备下一 Token 约束；</span>
-<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>随后执行 <span class="in">`future()`</span> 阻塞等待 GPU 输出；</span>
-<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**关键时序点**：在得到 <span class="in">`model_output`</span> 后，必须立刻执行 <span class="in">`process_aborts()`</span>，将 $R_0$ 标记为已取消；</span>
-<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>最后执行 <span class="in">`update(plan, model_output)`</span>：调度器感知到 $R_0$ 已被取消，安全丢弃其输出 Token 并直接回收其持有的 KV Cache Block，绝不会将废弃数据向前端泄露。</span>
-<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a>断言 trace 序列严格保持：<span class="in">`["schedule", "execute", "grammar", "wait", "aborts", "update"]`</span>，完整闭环。</span>
+<span id="cb3-131"><a href="#cb3-131" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>在 GPU 计算尚未结束的窗口内，客户端由于超时断开了 HTTP 连接，取消信号进入待处理队列；</span>
+<span id="cb3-132"><a href="#cb3-132" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-133"><a href="#cb3-133" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>核心调度流程执行控制：</span>
+<span id="cb3-134"><a href="#cb3-134" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>首先执行 <span class="in">`grammar = get_grammar(plan)`</span>，准备下一 Token 约束；</span>
+<span id="cb3-135"><a href="#cb3-135" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>随后执行 <span class="in">`future()`</span> 阻塞等待 GPU 输出；</span>
+<span id="cb3-136"><a href="#cb3-136" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**关键时序点**：在得到 <span class="in">`model_output`</span> 后，必须立刻执行 <span class="in">`process_aborts()`</span>，将 $R_0$ 标记为已取消；</span>
+<span id="cb3-137"><a href="#cb3-137" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>最后执行 <span class="in">`update(plan, model_output)`</span>：调度器感知到 $R_0$ 已被取消，安全丢弃其输出 Token 并直接回收其持有的 KV Cache Block，绝不会将废弃数据向前端泄露。</span>
 <span id="cb3-138"><a href="#cb3-138" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb3-139"><a href="#cb3-139" aria-hidden="true" tabindex="-1"></a>断言 trace 序列严格保持：<span class="in">`["schedule", "execute", "grammar", "wait", "aborts", "update"]`</span>，完整闭环。</span>
 <span id="cb3-140"><a href="#cb3-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a>补齐一个最小 <span class="in">`EngineCore.step`</span> 控制流模型。重点不是模拟 GPU，而是保持官方源码中的顺序合同；不得删除 trace 断言。</span>
+<span id="cb3-141"><a href="#cb3-141" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
 <span id="cb3-142"><a href="#cb3-142" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a>只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 位置，不得删除断言或放宽通过条件。</span>
+<span id="cb3-143"><a href="#cb3-143" aria-hidden="true" tabindex="-1"></a>补齐一个最小 <span class="in">`EngineCore.step`</span> 控制流模型。重点不是模拟 GPU，而是保持官方源码中的顺序合同；不得删除 trace 断言。</span>
 <span id="cb3-144"><a href="#cb3-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-147"><a href="#cb3-147" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-148"><a href="#cb3-148" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> engine_core_step(has_requests, schedule, execute_async,</span>
-<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a>                     get_grammar, process_aborts, update):</span>
-<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a>    trace <span class="op">=</span> []</span>
-<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="kw">not</span> has_requests:</span>
-<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> {}, <span class="va">False</span>, trace</span>
-<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>    <span class="co"># TODO：保持 schedule → async execute/grammar → wait → aborts → update。</span></span>
-<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a>    plan <span class="op">=</span> ______</span>
-<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"schedule"</span>)</span>
-<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>    future <span class="op">=</span> ______</span>
-<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"execute"</span>)</span>
-<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>    grammar <span class="op">=</span> ______</span>
-<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"grammar"</span>)</span>
-<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>    model_output <span class="op">=</span> ______</span>
-<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"wait"</span>)</span>
-<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>    ______</span>
-<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"aborts"</span>)</span>
-<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>    outputs <span class="op">=</span> ______</span>
-<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"update"</span>)</span>
-<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> outputs, plan[<span class="st">"scheduled_tokens"</span>] <span class="op">&gt;</span> <span class="dv">0</span>, trace</span>
-<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>events <span class="op">=</span> []</span>
-<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a>schedule <span class="op">=</span> <span class="kw">lambda</span>: {<span class="st">"scheduled_tokens"</span>: <span class="dv">4</span>}</span>
-<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>execute <span class="op">=</span> <span class="kw">lambda</span> plan: (<span class="kw">lambda</span>: {<span class="st">"tokens"</span>: [<span class="dv">7</span>]})</span>
-<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>grammar <span class="op">=</span> <span class="kw">lambda</span> plan: {<span class="st">"mask"</span>: <span class="va">None</span>}</span>
-<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>aborts <span class="op">=</span> <span class="kw">lambda</span>: events.append(<span class="st">"abort-queue-drained"</span>)</span>
-<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>update <span class="op">=</span> <span class="kw">lambda</span> plan, output: {<span class="st">"r0"</span>: output[<span class="st">"tokens"</span>]}</span>
-<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>out, ran, trace <span class="op">=</span> engine_core_step(<span class="va">True</span>, schedule, execute, grammar, aborts, update)</span>
-<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> out <span class="op">==</span> {<span class="st">"r0"</span>: [<span class="dv">7</span>]} <span class="kw">and</span> ran</span>
-<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> trace <span class="op">==</span> [<span class="st">"schedule"</span>, <span class="st">"execute"</span>, <span class="st">"grammar"</span>, <span class="st">"wait"</span>, <span class="st">"aborts"</span>, <span class="st">"update"</span>]</span>
-<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> events <span class="op">==</span> [<span class="st">"abort-queue-drained"</span>]</span>
-<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> engine_core_step(<span class="va">False</span>, schedule, execute, grammar, aborts, update) <span class="op">==</span> ({}, <span class="va">False</span>, [])</span>
-<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb3-145"><a href="#cb3-145" aria-hidden="true" tabindex="-1"></a>只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 位置，不得删除断言或放宽通过条件。</span>
+<span id="cb3-146"><a href="#cb3-146" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-149"><a href="#cb3-149" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-150"><a href="#cb3-150" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb3-151"><a href="#cb3-151" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> engine_core_step(has_requests, schedule, execute_async,</span>
+<span id="cb3-152"><a href="#cb3-152" aria-hidden="true" tabindex="-1"></a>                     get_grammar, process_aborts, update):</span>
+<span id="cb3-153"><a href="#cb3-153" aria-hidden="true" tabindex="-1"></a>    trace <span class="op">=</span> []</span>
+<span id="cb3-154"><a href="#cb3-154" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="kw">not</span> has_requests:</span>
+<span id="cb3-155"><a href="#cb3-155" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> {}, <span class="va">False</span>, trace</span>
+<span id="cb3-156"><a href="#cb3-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-157"><a href="#cb3-157" aria-hidden="true" tabindex="-1"></a>    <span class="co"># TODO：保持 schedule → async execute/grammar → wait → aborts → update。</span></span>
+<span id="cb3-158"><a href="#cb3-158" aria-hidden="true" tabindex="-1"></a>    plan <span class="op">=</span> ______</span>
+<span id="cb3-159"><a href="#cb3-159" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"schedule"</span>)</span>
+<span id="cb3-160"><a href="#cb3-160" aria-hidden="true" tabindex="-1"></a>    future <span class="op">=</span> ______</span>
+<span id="cb3-161"><a href="#cb3-161" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"execute"</span>)</span>
+<span id="cb3-162"><a href="#cb3-162" aria-hidden="true" tabindex="-1"></a>    grammar <span class="op">=</span> ______</span>
+<span id="cb3-163"><a href="#cb3-163" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"grammar"</span>)</span>
+<span id="cb3-164"><a href="#cb3-164" aria-hidden="true" tabindex="-1"></a>    model_output <span class="op">=</span> ______</span>
+<span id="cb3-165"><a href="#cb3-165" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"wait"</span>)</span>
+<span id="cb3-166"><a href="#cb3-166" aria-hidden="true" tabindex="-1"></a>    ______</span>
+<span id="cb3-167"><a href="#cb3-167" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"aborts"</span>)</span>
+<span id="cb3-168"><a href="#cb3-168" aria-hidden="true" tabindex="-1"></a>    outputs <span class="op">=</span> ______</span>
+<span id="cb3-169"><a href="#cb3-169" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"update"</span>)</span>
+<span id="cb3-170"><a href="#cb3-170" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> outputs, plan[<span class="st">"scheduled_tokens"</span>] <span class="op">&gt;</span> <span class="dv">0</span>, trace</span>
+<span id="cb3-171"><a href="#cb3-171" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-172"><a href="#cb3-172" aria-hidden="true" tabindex="-1"></a>events <span class="op">=</span> []</span>
+<span id="cb3-173"><a href="#cb3-173" aria-hidden="true" tabindex="-1"></a>schedule <span class="op">=</span> <span class="kw">lambda</span>: {<span class="st">"scheduled_tokens"</span>: <span class="dv">4</span>}</span>
+<span id="cb3-174"><a href="#cb3-174" aria-hidden="true" tabindex="-1"></a>execute <span class="op">=</span> <span class="kw">lambda</span> plan: (<span class="kw">lambda</span>: {<span class="st">"tokens"</span>: [<span class="dv">7</span>]})</span>
+<span id="cb3-175"><a href="#cb3-175" aria-hidden="true" tabindex="-1"></a>grammar <span class="op">=</span> <span class="kw">lambda</span> plan: {<span class="st">"mask"</span>: <span class="va">None</span>}</span>
+<span id="cb3-176"><a href="#cb3-176" aria-hidden="true" tabindex="-1"></a>aborts <span class="op">=</span> <span class="kw">lambda</span>: events.append(<span class="st">"abort-queue-drained"</span>)</span>
+<span id="cb3-177"><a href="#cb3-177" aria-hidden="true" tabindex="-1"></a>update <span class="op">=</span> <span class="kw">lambda</span> plan, output: {<span class="st">"r0"</span>: output[<span class="st">"tokens"</span>]}</span>
+<span id="cb3-178"><a href="#cb3-178" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-179"><a href="#cb3-179" aria-hidden="true" tabindex="-1"></a>out, ran, trace <span class="op">=</span> engine_core_step(<span class="va">True</span>, schedule, execute, grammar, aborts, update)</span>
+<span id="cb3-180"><a href="#cb3-180" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> out <span class="op">==</span> {<span class="st">"r0"</span>: [<span class="dv">7</span>]} <span class="kw">and</span> ran</span>
+<span id="cb3-181"><a href="#cb3-181" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> trace <span class="op">==</span> [<span class="st">"schedule"</span>, <span class="st">"execute"</span>, <span class="st">"grammar"</span>, <span class="st">"wait"</span>, <span class="st">"aborts"</span>, <span class="st">"update"</span>]</span>
+<span id="cb3-182"><a href="#cb3-182" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> events <span class="op">==</span> [<span class="st">"abort-queue-drained"</span>]</span>
+<span id="cb3-183"><a href="#cb3-183" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> engine_core_step(<span class="va">False</span>, schedule, execute, grammar, aborts, update) <span class="op">==</span> ({}, <span class="va">False</span>, [])</span>
+<span id="cb3-184"><a href="#cb3-184" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-185"><a href="#cb3-185" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a>运行断言；再让 <span class="in">`scheduled_tokens=0`</span>，解释为什么仍可能走完控制路径但 <span class="in">`ran=False`</span>。</span>
+<span id="cb3-186"><a href="#cb3-186" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
 <span id="cb3-187"><a href="#cb3-187" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb3-188"><a href="#cb3-188" aria-hidden="true" tabindex="-1"></a>运行断言；再让 <span class="in">`scheduled_tokens=0`</span>，解释为什么仍可能走完控制路径但 <span class="in">`ran=False`</span>。</span>
 <span id="cb3-189"><a href="#cb3-189" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a><span class="in">`AsyncLLM`</span>、<span class="in">`EngineCore`</span>、<span class="in">`Scheduler`</span> 和 GPU worker 各自拥有什么状态？为什么不能把它们合成一个全局可变对象？</span>
+<span id="cb3-190"><a href="#cb3-190" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
 <span id="cb3-191"><a href="#cb3-191" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-192"><a href="#cb3-192" aria-hidden="true" tabindex="-1"></a><span class="in">`AsyncLLM`</span>、<span class="in">`EngineCore`</span>、<span class="in">`Scheduler`</span> 和 GPU worker 各自拥有什么状态？为什么不能把它们合成一个全局可变对象？</span>
 <span id="cb3-193"><a href="#cb3-193" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb3-194"><a href="#cb3-194" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
 <span id="cb3-195"><a href="#cb3-195" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a>为什么源码先 <span class="in">`execute_model(non_block=True)`</span>，再取得 grammar bitmask，最后等待 future？这是否意味着 grammar 可以晚于采样？</span>
+<span id="cb3-196"><a href="#cb3-196" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
 <span id="cb3-197"><a href="#cb3-197" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-198"><a href="#cb3-198" aria-hidden="true" tabindex="-1"></a>为什么源码先 <span class="in">`execute_model(non_block=True)`</span>，再取得 grammar bitmask，最后等待 future？这是否意味着 grammar 可以晚于采样？</span>
 <span id="cb3-199"><a href="#cb3-199" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb3-200"><a href="#cb3-200" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
 <span id="cb3-201"><a href="#cb3-201" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a>某请求在 GPU forward 期间被取消。为何 <span class="in">`EngineCore.step`</span> 要在 <span class="in">`update_from_output`</span> 前处理 abort？</span>
+<span id="cb3-202"><a href="#cb3-202" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
 <span id="cb3-203"><a href="#cb3-203" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb3-204"><a href="#cb3-204" aria-hidden="true" tabindex="-1"></a>某请求在 GPU forward 期间被取消。为何 <span class="in">`EngineCore.step`</span> 要在 <span class="in">`update_from_output`</span> 前处理 abort？</span>
 <span id="cb3-205"><a href="#cb3-205" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分规则</span></span>
+<span id="cb3-206"><a href="#cb3-206" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
 <span id="cb3-207"><a href="#cb3-207" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：主路径 2 分、边界条件 1 分、能映射回源码对象 1 分；</span>
-<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；</span>
-<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。</span>
-<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
-<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a>先独立完成。核对后请更换一个 batch、cache 或硬件条件重新推演，不能只复制。</span>
+<span id="cb3-208"><a href="#cb3-208" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分规则</span></span>
+<span id="cb3-209"><a href="#cb3-209" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-210"><a href="#cb3-210" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：主路径 2 分、边界条件 1 分、能映射回源码对象 1 分；</span>
+<span id="cb3-211"><a href="#cb3-211" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分：必须包含对象、状态变化、正确性或成本链；</span>
+<span id="cb3-212"><a href="#cb3-212" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：把论文峰值写成普遍生产结论；把源码支持写成所有模型/硬件可用；混淆算法正确性与性能；只背类名而说不清状态所有权。</span>
+<span id="cb3-213"><a href="#cb3-213" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-214"><a href="#cb3-214" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb3-215"><a href="#cb3-215" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
 <span id="cb3-216"><a href="#cb3-216" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-219"><a href="#cb3-219" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb3-220"><a href="#cb3-220" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> engine_core_step(has_requests, schedule, execute_async,</span>
-<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a>                     get_grammar, process_aborts, update):</span>
-<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a>    trace <span class="op">=</span> []</span>
-<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="kw">not</span> has_requests:</span>
-<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> {}, <span class="va">False</span>, trace</span>
-<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>    plan <span class="op">=</span> schedule()</span>
-<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"schedule"</span>)</span>
-<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a>    future <span class="op">=</span> execute_async(plan)</span>
-<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"execute"</span>)</span>
-<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a>    grammar <span class="op">=</span> get_grammar(plan)</span>
-<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"grammar"</span>)</span>
-<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a>    model_output <span class="op">=</span> future()</span>
-<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"wait"</span>)</span>
-<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a>    process_aborts()</span>
-<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"aborts"</span>)</span>
-<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a>    outputs <span class="op">=</span> update(plan, model_output)</span>
-<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"update"</span>)</span>
-<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> outputs, plan[<span class="st">"scheduled_tokens"</span>] <span class="op">&gt;</span> <span class="dv">0</span>, trace</span>
-<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-241"><a href="#cb3-241" aria-hidden="true" tabindex="-1"></a>events <span class="op">=</span> []</span>
-<span id="cb3-242"><a href="#cb3-242" aria-hidden="true" tabindex="-1"></a>schedule <span class="op">=</span> <span class="kw">lambda</span>: {<span class="st">"scheduled_tokens"</span>: <span class="dv">4</span>}</span>
-<span id="cb3-243"><a href="#cb3-243" aria-hidden="true" tabindex="-1"></a>execute <span class="op">=</span> <span class="kw">lambda</span> plan: (<span class="kw">lambda</span>: {<span class="st">"tokens"</span>: [<span class="dv">7</span>]})</span>
-<span id="cb3-244"><a href="#cb3-244" aria-hidden="true" tabindex="-1"></a>grammar <span class="op">=</span> <span class="kw">lambda</span> plan: {<span class="st">"mask"</span>: <span class="va">None</span>}</span>
-<span id="cb3-245"><a href="#cb3-245" aria-hidden="true" tabindex="-1"></a>aborts <span class="op">=</span> <span class="kw">lambda</span>: events.append(<span class="st">"abort-queue-drained"</span>)</span>
-<span id="cb3-246"><a href="#cb3-246" aria-hidden="true" tabindex="-1"></a>update <span class="op">=</span> <span class="kw">lambda</span> plan, output: {<span class="st">"r0"</span>: output[<span class="st">"tokens"</span>]}</span>
-<span id="cb3-247"><a href="#cb3-247" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-248"><a href="#cb3-248" aria-hidden="true" tabindex="-1"></a>out, ran, trace <span class="op">=</span> engine_core_step(<span class="va">True</span>, schedule, execute, grammar, aborts, update)</span>
-<span id="cb3-249"><a href="#cb3-249" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> out <span class="op">==</span> {<span class="st">"r0"</span>: [<span class="dv">7</span>]} <span class="kw">and</span> ran</span>
-<span id="cb3-250"><a href="#cb3-250" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> trace <span class="op">==</span> [<span class="st">"schedule"</span>, <span class="st">"execute"</span>, <span class="st">"grammar"</span>, <span class="st">"wait"</span>, <span class="st">"aborts"</span>, <span class="st">"update"</span>]</span>
-<span id="cb3-251"><a href="#cb3-251" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> events <span class="op">==</span> [<span class="st">"abort-queue-drained"</span>]</span>
-<span id="cb3-252"><a href="#cb3-252" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> engine_core_step(<span class="va">False</span>, schedule, execute, grammar, aborts, update) <span class="op">==</span> ({}, <span class="va">False</span>, [])</span>
-<span id="cb3-253"><a href="#cb3-253" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-254"><a href="#cb3-254" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-255"><a href="#cb3-255" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-217"><a href="#cb3-217" aria-hidden="true" tabindex="-1"></a>先独立完成。核对后请更换一个 batch、cache 或硬件条件重新推演，不能只复制。</span>
+<span id="cb3-218"><a href="#cb3-218" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-221"><a href="#cb3-221" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb3-222"><a href="#cb3-222" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb3-223"><a href="#cb3-223" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> engine_core_step(has_requests, schedule, execute_async,</span>
+<span id="cb3-224"><a href="#cb3-224" aria-hidden="true" tabindex="-1"></a>                     get_grammar, process_aborts, update):</span>
+<span id="cb3-225"><a href="#cb3-225" aria-hidden="true" tabindex="-1"></a>    trace <span class="op">=</span> []</span>
+<span id="cb3-226"><a href="#cb3-226" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="kw">not</span> has_requests:</span>
+<span id="cb3-227"><a href="#cb3-227" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> {}, <span class="va">False</span>, trace</span>
+<span id="cb3-228"><a href="#cb3-228" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-229"><a href="#cb3-229" aria-hidden="true" tabindex="-1"></a>    plan <span class="op">=</span> schedule()</span>
+<span id="cb3-230"><a href="#cb3-230" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"schedule"</span>)</span>
+<span id="cb3-231"><a href="#cb3-231" aria-hidden="true" tabindex="-1"></a>    future <span class="op">=</span> execute_async(plan)</span>
+<span id="cb3-232"><a href="#cb3-232" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"execute"</span>)</span>
+<span id="cb3-233"><a href="#cb3-233" aria-hidden="true" tabindex="-1"></a>    grammar <span class="op">=</span> get_grammar(plan)</span>
+<span id="cb3-234"><a href="#cb3-234" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"grammar"</span>)</span>
+<span id="cb3-235"><a href="#cb3-235" aria-hidden="true" tabindex="-1"></a>    model_output <span class="op">=</span> future()</span>
+<span id="cb3-236"><a href="#cb3-236" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"wait"</span>)</span>
+<span id="cb3-237"><a href="#cb3-237" aria-hidden="true" tabindex="-1"></a>    process_aborts()</span>
+<span id="cb3-238"><a href="#cb3-238" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"aborts"</span>)</span>
+<span id="cb3-239"><a href="#cb3-239" aria-hidden="true" tabindex="-1"></a>    outputs <span class="op">=</span> update(plan, model_output)</span>
+<span id="cb3-240"><a href="#cb3-240" aria-hidden="true" tabindex="-1"></a>    trace.append(<span class="st">"update"</span>)</span>
+<span id="cb3-241"><a href="#cb3-241" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> outputs, plan[<span class="st">"scheduled_tokens"</span>] <span class="op">&gt;</span> <span class="dv">0</span>, trace</span>
+<span id="cb3-242"><a href="#cb3-242" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-243"><a href="#cb3-243" aria-hidden="true" tabindex="-1"></a>events <span class="op">=</span> []</span>
+<span id="cb3-244"><a href="#cb3-244" aria-hidden="true" tabindex="-1"></a>schedule <span class="op">=</span> <span class="kw">lambda</span>: {<span class="st">"scheduled_tokens"</span>: <span class="dv">4</span>}</span>
+<span id="cb3-245"><a href="#cb3-245" aria-hidden="true" tabindex="-1"></a>execute <span class="op">=</span> <span class="kw">lambda</span> plan: (<span class="kw">lambda</span>: {<span class="st">"tokens"</span>: [<span class="dv">7</span>]})</span>
+<span id="cb3-246"><a href="#cb3-246" aria-hidden="true" tabindex="-1"></a>grammar <span class="op">=</span> <span class="kw">lambda</span> plan: {<span class="st">"mask"</span>: <span class="va">None</span>}</span>
+<span id="cb3-247"><a href="#cb3-247" aria-hidden="true" tabindex="-1"></a>aborts <span class="op">=</span> <span class="kw">lambda</span>: events.append(<span class="st">"abort-queue-drained"</span>)</span>
+<span id="cb3-248"><a href="#cb3-248" aria-hidden="true" tabindex="-1"></a>update <span class="op">=</span> <span class="kw">lambda</span> plan, output: {<span class="st">"r0"</span>: output[<span class="st">"tokens"</span>]}</span>
+<span id="cb3-249"><a href="#cb3-249" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-250"><a href="#cb3-250" aria-hidden="true" tabindex="-1"></a>out, ran, trace <span class="op">=</span> engine_core_step(<span class="va">True</span>, schedule, execute, grammar, aborts, update)</span>
+<span id="cb3-251"><a href="#cb3-251" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> out <span class="op">==</span> {<span class="st">"r0"</span>: [<span class="dv">7</span>]} <span class="kw">and</span> ran</span>
+<span id="cb3-252"><a href="#cb3-252" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> trace <span class="op">==</span> [<span class="st">"schedule"</span>, <span class="st">"execute"</span>, <span class="st">"grammar"</span>, <span class="st">"wait"</span>, <span class="st">"aborts"</span>, <span class="st">"update"</span>]</span>
+<span id="cb3-253"><a href="#cb3-253" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> events <span class="op">==</span> [<span class="st">"abort-queue-drained"</span>]</span>
+<span id="cb3-254"><a href="#cb3-254" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> engine_core_step(<span class="va">False</span>, schedule, execute, grammar, aborts, update) <span class="op">==</span> ({}, <span class="va">False</span>, [])</span>
+<span id="cb3-255"><a href="#cb3-255" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
 <span id="cb3-256"><a href="#cb3-256" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-257"><a href="#cb3-257" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**各层核心对象的状态所有权矩阵（State Ownership Matrix）**：</span>
-<span id="cb3-258"><a href="#cb3-258" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`AsyncLLM`（前端服务层）**：拥有 HTTP/gRPC/SSE 客户端连接句柄、异步 Request Output 流、Tokenization/Detokenization 缓存以及尚未进入调度的待处理请求队列。负责面向客户端的生命周期生命线；</span>
-<span id="cb3-259"><a href="#cb3-259" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`EngineCore`（调度协调层）**：拥有主事件循环（Busy Loop）、跨进程 IPC 通信通道、输入/输出序列化协议栈，以及对 Executor 的协调控制逻辑；</span>
-<span id="cb3-260"><a href="#cb3-260" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`Scheduler`（权威裁决层）**：拥有全局请求状态机（Waiting, Running, Swapped, Finished）、逻辑 Token 计数（<span class="in">`num_computed_tokens`</span>, <span class="in">`total_tokens`</span>）、逻辑 KV Block 映射账本以及请求抢占（Preemption）决策权；</span>
-<span id="cb3-261"><a href="#cb3-261" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`GPUModelRunner / Worker`（设备执行层）**：独占物理 GPU 显存张量、PagedAttention 物理 KV 显存池（Block Table）、CUDA Graph 预热与执行环境、采样器状态以及分布式通信（NCCL TP/PP）组。</span>
-<span id="cb3-262"><a href="#cb3-262" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-263"><a href="#cb3-263" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**严禁合成全局可变对象的深层因果**：</span>
-<span id="cb3-264"><a href="#cb3-264" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**进程隔离与 GIL 消除前提**：为了突破 Python GIL 限制，Frontend、EngineCore 与 Worker 分布在不同物理进程中。跨进程内存天然不可变共享；</span>
-<span id="cb3-265"><a href="#cb3-265" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**杜绝多写者脑裂（Brain-Split &amp; Race Condition）**：若允许 Worker 越权修改 Scheduler 状态，在分布式流水线或异步执行中会产生无序状态竞争，无法确定哪个组件持有真值；</span>
-<span id="cb3-266"><a href="#cb3-266" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**故障隔离与可重放契约**：单写者加显式消息契约（IPC / Message Queue）使得每个组件的输入输出严格成对可审计，当某个 GPU Worker 发生 OOM 或 NCCL 崩溃时，EngineCore 能够精准定位故障边界，执行请求安全重排或优雅降级。</span>
-<span id="cb3-267"><a href="#cb3-267" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-268"><a href="#cb3-268" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-257"><a href="#cb3-257" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb3-258"><a href="#cb3-258" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-259"><a href="#cb3-259" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**各层核心对象的状态所有权矩阵（State Ownership Matrix）**：</span>
+<span id="cb3-260"><a href="#cb3-260" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`AsyncLLM`（前端服务层）**：拥有 HTTP/gRPC/SSE 客户端连接句柄、异步 Request Output 流、Tokenization/Detokenization 缓存以及尚未进入调度的待处理请求队列。负责面向客户端的生命周期生命线；</span>
+<span id="cb3-261"><a href="#cb3-261" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`EngineCore`（调度协调层）**：拥有主事件循环（Busy Loop）、跨进程 IPC 通信通道、输入/输出序列化协议栈，以及对 Executor 的协调控制逻辑；</span>
+<span id="cb3-262"><a href="#cb3-262" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`Scheduler`（权威裁决层）**：拥有全局请求状态机（Waiting, Running, Swapped, Finished）、逻辑 Token 计数（<span class="in">`num_computed_tokens`</span>, <span class="in">`total_tokens`</span>）、逻辑 KV Block 映射账本以及请求抢占（Preemption）决策权；</span>
+<span id="cb3-263"><a href="#cb3-263" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**`GPUModelRunner / Worker`（设备执行层）**：独占物理 GPU 显存张量、PagedAttention 物理 KV 显存池（Block Table）、CUDA Graph 预热与执行环境、采样器状态以及分布式通信（NCCL TP/PP）组。</span>
+<span id="cb3-264"><a href="#cb3-264" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-265"><a href="#cb3-265" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**严禁合成全局可变对象的深层因果**：</span>
+<span id="cb3-266"><a href="#cb3-266" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**进程隔离与 GIL 消除前提**：为了突破 Python GIL 限制，Frontend、EngineCore 与 Worker 分布在不同物理进程中。跨进程内存天然不可变共享；</span>
+<span id="cb3-267"><a href="#cb3-267" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**杜绝多写者脑裂（Brain-Split &amp; Race Condition）**：若允许 Worker 越权修改 Scheduler 状态，在分布式流水线或异步执行中会产生无序状态竞争，无法确定哪个组件持有真值；</span>
+<span id="cb3-268"><a href="#cb3-268" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**故障隔离与可重放契约**：单写者加显式消息契约（IPC / Message Queue）使得每个组件的输入输出严格成对可审计，当某个 GPU Worker 发生 OOM 或 NCCL 崩溃时，EngineCore 能够精准定位故障边界，执行请求安全重排或优雅降级。</span>
 <span id="cb3-269"><a href="#cb3-269" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-270"><a href="#cb3-270" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**时序与计算重叠机制（CPU-GPU Pipeline Overlap）**：</span>
-<span id="cb3-271"><a href="#cb3-271" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>在结构化输出（JSON Schema / Regex 约束解码）中，根据语法树或有限状态机（FSM）计算下一个合法 Token 的 Bitmask 是纯 CPU 密集型任务，计算耗时可能长达数毫秒；</span>
-<span id="cb3-272"><a href="#cb3-272" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>源码采用 <span class="in">`execute_model(non_block=True)`</span> 是为了实现**控制流与设备执行的异步解耦**：系统将本次 Batch 的张量元数据非阻塞地发射给 GPU Worker 后立即返回，GPU 开始执行耗时的自注意力与 GEMM 计算；</span>
-<span id="cb3-273"><a href="#cb3-273" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时 CPU 主线程并没有空转等待，而是立即并发执行 <span class="in">`get_grammar(plan)`</span>，在本地内存中完成 Bitmask 的推导与位运算；</span>
-<span id="cb3-274"><a href="#cb3-274" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>随后调用 <span class="in">`future()`</span> 阻塞等待 GPU 输出。此时 CPU 的 Grammar Mask 恰好计算完毕，二者无缝对接。</span>
-<span id="cb3-275"><a href="#cb3-275" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-276"><a href="#cb3-276" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**Grammar 绝不能晚于采样（Sampling Constraint）**：</span>
-<span id="cb3-277"><a href="#cb3-277" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>这并不意味着 Grammar 可以晚于采样！GPU ModelRunner 在执行 Transformer Forward 产出未归一化的 Logits 后，必须等待 Grammar Mask 的位掩码注入（将非法 Token 的 Logits 强行置为 $-\infty$），然后才能执行 Softmax 和采样操作；</span>
-<span id="cb3-278"><a href="#cb3-278" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`non_block=True`</span> 仅仅是将 Python 端的等待时机从“发射瞬间”推迟到了“提取最终输出之前”，在不破坏物理数据因果依赖的前提下，完全掩盖了 CPU 侧的状态机解析开销。</span>
-<span id="cb3-279"><a href="#cb3-279" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-280"><a href="#cb3-280" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb3-270"><a href="#cb3-270" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb3-271"><a href="#cb3-271" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-272"><a href="#cb3-272" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**时序与计算重叠机制（CPU-GPU Pipeline Overlap）**：</span>
+<span id="cb3-273"><a href="#cb3-273" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>在结构化输出（JSON Schema / Regex 约束解码）中，根据语法树或有限状态机（FSM）计算下一个合法 Token 的 Bitmask 是纯 CPU 密集型任务，计算耗时可能长达数毫秒；</span>
+<span id="cb3-274"><a href="#cb3-274" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>源码采用 <span class="in">`execute_model(non_block=True)`</span> 是为了实现**控制流与设备执行的异步解耦**：系统将本次 Batch 的张量元数据非阻塞地发射给 GPU Worker 后立即返回，GPU 开始执行耗时的自注意力与 GEMM 计算；</span>
+<span id="cb3-275"><a href="#cb3-275" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>此时 CPU 主线程并没有空转等待，而是立即并发执行 <span class="in">`get_grammar(plan)`</span>，在本地内存中完成 Bitmask 的推导与位运算；</span>
+<span id="cb3-276"><a href="#cb3-276" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>随后调用 <span class="in">`future()`</span> 阻塞等待 GPU 输出。此时 CPU 的 Grammar Mask 恰好计算完毕，二者无缝对接。</span>
+<span id="cb3-277"><a href="#cb3-277" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-278"><a href="#cb3-278" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**Grammar 绝不能晚于采样（Sampling Constraint）**：</span>
+<span id="cb3-279"><a href="#cb3-279" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>这并不意味着 Grammar 可以晚于采样！GPU ModelRunner 在执行 Transformer Forward 产出未归一化的 Logits 后，必须等待 Grammar Mask 的位掩码注入（将非法 Token 的 Logits 强行置为 $-\infty$），然后才能执行 Softmax 和采样操作；</span>
+<span id="cb3-280"><a href="#cb3-280" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`non_block=True`</span> 仅仅是将 Python 端的等待时机从“发射瞬间”推迟到了“提取最终输出之前”，在不破坏物理数据因果依赖的前提下，完全掩盖了 CPU 侧的状态机解析开销。</span>
 <span id="cb3-281"><a href="#cb3-281" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-282"><a href="#cb3-282" aria-hidden="true" tabindex="-1"></a>若某请求在 GPU Forward 期间被客户端主动取消（Abort），<span class="in">`EngineCore.step`</span> 必须**严格在调用 `scheduler.update_from_output` 之前优先消费并清空 Abort 队列**，因果链如下：</span>
+<span id="cb3-282"><a href="#cb3-282" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
 <span id="cb3-283"><a href="#cb3-283" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-284"><a href="#cb3-284" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**防止已取消请求产出“幽灵 Token”并破坏前端流**：</span>
-<span id="cb3-285"><a href="#cb3-285" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>GPU 执行的是发射时刻快照决定的批次，因此 Model Output 中必定包含该请求刚刚生成的下一个 Token；</span>
-<span id="cb3-286"><a href="#cb3-286" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若先调用 <span class="in">`update_from_output`</span>，调度器会将该新生成的 Token 视作有效计算结果，更新其已完成计数并触发 Output Processor 向客户端推送。此时已断开连接的客户端不仅无法接收，还会引发前端管道断裂异常或日志报错；</span>
-<span id="cb3-287"><a href="#cb3-287" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-288"><a href="#cb3-288" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**保障物理显存与逻辑账本原子释放**：</span>
-<span id="cb3-289"><a href="#cb3-289" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>优先执行 <span class="in">`process_aborts()`</span> 会将该请求在调度器的活动集合中正式注销，并向 KVCacheManager 宣告其占有的所有逻辑与物理 KV Block 可以被安全回收；</span>
-<span id="cb3-290"><a href="#cb3-290" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>随后执行 <span class="in">`update_from_output`</span> 时，调度器便能根据最新的“存活请求子集”做过滤，直接将已取消请求的输出丢弃，且绝不会把已被回收释放的 Block 重新标记为活动状态（防止 Block Use-After-Free 悬空指针踩内存）；</span>
-<span id="cb3-291"><a href="#cb3-291" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-292"><a href="#cb3-292" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**提供清晰的串行化审计点**：</span>
-<span id="cb3-293"><a href="#cb3-293" aria-hidden="true" tabindex="-1"></a>   先处理事件、再应用批次更新，保证了每一次迭代步的结束状态都是自洽、闭合且全局一致的。</span>
-<span id="cb3-294"><a href="#cb3-294" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-295"><a href="#cb3-295" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-284"><a href="#cb3-284" aria-hidden="true" tabindex="-1"></a>若某请求在 GPU Forward 期间被客户端主动取消（Abort），<span class="in">`EngineCore.step`</span> 必须**严格在调用 `scheduler.update_from_output` 之前优先消费并清空 Abort 队列**，因果链如下：</span>
+<span id="cb3-285"><a href="#cb3-285" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-286"><a href="#cb3-286" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**防止已取消请求产出“幽灵 Token”并破坏前端流**：</span>
+<span id="cb3-287"><a href="#cb3-287" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>GPU 执行的是发射时刻快照决定的批次，因此 Model Output 中必定包含该请求刚刚生成的下一个 Token；</span>
+<span id="cb3-288"><a href="#cb3-288" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>若先调用 <span class="in">`update_from_output`</span>，调度器会将该新生成的 Token 视作有效计算结果，更新其已完成计数并触发 Output Processor 向客户端推送。此时已断开连接的客户端不仅无法接收，还会引发前端管道断裂异常或日志报错；</span>
+<span id="cb3-289"><a href="#cb3-289" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-290"><a href="#cb3-290" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**保障物理显存与逻辑账本原子释放**：</span>
+<span id="cb3-291"><a href="#cb3-291" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>优先执行 <span class="in">`process_aborts()`</span> 会将该请求在调度器的活动集合中正式注销，并向 KVCacheManager 宣告其占有的所有逻辑与物理 KV Block 可以被安全回收；</span>
+<span id="cb3-292"><a href="#cb3-292" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>随后执行 <span class="in">`update_from_output`</span> 时，调度器便能根据最新的“存活请求子集”做过滤，直接将已取消请求的输出丢弃，且绝不会把已被回收释放的 Block 重新标记为活动状态（防止 Block Use-After-Free 悬空指针踩内存）；</span>
+<span id="cb3-293"><a href="#cb3-293" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-294"><a href="#cb3-294" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**提供清晰的串行化审计点**：</span>
+<span id="cb3-295"><a href="#cb3-295" aria-hidden="true" tabindex="-1"></a>   先处理事件、再应用批次更新，保证了每一次迭代步的结束状态都是自洽、闭合且全局一致的。</span>
 <span id="cb3-296"><a href="#cb3-296" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-297"><a href="#cb3-297" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM AsyncLLM source</span><span class="co">](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/engine/async_llm.py#L283-L750)</span></span>
-<span id="cb3-298"><a href="#cb3-298" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM EngineCore source</span><span class="co">](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/engine/core.py#L581-L738)</span></span>
-<span id="cb3-299"><a href="#cb3-299" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM Scheduler interface</span><span class="co">](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/core/sched/interface.py)</span></span>
-<span id="cb3-300"><a href="#cb3-300" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM V1 guide</span><span class="co">](https://docs.vllm.ai/en/stable/usage/v1_guide/)</span></span>
-<span id="cb3-301"><a href="#cb3-301" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM optimization and process architecture</span><span class="co">](https://docs.vllm.ai/en/latest/configuration/optimization/)</span></span>
-<span id="cb3-302"><a href="#cb3-302" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-303"><a href="#cb3-303" aria-hidden="true" tabindex="-1"></a>源码链接固定到本课审阅 commit；current docs、支持矩阵和默认参数会变化，面试或部署前必须按目标版本重新核对。</span>
-<span id="cb3-304"><a href="#cb3-304" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb3-297"><a href="#cb3-297" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
+<span id="cb3-298"><a href="#cb3-298" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-299"><a href="#cb3-299" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM AsyncLLM source</span><span class="co">](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/engine/async_llm.py#L283-L750)</span></span>
+<span id="cb3-300"><a href="#cb3-300" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM EngineCore source</span><span class="co">](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/engine/core.py#L581-L738)</span></span>
+<span id="cb3-301"><a href="#cb3-301" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM Scheduler interface</span><span class="co">](https://github.com/vllm-project/vllm/blob/8e958902eee56ca5158728f1dd5a32246f0246f3/vllm/v1/core/sched/interface.py)</span></span>
+<span id="cb3-302"><a href="#cb3-302" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM V1 guide</span><span class="co">](https://docs.vllm.ai/en/stable/usage/v1_guide/)</span></span>
+<span id="cb3-303"><a href="#cb3-303" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">vLLM optimization and process architecture</span><span class="co">](https://docs.vllm.ai/en/latest/configuration/optimization/)</span></span>
+<span id="cb3-304"><a href="#cb3-304" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-305"><a href="#cb3-305" aria-hidden="true" tabindex="-1"></a>源码链接固定到本课审阅 commit；current docs、支持矩阵和默认参数会变化，面试或部署前必须按目标版本重新核对。</span>
+<span id="cb3-306"><a href="#cb3-306" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

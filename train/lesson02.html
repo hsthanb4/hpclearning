@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#本课目标" id="toc-本课目标" class="nav-link active" data-scroll-target="#本课目标">本课目标</a></li>
   <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#动态激活值的本质与二次方爆炸" id="toc-动态激活值的本质与二次方爆炸" class="nav-link" data-scroll-target="#动态激活值的本质与二次方爆炸">1. 动态激活值的本质与二次方爆炸</a></li>
   <li><a href="#激活重计算activation-checkpointing-rematerialization" id="toc-激活重计算activation-checkpointing-rematerialization" class="nav-link" data-scroll-target="#激活重计算activation-checkpointing-rematerialization">2. 激活重计算（Activation Checkpointing / Rematerialization）</a></li>
   <li><a href="#梯度累积gradient-accumulation的工作机制" id="toc-梯度累积gradient-accumulation的工作机制" class="nav-link" data-scroll-target="#梯度累积gradient-accumulation的工作机制">3. 梯度累积（Gradient Accumulation）的工作机制</a></li>
@@ -591,14 +590,43 @@ window.Quarto = {
 </section>
 <section id="核心概念" class="level2">
 <h2 class="anchored" data-anchor-id="核心概念">核心概念</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="动态激活值的本质与二次方爆炸" class="level3">
+<h3 class="anchored" data-anchor-id="动态激活值的本质与二次方爆炸">1. 动态激活值的本质与二次方爆炸</h3>
+<p>在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 <span class="math inline">\(\frac{\partial L}{\partial W}\)</span> 需要用到输入 <span class="math inline">\(X\)</span>：<span class="math inline">\(\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}\)</span>）。</p>
+<p>在大语言模型（Transformer）中，混合精度（16-bit）下单层的激活显存由两部分构成：</p>
+<p><span class="math display">\[m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \frac{n_{\text{heads}} \cdot s}{h}\right) \quad \text{bytes}\]</span></p>
+<p>其中参数定义为：模型层数 <span class="math inline">\(L\)</span>、输入序列长度 <span class="math inline">\(s\)</span>、微批次大小 <span class="math inline">\(b\)</span>、隐藏层维度 <span class="math inline">\(h\)</span>、自注意力头数 <span class="math inline">\(n_{\text{heads}}\)</span>。</p>
+<ul>
+<li><strong>线性增长项 <span class="math inline">\(34 \cdot L \cdot s \cdot b \cdot h\)</span></strong>：来自 Transformer 块内的常规张量。包括 Q/K/V 投影输入、注意力输出投影、两层 LayerNorm/RMSNorm 输入、SwiGLU/GeLU 激活函数输入及残差连接。每个张量在 16 位精度下占 <span class="math inline">\(2\)</span> 字节，整层累加约为 <span class="math inline">\(34h\)</span> 字节/token。</li>
+<li><strong>二次方爆炸项 <span class="math inline">\(5 \cdot L \cdot b \cdot n_{\text{heads}} \cdot s^2\)</span></strong>：来自自注意力矩阵。计算 <span class="math inline">\(Q K^T\)</span> 会生成形状为 <span class="math inline">\([b, n_{\text{heads}}, s, s]\)</span> 的注意力分数矩阵（Attention Score），后续还要保存 Softmax 输出概率矩阵与 Dropout 掩码。由于该部分显存与序列长度呈<strong>二次方关系（<span class="math inline">\(O(s^2)\)</span>）</strong>，当序列长度从 2k 扩展至 32k、128k 时，注意力激活值将迅速暴涨并彻底压垮显存！</li>
+</ul>
+</section>
+<section id="激活重计算activation-checkpointing-rematerialization" class="level3">
+<h3 class="anchored" data-anchor-id="激活重计算activation-checkpointing-rematerialization">2. 激活重计算（Activation Checkpointing / Rematerialization）</h3>
+<p>激活重计算的核心思想是<strong>以算力换显存</strong>：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如图 2-1 所示）：</p>
 <div class="img-card">
 <img src="assets/activation_recompute.jpg" class="img-fluid" style="width:95.0%">
 <p class="caption">
 图 2-1：激活重计算（Activation Checkpointing）机制、显存曲线对比与计算/显存权衡
 </p>
 </div>
+<ul>
+<li><strong>全量重计算（Full Recomputation）</strong>：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。
+<ul>
+<li><em>收益</em>：激活显存开销直接压减为原来的约 <span class="math inline">\(1/L\)</span>（几乎只剩单层激活）。<br>
+</li>
+<li><em>代价</em>：训练计算量增加约 <span class="math inline">\(30\% \sim 33\%\)</span>（因为整个前向计算被执行了两次）。</li>
+</ul></li>
+<li><strong>选择性重计算（Selective Recomputation）</strong>：Megatron-LM 与 FlashAttention 提出的重大突破。观察表明：<strong>注意力矩阵 <span class="math inline">\(Q K^T\)</span> 占据了 <span class="math inline">\(70\%\)</span> 以上的激活显存，但其计算 FLOPs 仅占整层计算的不到 <span class="math inline">\(3\%\)</span>！</strong> 相比之下，MLP 层的 GEMM 占据了绝大部分 FLOPs 却只贡献线性显存。因此，选择性重计算<strong>只丢弃注意力分数与 Softmax 激活</strong>，而保留 MLP 与投影的中间值。
+<ul>
+<li><em>收益</em>：以仅 <strong><span class="math inline">\(+2.7\%\)</span> 的轻微计算开销</strong>，削减了高达 <strong><span class="math inline">\(70\%\)</span> 的激活显存</strong>！</li>
+<li><em>与 FlashAttention 的关系</em>：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此<strong>使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算</strong>。</li>
+</ul></li>
+</ul>
+</section>
+<section id="梯度累积gradient-accumulation的工作机制" class="level3">
+<h3 class="anchored" data-anchor-id="梯度累积gradient-accumulation的工作机制">3. 梯度累积（Gradient Accumulation）的工作机制</h3>
+<p>在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 <span class="math inline">\(N_{\text{acc}}\)</span> 个微批次（Micro-Batch），如图 2-2 所示：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -621,38 +649,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流</em>
 </p>
-</section>
-<section id="动态激活值的本质与二次方爆炸" class="level3">
-<h3 class="anchored" data-anchor-id="动态激活值的本质与二次方爆炸">1. 动态激活值的本质与二次方爆炸</h3>
-<p>在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 <span class="math inline">\(\frac{\partial L}{\partial W}\)</span> 需要用到输入 <span class="math inline">\(X\)</span>：<span class="math inline">\(\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}\)</span>）。</p>
-<p>在大语言模型（Transformer）中，混合精度（16-bit）下单层的激活显存由两部分构成：</p>
-<p><span class="math display">\[m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \frac{n_{\text{heads}} \cdot s}{h}\right) \quad \text{bytes}\]</span></p>
-<p>其中参数定义为：模型层数 <span class="math inline">\(L\)</span>、输入序列长度 <span class="math inline">\(s\)</span>、微批次大小 <span class="math inline">\(b\)</span>、隐藏层维度 <span class="math inline">\(h\)</span>、自注意力头数 <span class="math inline">\(n_{\text{heads}}\)</span>。</p>
-<ul>
-<li><strong>线性增长项 <span class="math inline">\(34 \cdot L \cdot s \cdot b \cdot h\)</span></strong>：来自 Transformer 块内的常规张量。包括 Q/K/V 投影输入、注意力输出投影、两层 LayerNorm/RMSNorm 输入、SwiGLU/GeLU 激活函数输入及残差连接。每个张量在 16 位精度下占 <span class="math inline">\(2\)</span> 字节，整层累加约为 <span class="math inline">\(34h\)</span> 字节/token。</li>
-<li><strong>二次方爆炸项 <span class="math inline">\(5 \cdot L \cdot b \cdot n_{\text{heads}} \cdot s^2\)</span></strong>：来自自注意力矩阵。计算 <span class="math inline">\(Q K^T\)</span> 会生成形状为 <span class="math inline">\([b, n_{\text{heads}}, s, s]\)</span> 的注意力分数矩阵（Attention Score），后续还要保存 Softmax 输出概率矩阵与 Dropout 掩码。由于该部分显存与序列长度呈<strong>二次方关系（<span class="math inline">\(O(s^2)\)</span>）</strong>，当序列长度从 2k 扩展至 32k、128k 时，注意力激活值将迅速暴涨并彻底压垮显存！</li>
-</ul>
-</section>
-<section id="激活重计算activation-checkpointing-rematerialization" class="level3">
-<h3 class="anchored" data-anchor-id="激活重计算activation-checkpointing-rematerialization">2. 激活重计算（Activation Checkpointing / Rematerialization）</h3>
-<p>激活重计算的核心思想是<strong>以算力换显存</strong>：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如上图 2-1 所示）。</p>
-<ul>
-<li><strong>全量重计算（Full Recomputation）</strong>：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。
-<ul>
-<li><em>收益</em>：激活显存开销直接压减为原来的约 <span class="math inline">\(1/L\)</span>（几乎只剩单层激活）。<br>
-</li>
-<li><em>代价</em>：训练计算量增加约 <span class="math inline">\(30\% \sim 33\%\)</span>（因为整个前向计算被执行了两次）。</li>
-</ul></li>
-<li><strong>选择性重计算（Selective Recomputation）</strong>：Megatron-LM 与 FlashAttention 提出的重大突破。观察表明：<strong>注意力矩阵 <span class="math inline">\(Q K^T\)</span> 占据了 <span class="math inline">\(70\%\)</span> 以上的激活显存，但其计算 FLOPs 仅占整层计算的不到 <span class="math inline">\(3\%\)</span>！</strong> 相比之下，MLP 层的 GEMM 占据了绝大部分 FLOPs 却只贡献线性显存。因此，选择性重计算<strong>只丢弃注意力分数与 Softmax 激活</strong>，而保留 MLP 与投影的中间值。
-<ul>
-<li><em>收益</em>：以仅 <strong><span class="math inline">\(+2.7\%\)</span> 的轻微计算开销</strong>，削减了高达 <strong><span class="math inline">\(70\%\)</span> 的激活显存</strong>！</li>
-<li><em>与 FlashAttention 的关系</em>：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此<strong>使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算</strong>。</li>
-</ul></li>
-</ul>
-</section>
-<section id="梯度累积gradient-accumulation的工作机制" class="level3">
-<h3 class="anchored" data-anchor-id="梯度累积gradient-accumulation的工作机制">3. 梯度累积（Gradient Accumulation）的工作机制</h3>
-<p>在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 <span class="math inline">\(N_{\text{acc}}\)</span> 个微批次（Micro-Batch），如上图 2-2 所示：</p>
 <p><span class="math display">\[\text{全局批大小 (GBS)} = \text{微批大小 (MBS)} \times \text{累积步数 (grad\_acc)} \times \text{数据并行度 (DP)}\]</span></p>
 <ul>
 <li><strong>执行流程</strong>：每个 Micro-Batch 独立执行前向与反向，并将求得的梯度直接累加到一个常驻的梯度缓冲区（Grad Buffer）中；在累积满 <span class="math inline">\(N_{\text{acc}}\)</span> 步后，执行<strong>平均化归一（除以 <span class="math inline">\(N_{\text{acc}}\)</span>）</strong>，随后触发一次优化器更新，最后清空梯度缓冲区。</li>
@@ -689,7 +685,7 @@ window.Quarto = {
 <section id="代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
 <p>补全以下程序。注意：不要在估算函数里写死常数总和，所有分量都要显式出现。</p>
-<div id="69cd6bcc" class="cell" data-course_role="exercise">
+<div id="20970ac8" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -843,7 +839,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
-<div id="fe7a3736" class="cell" data-course_role="solution">
+<div id="09b3b1c8" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1528,52 +1524,52 @@ window.Quarto = {
 <span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念</span></span>
 <span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 动态激活值的本质与二次方爆炸</span></span>
 <span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/activation_recompute.jpg)</span>{width="95%"}</span>
-<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 2-1：激活重计算（Activation Checkpointing）机制、显存曲线对比与计算/显存权衡<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a>    subgraph MicroBatches[<span class="ot">"</span><span class="st">梯度累积 Micro-Batch 调度时序</span><span class="ot">"</span>]</span>
-<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
-<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>        MB1[<span class="ot">"</span><span class="st">Micro-Batch 1 (前向+反向)</span><span class="ot">"</span>] --&gt;|累加梯度| G[<span class="ot">"</span><span class="st">梯度缓冲区 (Grad Buffer)</span><span class="ot">"</span>]</span>
-<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a>        MB2[<span class="ot">"</span><span class="st">Micro-Batch 2 (前向+反向)</span><span class="ot">"</span>] --&gt;|累加梯度| G</span>
-<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>        MBN[<span class="ot">"</span><span class="st">Micro-Batch N (前向+反向)</span><span class="ot">"</span>] --&gt;|累加梯度| G</span>
-<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>        G --&gt; Step[<span class="ot">"</span><span class="st">除以 N 归一化均值 ➔ Optimizer Step</span><span class="ot">"</span>]</span>
-<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 动态激活值的本质与二次方爆炸</span></span>
+<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a>在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 $\frac{\partial L}{\partial W}$ 需要用到输入 $X$：$\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}$）。</span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a>在大语言模型（Transformer）中，混合精度（16-bit）下单层的激活显存由两部分构成：</span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a>$$m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \frac{n_{\text{heads}} \cdot s}{h}\right) \quad \text{bytes}$$</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a>其中参数定义为：模型层数 $L$、输入序列长度 $s$、微批次大小 $b$、隐藏层维度 $h$、自注意力头数 $n_{\text{heads}}$。</span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**线性增长项 $34 \cdot L \cdot s \cdot b \cdot h$**：来自 Transformer 块内的常规张量。包括 Q/K/V 投影输入、注意力输出投影、两层 LayerNorm/RMSNorm 输入、SwiGLU/GeLU 激活函数输入及残差连接。每个张量在 16 位精度下占 $2$ 字节，整层累加约为 $34h$ 字节/token。</span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**二次方爆炸项 $5 \cdot L \cdot b \cdot n_{\text{heads}} \cdot s^2$**：来自自注意力矩阵。计算 $Q K^T$ 会生成形状为 $[b, n_{\text{heads}}, s, s]$ 的注意力分数矩阵（Attention Score），后续还要保存 Softmax 输出概率矩阵与 Dropout 掩码。由于该部分显存与序列长度呈**二次方关系（$O(s^2)$）**，当序列长度从 2k 扩展至 32k、128k 时，注意力激活值将迅速暴涨并彻底压垮显存！</span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 激活重计算（Activation Checkpointing / Rematerialization）</span></span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>激活重计算的核心思想是**以算力换显存**：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如图 2-1 所示）：</span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/activation_recompute.jpg)</span>{width="95%"}</span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 2-1：激活重计算（Activation Checkpointing）机制、显存曲线对比与计算/显存权衡<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 $\frac{\partial L}{\partial W}$ 需要用到输入 $X$：$\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}$）。</span>
-<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a>在大语言模型（Transformer）中，混合精度（16-bit）下单层的激活显存由两部分构成：</span>
-<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a>$$m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \frac{n_{\text{heads}} \cdot s}{h}\right) \quad \text{bytes}$$</span>
-<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a>其中参数定义为：模型层数 $L$、输入序列长度 $s$、微批次大小 $b$、隐藏层维度 $h$、自注意力头数 $n_{\text{heads}}$。</span>
-<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**线性增长项 $34 \cdot L \cdot s \cdot b \cdot h$**：来自 Transformer 块内的常规张量。包括 Q/K/V 投影输入、注意力输出投影、两层 LayerNorm/RMSNorm 输入、SwiGLU/GeLU 激活函数输入及残差连接。每个张量在 16 位精度下占 $2$ 字节，整层累加约为 $34h$ 字节/token。</span>
-<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**二次方爆炸项 $5 \cdot L \cdot b \cdot n_{\text{heads}} \cdot s^2$**：来自自注意力矩阵。计算 $Q K^T$ 会生成形状为 $[b, n_{\text{heads}}, s, s]$ 的注意力分数矩阵（Attention Score），后续还要保存 Softmax 输出概率矩阵与 Dropout 掩码。由于该部分显存与序列长度呈**二次方关系（$O(s^2)$）**，当序列长度从 2k 扩展至 32k、128k 时，注意力激活值将迅速暴涨并彻底压垮显存！</span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**全量重计算（Full Recomputation）**：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。  </span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*收益*：激活显存开销直接压减为原来的约 $1/L$（几乎只剩单层激活）。  </span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*代价*：训练计算量增加约 $30\% \sim 33\%$（因为整个前向计算被执行了两次）。</span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**选择性重计算（Selective Recomputation）**：Megatron-LM 与 FlashAttention 提出的重大突破。观察表明：**注意力矩阵 $Q K^T$ 占据了 $70\%$ 以上的激活显存，但其计算 FLOPs 仅占整层计算的不到 $3\%$！** 相比之下，MLP 层的 GEMM 占据了绝大部分 FLOPs 却只贡献线性显存。因此，选择性重计算**只丢弃注意力分数与 Softmax 激活**，而保留 MLP 与投影的中间值。  </span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*收益*：以仅 **$+2.7\%$ 的轻微计算开销**，削减了高达 **$70\%$ 的激活显存**！</span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*与 FlashAttention 的关系*：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此**使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算**。</span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 梯度累积（Gradient Accumulation）的工作机制</span></span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a>在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 $N_{\text{acc}}$ 个微批次（Micro-Batch），如图 2-2 所示：</span>
 <span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 激活重计算（Activation Checkpointing / Rematerialization）</span></span>
-<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a>激活重计算的核心思想是**以算力换显存**：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如上图 2-1 所示）。</span>
-<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**全量重计算（Full Recomputation）**：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。  </span>
-<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*收益*：激活显存开销直接压减为原来的约 $1/L$（几乎只剩单层激活）。  </span>
-<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*代价*：训练计算量增加约 $30\% \sim 33\%$（因为整个前向计算被执行了两次）。</span>
-<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**选择性重计算（Selective Recomputation）**：Megatron-LM 与 FlashAttention 提出的重大突破。观察表明：**注意力矩阵 $Q K^T$ 占据了 $70\%$ 以上的激活显存，但其计算 FLOPs 仅占整层计算的不到 $3\%$！** 相比之下，MLP 层的 GEMM 占据了绝大部分 FLOPs 却只贡献线性显存。因此，选择性重计算**只丢弃注意力分数与 Softmax 激活**，而保留 MLP 与投影的中间值。  </span>
-<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*收益*：以仅 **$+2.7\%$ 的轻微计算开销**，削减了高达 **$70\%$ 的激活显存**！</span>
-<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>*与 FlashAttention 的关系*：FlashAttention 利用 GPU SRAM 瓦片切分在线计算 Softmax，其反向过程本身就直接在片上 SRAM 重算注意力矩阵，因此**使用 FlashAttention 实际上已在算子内部原生实现了选择性重计算**。</span>
-<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 梯度累积（Gradient Accumulation）的工作机制</span></span>
-<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a>在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 $N_{\text{acc}}$ 个微批次（Micro-Batch），如上图 2-2 所示：</span>
+<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a>    subgraph MicroBatches[<span class="ot">"</span><span class="st">梯度累积 Micro-Batch 调度时序</span><span class="ot">"</span>]</span>
+<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a>        MB1[<span class="ot">"</span><span class="st">Micro-Batch 1 (前向+反向)</span><span class="ot">"</span>] --&gt;|累加梯度| G[<span class="ot">"</span><span class="st">梯度缓冲区 (Grad Buffer)</span><span class="ot">"</span>]</span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>        MB2[<span class="ot">"</span><span class="st">Micro-Batch 2 (前向+反向)</span><span class="ot">"</span>] --&gt;|累加梯度| G</span>
+<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a>        MBN[<span class="ot">"</span><span class="st">Micro-Batch N (前向+反向)</span><span class="ot">"</span>] --&gt;|累加梯度| G</span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a>        G --&gt; Step[<span class="ot">"</span><span class="st">除以 N 归一化均值 ➔ Optimizer Step</span><span class="ot">"</span>]</span>
+<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a>$$\text{全局批大小 (GBS)} = \text{微批大小 (MBS)} \times \text{累积步数 (grad<span class="sc">\_</span>acc)} \times \text{数据并行度 (DP)}$$</span>
 <span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a></span>

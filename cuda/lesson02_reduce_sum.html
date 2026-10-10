@@ -511,7 +511,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#并行规约parallel-reduction的树状折叠哲学与层次架构" id="toc-并行规约parallel-reduction的树状折叠哲学与层次架构" class="nav-link" data-scroll-target="#并行规约parallel-reduction的树状折叠哲学与层次架构">1. 并行规约（Parallel Reduction）的树状折叠哲学与层次架构</a></li>
   <li><a href="#warp-shuffle-原语与跨步洗牌__shfl_down_sync" id="toc-warp-shuffle-原语与跨步洗牌__shfl_down_sync" class="nav-link" data-scroll-target="#warp-shuffle-原语与跨步洗牌__shfl_down_sync">2. Warp Shuffle 原语与跨步洗牌（<code>__shfl_down_sync</code>）</a></li>
   <li><a href="#block-级规约的两阶段时序流转如图-2-2-所示" id="toc-block-级规约的两阶段时序流转如图-2-2-所示" class="nav-link" data-scroll-target="#block-级规约的两阶段时序流转如图-2-2-所示">3. Block 级规约的两阶段时序流转（如<strong>图 2-2</strong> 所示）</a></li>
@@ -582,42 +581,6 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
-<div class="img-card">
-<img src="assets/figs/cuda_warp_shuffle_latency.png" class="img-fluid" style="width:80.0%">
-<p class="caption">
-图 2-1：Warp Shuffle 与 Shared Memory 两阶段规约时延对比（基于 scientific-figure-making 绘制）
-</p>
-</div>
-<div class="cell" data-layout-align="default">
-<div class="cell-output-display">
-<div>
-<p></p><figure class="figure"><p></p>
-<div>
-<pre class="mermaid mermaid-js">sequenceDiagram
-    autonumber
-    participant T as Block 内各 Warp 线程
-    participant S as 共享内存 (Shared Memory)
-    participant W0 as Warp 0 (主归约 Warp)
-    participant G as 全局内存 (GMEM Output)
-
-    T-&gt;&gt;T: 各 Warp 独立执行 __shfl_down_sync 归约
-    T-&gt;&gt;S: 各 Warp 的 Lane 0 将局部和存入 SMem[warp_id]
-    Note over T,S: __syncthreads() 保证写完成
-    S-&gt;&gt;W0: Warp 0 读出各 Warp 局部和
-    W0-&gt;&gt;W0: Warp 0 再次执行 Shuffle 归约
-    W0-&gt;&gt;G: Block 内 Lane 0 原子累加或直接写出最终标量
-</pre>
-</div>
-<p></p></figure><p></p>
-</div>
-</div>
-</div>
-<p class="caption" align="center">
-<em>图 2-2：Block 级两阶段求和（Warp 内洗牌 + 跨 Warp 归约）执行时序流</em>
-</p>
-</section>
 <section id="并行规约parallel-reduction的树状折叠哲学与层次架构" class="level3">
 <h3 class="anchored" data-anchor-id="并行规约parallel-reduction的树状折叠哲学与层次架构">1. 并行规约（Parallel Reduction）的树状折叠哲学与层次架构</h3>
 <p>规约操作（Reduction，如求和、求最大值、求范数）是将输入数组中的 <span class="math inline">\(N\)</span> 个元素通过结合二元算子（如加法、乘法）聚合成单一标量结果的经典算法：</p>
@@ -635,6 +598,12 @@ window.Quarto = {
 <section id="warp-shuffle-原语与跨步洗牌__shfl_down_sync" class="level3">
 <h3 class="anchored" data-anchor-id="warp-shuffle-原语与跨步洗牌__shfl_down_sync">2. Warp Shuffle 原语与跨步洗牌（<code>__shfl_down_sync</code>）</h3>
 <p>如<strong>图 2-1</strong> 所示，Warp 内线程洗牌指令（Warp Shuffle）相比传统的 Shared Memory 具备压倒性的性能优势：</p>
+<div class="img-card">
+<img src="assets/figs/cuda_warp_shuffle_latency.png" class="img-fluid" style="width:80.0%">
+<p class="caption">
+图 2-1：Warp Shuffle 与 Shared Memory 两阶段规约执行延迟对比（基于 scientific-figure-making 绘制）
+</p>
+</div>
 <ul>
 <li><p><strong>硬件数据通路（Register-to-Register Crossbar）</strong>： 在没有 Shuffle 之前，线程间交换数据必须通过 <code>smem[tid] = val; __syncthreads(); val2 = smem[tid+1];</code>。这不仅消耗宝贵的共享内存带宽，还受到 Bank 冲突与同步障栅（Barrier）的约束。 <code>__shfl_down_sync</code> 直接复用 SM 内部的寄存器交换网络，延迟低至 1 个时钟周期，且无需任何 Block 级同步显式屏障！</p></li>
 <li><p><strong>折半规约执行拓扑</strong>：</p>
@@ -652,6 +621,33 @@ for (int offset = 16; offset &gt; 0; offset &gt;&gt;= 1) {
 </section>
 <section id="block-级规约的两阶段时序流转如图-2-2-所示" class="level3">
 <h3 class="anchored" data-anchor-id="block-级规约的两阶段时序流转如图-2-2-所示">3. Block 级规约的两阶段时序流转（如<strong>图 2-2</strong> 所示）</h3>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant T as Warp 内 32 线程
+    participant S as Shared Memory (32 槽位)
+    participant W0 as Warp 0 主线程
+
+    Note over T: 阶段 1: Warp 内寄存器洗牌折半求和 (__shfl_down_sync)
+    T-&gt;&gt;T: 32 -&gt; 16 -&gt; 8 -&gt; 4 -&gt; 2 -&gt; 1 (5 步洗牌)
+    T-&gt;&gt;S: 每个 Warp 的 Lane 0 将局部和写入 smem[warpId]
+    Note over S: __syncthreads() 块内同步
+    Note over W0,S: 阶段 2: Warp 0 读入 smem 规约各 Warp 局部和
+    S-&gt;&gt;W0: Warp 0 读取 smem 并再次执行 5 步洗牌
+    W0--&gt;&gt;T: 最终标量结果原子累加写回全局内存
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 2-2：Block 级两阶段求和（Warp 内洗牌 + 跨 Warp 共享内存汇聚）时序流</em>
+</p>
 <p>当单个 Block 包含多个 Warp 时（例如 <code>BLOCK_SIZE = 256</code> 对应 8 个 Warp）：</p>
 <ol type="1">
 <li><strong>阶段 1：各 Warp 并行自规约</strong>：
@@ -712,7 +708,7 @@ for (int offset = 16; offset &gt; 0; offset &gt;&gt;= 1) {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 warp shuffle 表达式。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="50a21850" class="cell" data-course_role="exercise">
+<div id="ddecc559" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">2_reduce_sum</span>.cu</span>
@@ -849,7 +845,7 @@ for (int offset = 16; offset &gt; 0; offset &gt;&gt;= 1) {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="4c6a3776" class="cell" data-course_role="solution">
+<div id="5592d2c2" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">2_reduce_sum</span>.cu</span>
@@ -1498,65 +1494,65 @@ for (int offset = 16; offset &gt; 0; offset &gt;&gt;= 1) {
 <span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 并行规约（Parallel Reduction）的树状折叠哲学与层次架构</span></span>
 <span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/cuda_warp_shuffle_latency.png)</span>{width="80%"}</span>
-<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 2-1：Warp Shuffle 与 Shared Memory 两阶段规约时延对比（基于 scientific-figure-making 绘制）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>规约操作（Reduction，如求和、求最大值、求范数）是将输入数组中的 $N$ 个元素通过结合二元算子（如加法、乘法）聚合成单一标量结果的经典算法：</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**串行与并行的复杂度鸿沟**：</span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>  CPU 单线程串行规约的时间复杂度为 $O(N)$；而在 GPU 上，利用二叉树状折叠（Tree-based Reduction），时间复杂度可压缩至 $O(\log N)$。</span>
 <span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
-<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
-<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>    participant T as Block 内各 Warp 线程</span>
-<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>    participant S as 共享内存 (Shared Memory)</span>
-<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>    participant W0 as Warp <span class="dv">0</span> (主归约 Warp)</span>
-<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>    participant G as 全局内存 (GMEM Output)</span>
-<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;T: 各 Warp 独立执行 __shfl_down_sync 归约</span>
-<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;S: 各 Warp 的 Lane <span class="dv">0</span> 将局部和存入 SMem[warp_id]</span>
-<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>    Note over T,S: __syncthreads() 保证写完成</span>
-<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>    S-&gt;&gt;W0: Warp <span class="dv">0</span> 读出各 Warp 局部和</span>
-<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>    W0-&gt;&gt;W0: Warp <span class="dv">0</span> 再次执行 Shuffle 归约</span>
-<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>    W0-&gt;&gt;G: Block 内 Lane <span class="dv">0</span> 原子累加或直接写出最终标量</span>
-<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 2-2：Block 级两阶段求和（Warp 内洗牌 + 跨 Warp 归约）执行时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 并行规约（Parallel Reduction）的树状折叠哲学与层次架构</span></span>
+<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**现代 GPU 三级阶梯式规约架构**：</span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a>  在早期的 CUDA 实现中，通常在 Shared Memory 中通过交错循环或共享内存折半规约。但现代工业级优化采用精密的**寄存器 $\to$ Warp $\to$ Block $\to$ Grid 四级汇聚架构**：</span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>**第一级（线程私有寄存器粗化）**：每个线程利用 Grid-Stride Loop 先在私有寄存器中累加多个元素。寄存器访问延迟为 0 周期，极大地削减了后续进入树状规约的数据总量；</span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>**第二级（Warp 内部洗牌规约）**：利用硬件指令 <span class="in">`__shfl_down_sync`</span> 在 32 个线程的寄存器之间直接交换数据完成折半求和，全程零访存；</span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>**第三级（Block 跨 Warp 暂存规约）**：每个 Warp 的 Lane 0 将该 Warp 的局部和写入 Shared Memory（仅需 $\frac{\text{BlockSize}}{32}$ 个元素），由 Warp 0 读出后执行最后一次 Warp 规约；</span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a><span class="ss">  4. </span>**第四级（Grid 全局多 Block 归集）**：每个 Block 向全局显存写入一个局部和标量 <span class="in">`partial[blockIdx.x]`</span>，由第二阶段轻量级 Kernel 或原子加完成最终收敛。</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Warp Shuffle 原语与跨步洗牌（`__shfl_down_sync`）</span></span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>如**图 2-1** 所示，Warp 内线程洗牌指令（Warp Shuffle）相比传统的 Shared Memory 具备压倒性的性能优势：</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/cuda_warp_shuffle_latency.png)</span>{width="80%"}</span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 2-1：Warp Shuffle 与 Shared Memory 两阶段规约执行延迟对比（基于 scientific-figure-making 绘制）<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**硬件数据通路（Register-to-Register Crossbar）**：</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>  在没有 Shuffle 之前，线程间交换数据必须通过 <span class="in">`smem[tid] = val; __syncthreads(); val2 = smem[tid+1];`</span>。这不仅消耗宝贵的共享内存带宽，还受到 Bank 冲突与同步障栅（Barrier）的约束。</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>  <span class="in">`__shfl_down_sync`</span> 直接复用 SM 内部的寄存器交换网络，延迟低至 1 个时钟周期，且无需任何 Block 级同步显式屏障！</span>
 <span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a>规约操作（Reduction，如求和、求最大值、求范数）是将输入数组中的 $N$ 个元素通过结合二元算子（如加法、乘法）聚合成单一标量结果的经典算法：</span>
-<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**串行与并行的复杂度鸿沟**：</span>
-<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a>  CPU 单线程串行规约的时间复杂度为 $O(N)$；而在 GPU 上，利用二叉树状折叠（Tree-based Reduction），时间复杂度可压缩至 $O(\log N)$。</span>
-<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**现代 GPU 三级阶梯式规约架构**：</span>
-<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>  在早期的 CUDA 实现中，通常在 Shared Memory 中通过交错循环或共享内存折半规约。但现代工业级优化采用精密的**寄存器 $\to$ Warp $\to$ Block $\to$ Grid 四级汇聚架构**：</span>
-<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>**第一级（线程私有寄存器粗化）**：每个线程利用 Grid-Stride Loop 先在私有寄存器中累加多个元素。寄存器访问延迟为 0 周期，极大地削减了后续进入树状规约的数据总量；</span>
-<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>**第二级（Warp 内部洗牌规约）**：利用硬件指令 <span class="in">`__shfl_down_sync`</span> 在 32 个线程的寄存器之间直接交换数据完成折半求和，全程零访存；</span>
-<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>**第三级（Block 跨 Warp 暂存规约）**：每个 Warp 的 Lane 0 将该 Warp 的局部和写入 Shared Memory（仅需 $\frac{\text{BlockSize}}{32}$ 个元素），由 Warp 0 读出后执行最后一次 Warp 规约；</span>
-<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a><span class="ss">  4. </span>**第四级（Grid 全局多 Block 归集）**：每个 Block 向全局显存写入一个局部和标量 <span class="in">`partial[blockIdx.x]`</span>，由第二阶段轻量级 Kernel 或原子加完成最终收敛。</span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**折半规约执行拓扑**：</span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a>  <span class="in">```cuda</span></span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>  <span class="pp">#pragma unroll</span></span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="dt">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a>      val <span class="op">+=</span> __shfl_down_sync<span class="op">(</span><span class="bn">0xffffffff</span><span class="op">,</span> val<span class="op">,</span> offset<span class="op">);</span></span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>  <span class="in">```</span></span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a>  掩码 <span class="in">`0xffffffff`</span> 告知硬件所有 32 个 Lane 均处于活动参与状态。</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第一步（$\text{offset} = 16$）：Lane $0 \dots 15$ 分别读取 Lane $16 \dots 31$ 的值累加，数据规模砍半；</span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第二步（$\text{offset} = 8$）：Lane $0 \dots 7$ 分别读取 Lane $8 \dots 15$ 的值累加；</span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>经 5 次循环（$16 \to 8 \to 4 \to 2 \to 1$），仅需 5 条指令，Warp 内 32 个数的总和便精确汇聚在 **Lane 0** 的寄存器中。</span>
 <span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Warp Shuffle 原语与跨步洗牌（`__shfl_down_sync`）</span></span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. Block 级规约的两阶段时序流转（如**图 2-2** 所示）</span></span>
 <span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>如**图 2-1** 所示，Warp 内线程洗牌指令（Warp Shuffle）相比传统的 Shared Memory 具备压倒性的性能优势：</span>
-<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**硬件数据通路（Register-to-Register Crossbar）**：</span>
-<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>  在没有 Shuffle 之前，线程间交换数据必须通过 <span class="in">`smem[tid] = val; __syncthreads(); val2 = smem[tid+1];`</span>。这不仅消耗宝贵的共享内存带宽，还受到 Bank 冲突与同步障栅（Barrier）的约束。</span>
-<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>  <span class="in">`__shfl_down_sync`</span> 直接复用 SM 内部的寄存器交换网络，延迟低至 1 个时钟周期，且无需任何 Block 级同步显式屏障！</span>
-<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**折半规约执行拓扑**：</span>
-<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a>  <span class="in">```cuda</span></span>
-<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>  <span class="pp">#pragma unroll</span></span>
-<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="dt">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span><span class="op">)</span> <span class="op">{</span></span>
-<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>      val <span class="op">+=</span> __shfl_down_sync<span class="op">(</span><span class="bn">0xffffffff</span><span class="op">,</span> val<span class="op">,</span> offset<span class="op">);</span></span>
-<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
-<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>  <span class="in">```</span></span>
-<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a>  掩码 <span class="in">`0xffffffff`</span> 告知硬件所有 32 个 Lane 均处于活动参与状态。</span>
-<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第一步（$\text{offset} = 16$）：Lane $0 \dots 15$ 分别读取 Lane $16 \dots 31$ 的值累加，数据规模砍半；</span>
-<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第二步（$\text{offset} = 8$）：Lane $0 \dots 7$ 分别读取 Lane $8 \dots 15$ 的值累加；</span>
-<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>经 5 次循环（$16 \to 8 \to 4 \to 2 \to 1$），仅需 5 条指令，Warp 内 32 个数的总和便精确汇聚在 **Lane 0** 的寄存器中。</span>
-<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. Block 级规约的两阶段时序流转（如**图 2-2** 所示）</span></span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a>    participant T as Warp 内 <span class="dv">32</span> 线程</span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a>    participant S as Shared Memory (<span class="dv">32</span> 槽位)</span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a>    participant W0 as Warp <span class="dv">0</span> 主线程</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a>    Note over T: 阶段 <span class="dv">1</span>: Warp 内寄存器洗牌折半求和 (__shfl_down_sync)</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;T: <span class="dv">32</span> -&gt; <span class="dv">16</span> -&gt; <span class="dv">8</span> -&gt; <span class="dv">4</span> -&gt; <span class="dv">2</span> -&gt; <span class="dv">1</span> (<span class="dv">5</span> 步洗牌)</span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;S: 每个 Warp 的 Lane <span class="dv">0</span> 将局部和写入 smem[warpId]</span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>    Note over S: __syncthreads() 块内同步</span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a>    Note over W0,S: 阶段 <span class="dv">2</span>: Warp <span class="dv">0</span> 读入 smem 规约各 Warp 局部和</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a>    S-&gt;&gt;W0: Warp <span class="dv">0</span> 读取 smem 并再次执行 <span class="dv">5</span> 步洗牌</span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a>    W0--&gt;&gt;T: 最终标量结果原子累加写回全局内存</span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 2-2：Block 级两阶段求和（Warp 内洗牌 + 跨 Warp 共享内存汇聚）时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a>当单个 Block 包含多个 Warp 时（例如 <span class="in">`BLOCK_SIZE = 256`</span> 对应 8 个 Warp）：</span>
 <span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a></span>

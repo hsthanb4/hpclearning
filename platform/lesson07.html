@@ -481,7 +481,6 @@ window.Quarto = {
   <li><a href="#与既有六条主线的边界" id="toc-与既有六条主线的边界" class="nav-link" data-scroll-target="#与既有六条主线的边界">与既有六条主线的边界</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -544,8 +543,23 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在由成百上千张高端加速卡构建的大规模 AI 生产基础设施中（包含在线高吞吐大模型推理 Serving 与长周期万卡预训练 Training），平台运营与 SRE 工程师面临着严峻的可观测性与告警困境：</p>
+<ol type="1">
+<li><p><strong>告警风暴与告警疲劳（Alert Fatigue）</strong>：<br>
+若依据传统静态底层阈值设置告警（如“GPU 利用率 <span class="math inline">\(&lt; 80\%\)</span>”、“CPU 内存 <span class="math inline">\(&gt; 90\%\)</span>”、“网络发生丢包”），由于分布式训练中定期的 Checkpoint 刷盘、异步数据预取抖动与临时调度重试，值班人员每天会收到数百条虚假警报，导致真正致命的业务事故被海量噪音淹没。</p></li>
+<li><p><strong>表面繁荣与业务隐形崩溃（The “GPU 100% Fallacy”）</strong>：<br>
+监控大屏上 GPU 利用率维持在 100%，看似算力拉满，实际上可能因为 NCCL 集合通信死锁导致的 CUDA 核心空转自旋（Spin-wait）、动态序列异常导致的死循环、或重试风暴，真正的业务有效吞吐（Goodput）早已归零。</p></li>
+<li><p><strong>可观测性数据孤岛（Observability Silos）</strong>：<br>
+时序指标（Metrics）只能看到宏观聚合统计，日志（Logs）零散分布在各个容器与内核缓冲区中，分布式调用链路（Traces）缺乏跨节点的上下文传播。当用户端报错或推理延迟激增时，排查人员无法快速将上层业务症状下钻关联到底层的物理硬件与通信根因。</p></li>
+</ol>
+<p>本课构建现代 AI 算力平台的可观测性三支柱（Metrics, Logs, Traces，如图 7-1 所示），并引入 Google SRE 体系中的<strong>错误预算消耗率（Error Budget Burn Rate）告警模型</strong>与多窗口分级判定流（如图 7-2 所示），实现从业务影响到硬件根因的精准穿透定位。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<section id="ai-基础设施可观测性三支柱如图-7-1-所示" class="level4">
+<h4 class="anchored" data-anchor-id="ai-基础设施可观测性三支柱如图-7-1-所示">(1) AI 基础设施可观测性三支柱（如图 7-1 所示）</h4>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -567,44 +581,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 7-1：集群立体化监控度量与 SLO 错误预算 (Burn Rate) 监控模型</em>
 </p>
-<div class="cell" data-layout-align="default">
-<div class="cell-output-display">
-<div>
-<p></p><figure class="figure"><p></p>
-<div>
-<pre class="mermaid mermaid-js">flowchart TD
-    MetricStream["时序指标持续采集 (Prometheus + DCGM-Exporter)"] --&gt; EvalWindow["多窗口联合评估: 1小时消耗率 &gt; 14.4x 或 6小时 &gt; 6x"]
-    EvalWindow --&gt; Spike{"是否发生急剧突发严重故障?"}
-    Spike --&gt;|"是 (高 Burn Rate)"| P1Alert["触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离"]
-    Spike --&gt;|"否 (慢速漂移)"| P3Ticket["创建 P3 低优先级工单排查慢掉队节点"]
-    P1Alert --&gt; HotMigration["触发作业热迁移与断点恢复自愈"]
-</pre>
-</div>
-<p></p></figure><p></p>
-</div>
-</div>
-</div>
-<p class="caption" align="center">
-<em>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程</em>
-</p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在由成百上千张高端加速卡构建的大规模 AI 生产基础设施中（包含在线高吞吐大模型推理 Serving 与长周期万卡预训练 Training），平台运营与 SRE 工程师面临着严峻的可观测性与告警困境：</p>
-<ol type="1">
-<li><p><strong>告警风暴与告警疲劳（Alert Fatigue）</strong>：<br>
-若依据传统静态底层阈值设置告警（如“GPU 利用率 <span class="math inline">\(&lt; 80\%\)</span>”、“CPU 内存 <span class="math inline">\(&gt; 90\%\)</span>”、“网络发生丢包”），由于分布式训练中定期的 Checkpoint 刷盘、异步数据预取抖动与临时调度重试，值班人员每天会收到数百条虚假警报，导致真正致命的业务事故被海量噪音淹没。</p></li>
-<li><p><strong>表面繁荣与业务隐形崩溃（The “GPU 100% Fallacy”）</strong>：<br>
-监控大屏上 GPU 利用率维持在 100%，看似算力拉满，实际上可能因为 NCCL 集合通信死锁导致的 CUDA 核心空转自旋（Spin-wait）、动态序列异常导致的死循环、或重试风暴，真正的业务有效吞吐（Goodput）早已归零。</p></li>
-<li><p><strong>可观测性数据孤岛（Observability Silos）</strong>：<br>
-时序指标（Metrics）只能看到宏观聚合统计，日志（Logs）零散分布在各个容器与内核缓冲区中，分布式调用链路（Traces）缺乏跨节点的上下文传播。当用户端报错或推理延迟激增时，排查人员无法快速将上层业务症状下钻关联到底层的物理硬件与通信根因。</p></li>
-</ol>
-<p>本课构建现代 AI 算力平台的可观测性三支柱（Metrics, Logs, Traces，如图 7-1 所示），并引入 Google SRE 体系中的<strong>错误预算消耗率（Error Budget Burn Rate）告警模型</strong>与多窗口分级判定流（如图 7-2 所示），实现从业务影响到硬件根因的精准穿透定位。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<section id="ai-基础设施可观测性三支柱如图-7-1-所示" class="level4">
-<h4 class="anchored" data-anchor-id="ai-基础设施可观测性三支柱如图-7-1-所示">(1) AI 基础设施可观测性三支柱（如图 7-1 所示）</h4>
 <ul>
 <li><p><strong>Metrics（指标层，秒级聚合）</strong>：<br>
 依托 Prometheus 与 NVIDIA DCGM-Exporter 导出立体化时序指标。不仅监测宏观的 <code>DCGM_FI_DEV_GPU_UTIL</code>，更深度透视：</p>
@@ -638,6 +614,26 @@ window.Quarto = {
 <section id="多窗口多消耗率联合告警策略" class="level4">
 <h4 class="anchored" data-anchor-id="多窗口多消耗率联合告警策略">(3) 多窗口多消耗率联合告警策略</h4>
 <p>如图 7-2 所示，为彻底杜绝毛刺误报并极速捕获真正严重的事故，工业界执行多窗口联合校验：</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart TD
+    MetricStream["时序指标持续采集 (Prometheus + DCGM-Exporter)"] --&gt; EvalWindow["多窗口联合评估: 1小时消耗率 &gt; 14.4x 或 6小时 &gt; 6x"]
+    EvalWindow --&gt; Spike{"是否发生急剧突发严重故障?"}
+    Spike --&gt;|"是 (高 Burn Rate)"| P1Alert["触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离"]
+    Spike --&gt;|"否 (慢速漂移)"| P3Ticket["创建 P3 低优先级工单排查慢掉队节点"]
+    P1Alert --&gt; HotMigration["触发作业热迁移与断点恢复自愈"]
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程</em>
+</p>
 <ul>
 <li><p><strong>P1 紧急电话呼叫（Page On-call）</strong>：<br>
 要求 1 小时窗口的 Burn Rate <span class="math inline">\(&gt; 14.4\)</span> <strong>且</strong> 最近 5 分钟窗口的 Burn Rate <span class="math inline">\(&gt; 14.4\)</span>。长窗口确认已经造成了实质性的预算大出血，短窗口确认故障仍在持续发生，触发紧急呼叫并启动作业热迁移与硬件隔离自愈；</p></li>
@@ -681,7 +677,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 burn rate，并拒绝没有错误预算的 100% SLO。</p>
 <p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
-<div id="030ba2de" class="cell" data-course_role="exercise">
+<div id="8a7f31be" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> burn_rate(bad_events, total_events, slo_target):</span>
@@ -738,7 +734,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先独立完成。核对后请改变一个规模或故障条件重新推演。</p>
-<div id="5a14329a" class="cell" data-course_role="solution">
+<div id="c6d8c24a" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> burn_rate(bad_events, total_events, slo_target):</span>
@@ -1293,81 +1289,81 @@ window.Quarto = {
 <span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>    subgraph Telemetry[<span class="ot">"</span><span class="st">集群可观测性三支柱</span><span class="ot">"</span>]</span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>        M[<span class="ot">"</span><span class="st">Metrics (GPU 利用率, 温度, ECC, NCCL 吞吐)</span><span class="ot">"</span>]</span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>        L[<span class="ot">"</span><span class="st">Logs (内核 dmesg, PyTorch 栈日志, K8s 事件)</span><span class="ot">"</span>]</span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>        T[<span class="ot">"</span><span class="st">Traces (分布式跨节点 RPC 与 NCCL 通信耗时)</span><span class="ot">"</span>]</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>    Telemetry --&gt; BurnRate[<span class="ot">"</span><span class="st">SLO 错误预算消耗率 (Burn Rate = 当前故障率 / 允许故障率)</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 7-1：集群立体化监控度量与 SLO 错误预算 (Burn Rate) 监控模型<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>在由成百上千张高端加速卡构建的大规模 AI 生产基础设施中（包含在线高吞吐大模型推理 Serving 与长周期万卡预训练 Training），平台运营与 SRE 工程师面临着严峻的可观测性与告警困境：</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**告警风暴与告警疲劳（Alert Fatigue）**：  </span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>   若依据传统静态底层阈值设置告警（如“GPU 利用率 $&lt; 80\%$”、“CPU 内存 $&gt; 90\%$”、“网络发生丢包”），由于分布式训练中定期的 Checkpoint 刷盘、异步数据预取抖动与临时调度重试，值班人员每天会收到数百条虚假警报，导致真正致命的业务事故被海量噪音淹没。</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**表面繁荣与业务隐形崩溃（The "GPU 100% Fallacy"）**：  </span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>   监控大屏上 GPU 利用率维持在 100%，看似算力拉满，实际上可能因为 NCCL 集合通信死锁导致的 CUDA 核心空转自旋（Spin-wait）、动态序列异常导致的死循环、或重试风暴，真正的业务有效吞吐（Goodput）早已归零。</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**可观测性数据孤岛（Observability Silos）**：  </span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>   时序指标（Metrics）只能看到宏观聚合统计，日志（Logs）零散分布在各个容器与内核缓冲区中，分布式调用链路（Traces）缺乏跨节点的上下文传播。当用户端报错或推理延迟激增时，排查人员无法快速将上层业务症状下钻关联到底层的物理硬件与通信根因。</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>本课构建现代 AI 算力平台的可观测性三支柱（Metrics, Logs, Traces，如图 7-1 所示），并引入 Google SRE 体系中的**错误预算消耗率（Error Budget Burn Rate）告警模型**与多窗口分级判定流（如图 7-2 所示），实现从业务影响到硬件根因的精准穿透定位。</span>
 <span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>    MetricStream[<span class="ot">"</span><span class="st">时序指标持续采集 (Prometheus + DCGM-Exporter)</span><span class="ot">"</span>] --&gt; EvalWindow[<span class="ot">"</span><span class="st">多窗口联合评估: 1小时消耗率 &gt; 14.4x 或 6小时 &gt; 6x</span><span class="ot">"</span>]</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    EvalWindow --&gt; Spike{<span class="ot">"</span><span class="st">是否发生急剧突发严重故障?</span><span class="ot">"</span>}</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    Spike --&gt;|<span class="ot">"</span><span class="st">是 (高 Burn Rate)</span><span class="ot">"</span>| P1Alert[<span class="ot">"</span><span class="st">触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Spike --&gt;|<span class="ot">"</span><span class="st">否 (慢速漂移)</span><span class="ot">"</span>| P3Ticket[<span class="ot">"</span><span class="st">创建 P3 低优先级工单排查慢掉队节点</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    P1Alert --&gt; HotMigration[<span class="ot">"</span><span class="st">触发作业热迁移与断点恢复自愈</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>在由成百上千张高端加速卡构建的大规模 AI 生产基础设施中（包含在线高吞吐大模型推理 Serving 与长周期万卡预训练 Training），平台运营与 SRE 工程师面临着严峻的可观测性与告警困境：</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**告警风暴与告警疲劳（Alert Fatigue）**：  </span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>   若依据传统静态底层阈值设置告警（如“GPU 利用率 $&lt; 80\%$”、“CPU 内存 $&gt; 90\%$”、“网络发生丢包”），由于分布式训练中定期的 Checkpoint 刷盘、异步数据预取抖动与临时调度重试，值班人员每天会收到数百条虚假警报，导致真正致命的业务事故被海量噪音淹没。</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**表面繁荣与业务隐形崩溃（The "GPU 100% Fallacy"）**：  </span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>   监控大屏上 GPU 利用率维持在 100%，看似算力拉满，实际上可能因为 NCCL 集合通信死锁导致的 CUDA 核心空转自旋（Spin-wait）、动态序列异常导致的死循环、或重试风暴，真正的业务有效吞吐（Goodput）早已归零。</span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**可观测性数据孤岛（Observability Silos）**：  </span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>   时序指标（Metrics）只能看到宏观聚合统计，日志（Logs）零散分布在各个容器与内核缓冲区中，分布式调用链路（Traces）缺乏跨节点的上下文传播。当用户端报错或推理延迟激增时，排查人员无法快速将上层业务症状下钻关联到底层的物理硬件与通信根因。</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>本课构建现代 AI 算力平台的可观测性三支柱（Metrics, Logs, Traces，如图 7-1 所示），并引入 Google SRE 体系中的**错误预算消耗率（Error Budget Burn Rate）告警模型**与多窗口分级判定流（如图 7-2 所示），实现从业务影响到硬件根因的精准穿透定位。</span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) AI 基础设施可观测性三支柱（如图 7-1 所示）</span></span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    subgraph Telemetry[<span class="ot">"</span><span class="st">集群可观测性三支柱</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>        M[<span class="ot">"</span><span class="st">Metrics (GPU 利用率, 温度, ECC, NCCL 吞吐)</span><span class="ot">"</span>]</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>        L[<span class="ot">"</span><span class="st">Logs (内核 dmesg, PyTorch 栈日志, K8s 事件)</span><span class="ot">"</span>]</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>        T[<span class="ot">"</span><span class="st">Traces (分布式跨节点 RPC 与 NCCL 通信耗时)</span><span class="ot">"</span>]</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    Telemetry --&gt; BurnRate[<span class="ot">"</span><span class="st">SLO 错误预算消耗率 (Burn Rate = 当前故障率 / 允许故障率)</span><span class="ot">"</span>]</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 7-1：集群立体化监控度量与 SLO 错误预算 (Burn Rate) 监控模型<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Metrics（指标层，秒级聚合）**：  </span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>  依托 Prometheus 与 NVIDIA DCGM-Exporter 导出立体化时序指标。不仅监测宏观的 <span class="in">`DCGM_FI_DEV_GPU_UTIL`</span>，更深度透视：</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_PROF_SM_ACTIVE`</span>（SM 真实活跃周期比例）；</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_PROF_TENSOR_ACTIVE`</span>（张量核心 Tensor Core 计算活跃度）；</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_DEV_POWER_USAGE`</span>（物理功耗与热节流状态）；</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`</span>（未纠正双位 ECC 错误计数）。</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Logs（日志层，离散结构化事件）**：  </span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>  汇聚操作系统内核日志（<span class="in">`dmesg`</span> 捕获 PCIe AER 错误、NVIDIA Xid 硬件异常报错）、Kubernetes 事件（Pod OOMKilled、NodeNotReady）、以及通信栈日志（<span class="in">`NCCL_DEBUG=INFO`</span> 记录 Communicator 握手状态与超时挂起）。</span>
 <span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (1) AI 基础设施可观测性三支柱（如图 7-1 所示）</span></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Metrics（指标层，秒级聚合）**：  </span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>  依托 Prometheus 与 NVIDIA DCGM-Exporter 导出立体化时序指标。不仅监测宏观的 <span class="in">`DCGM_FI_DEV_GPU_UTIL`</span>，更深度透视：</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_PROF_SM_ACTIVE`</span>（SM 真实活跃周期比例）；</span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_PROF_TENSOR_ACTIVE`</span>（张量核心 Tensor Core 计算活跃度）；</span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_DEV_POWER_USAGE`</span>（物理功耗与热节流状态）；</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span><span class="in">`DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`</span>（未纠正双位 ECC 错误计数）。</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Logs（日志层，离散结构化事件）**：  </span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>  汇聚操作系统内核日志（<span class="in">`dmesg`</span> 捕获 PCIe AER 错误、NVIDIA Xid 硬件异常报错）、Kubernetes 事件（Pod OOMKilled、NodeNotReady）、以及通信栈日志（<span class="in">`NCCL_DEBUG=INFO`</span> 记录 Communicator 握手状态与超时挂起）。</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Traces（分布式链路追踪，上下文穿透）**：  </span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>  基于 OpenTelemetry 标准。在线推理网关为每个传入请求注入全局唯一的 <span class="in">`TraceID`</span>，跨越 Prefill 阶段、Decode 阶段、KV Cache 调度与跨卡张量并行（TP）通信。一旦发生 p99 延迟毛刺，可通过 <span class="in">`TraceID`</span> 毫秒级还原该请求在每个算子、内存搬运及网络传输上的精确时间跨度。</span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 错误预算与 Burn Rate 数学模型</span></span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>在现代可靠性工程中，告警应当基于用户可见的服务等级目标（Service Level Objective, SLO）：</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>设系统设定的 SLO 目标可用度为 $T_{\text{SLO}}$（如 99.9%，即 $0.999$）。  </span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>系统在统计周期内允许的错误预算比例为：</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>$$\text{Error Budget} = 1 - T_{\text{SLO}} = 1 - 0.999 = 0.001 \quad (0.1\%)$$</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>设在观测时间窗口内，总服务请求数（或训练 Step 总数）为 $N_{\text{total}}$，发生异常、超时或失败的事件数为 $N_{\text{bad}}$，实际观测故障率为：</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a>$$\text{Observed Bad Rate} = \frac{N_{\text{bad}}}{N_{\text{total}}}$$</span>
 <span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Traces（分布式链路追踪，上下文穿透）**：  </span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>  基于 OpenTelemetry 标准。在线推理网关为每个传入请求注入全局唯一的 <span class="in">`TraceID`</span>，跨越 Prefill 阶段、Decode 阶段、KV Cache 调度与跨卡张量并行（TP）通信。一旦发生 p99 延迟毛刺，可通过 <span class="in">`TraceID`</span> 毫秒级还原该请求在每个算子、内存搬运及网络传输上的精确时间跨度。</span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>**错误预算消耗率（Burn Rate）**定义为实际故障率相对于错误预算的消耗倍速：</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>$$\text{Burn Rate} = \frac{\text{Observed Bad Rate}}{\text{Error Budget}} = \frac{N_{\text{bad}} / N_{\text{total}}}{1 - T_{\text{SLO}}}$$</span>
 <span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (2) 错误预算与 Burn Rate 数学模型</span></span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>在现代可靠性工程中，告警应当基于用户可见的服务等级目标（Service Level Objective, SLO）：</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a>设系统设定的 SLO 目标可用度为 $T_{\text{SLO}}$（如 99.9%，即 $0.999$）。  </span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>系统在统计周期内允许的错误预算比例为：</span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>$$\text{Error Budget} = 1 - T_{\text{SLO}} = 1 - 0.999 = 0.001 \quad (0.1\%)$$</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**物理直观意义**：</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>$\text{Burn Rate} = 1.0$：故障率恰好与预算持平，30 天的错误预算将在整整 30 天内平稳耗尽；</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>$\text{Burn Rate} = 10.0$：消耗速度是基准的 10 倍，30 天的预算将在 3 天内耗尽；</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>$\text{Burn Rate} = 14.4$：30 天的预算将在 50 小时（约 2 天）内耗尽，意味着短短 1 小时内就烧掉了整个月预算的 2%！</span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (3) 多窗口多消耗率联合告警策略</span></span>
 <span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>设在观测时间窗口内，总服务请求数（或训练 Step 总数）为 $N_{\text{total}}$，发生异常、超时或失败的事件数为 $N_{\text{bad}}$，实际观测故障率为：</span>
-<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a>$$\text{Observed Bad Rate} = \frac{N_{\text{bad}}}{N_{\text{total}}}$$</span>
-<span id="cb3-91"><a href="#cb3-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-92"><a href="#cb3-92" aria-hidden="true" tabindex="-1"></a>**错误预算消耗率（Burn Rate）**定义为实际故障率相对于错误预算的消耗倍速：</span>
-<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a>$$\text{Burn Rate} = \frac{\text{Observed Bad Rate}}{\text{Error Budget}} = \frac{N_{\text{bad}} / N_{\text{total}}}{1 - T_{\text{SLO}}}$$</span>
-<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**物理直观意义**：</span>
-<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>$\text{Burn Rate} = 1.0$：故障率恰好与预算持平，30 天的错误预算将在整整 30 天内平稳耗尽；</span>
-<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>$\text{Burn Rate} = 10.0$：消耗速度是基准的 10 倍，30 天的预算将在 3 天内耗尽；</span>
-<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>$\text{Burn Rate} = 14.4$：30 天的预算将在 50 小时（约 2 天）内耗尽，意味着短短 1 小时内就烧掉了整个月预算的 2%！</span>
-<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="fu">#### (3) 多窗口多消耗率联合告警策略</span></span>
-<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a>如图 7-2 所示，为彻底杜绝毛刺误报并极速捕获真正严重的事故，工业界执行多窗口联合校验：</span>
+<span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a>如图 7-2 所示，为彻底杜绝毛刺误报并极速捕获真正严重的事故，工业界执行多窗口联合校验：</span>
+<span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-93"><a href="#cb3-93" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-94"><a href="#cb3-94" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-95"><a href="#cb3-95" aria-hidden="true" tabindex="-1"></a>    MetricStream[<span class="ot">"</span><span class="st">时序指标持续采集 (Prometheus + DCGM-Exporter)</span><span class="ot">"</span>] --&gt; EvalWindow[<span class="ot">"</span><span class="st">多窗口联合评估: 1小时消耗率 &gt; 14.4x 或 6小时 &gt; 6x</span><span class="ot">"</span>]</span>
+<span id="cb3-96"><a href="#cb3-96" aria-hidden="true" tabindex="-1"></a>    EvalWindow --&gt; Spike{<span class="ot">"</span><span class="st">是否发生急剧突发严重故障?</span><span class="ot">"</span>}</span>
+<span id="cb3-97"><a href="#cb3-97" aria-hidden="true" tabindex="-1"></a>    Spike --&gt;|<span class="ot">"</span><span class="st">是 (高 Burn Rate)</span><span class="ot">"</span>| P1Alert[<span class="ot">"</span><span class="st">触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离</span><span class="ot">"</span>]</span>
+<span id="cb3-98"><a href="#cb3-98" aria-hidden="true" tabindex="-1"></a>    Spike --&gt;|<span class="ot">"</span><span class="st">否 (慢速漂移)</span><span class="ot">"</span>| P3Ticket[<span class="ot">"</span><span class="st">创建 P3 低优先级工单排查慢掉队节点</span><span class="ot">"</span>]</span>
+<span id="cb3-99"><a href="#cb3-99" aria-hidden="true" tabindex="-1"></a>    P1Alert --&gt; HotMigration[<span class="ot">"</span><span class="st">触发作业热迁移与断点恢复自愈</span><span class="ot">"</span>]</span>
+<span id="cb3-100"><a href="#cb3-100" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-101"><a href="#cb3-101" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-102"><a href="#cb3-102" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-103"><a href="#cb3-103" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-104"><a href="#cb3-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**P1 紧急电话呼叫（Page On-call）**：  </span>
 <span id="cb3-105"><a href="#cb3-105" aria-hidden="true" tabindex="-1"></a>  要求 1 小时窗口的 Burn Rate $&gt; 14.4$ **且** 最近 5 分钟窗口的 Burn Rate $&gt; 14.4$。长窗口确认已经造成了实质性的预算大出血，短窗口确认故障仍在持续发生，触发紧急呼叫并启动作业热迁移与硬件隔离自愈；</span>

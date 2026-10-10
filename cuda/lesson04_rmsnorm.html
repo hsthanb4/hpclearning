@@ -511,7 +511,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#rmsnorm-的数学定义与相比-layernorm-的架构优势" id="toc-rmsnorm-的数学定义与相比-layernorm-的架构优势" class="nav-link" data-scroll-target="#rmsnorm-的数学定义与相比-layernorm-的架构优势">1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势</a></li>
   <li><a href="#两阶段扫描two-pass-scanning与片上同步时序如图-4-2-所示" id="toc-两阶段扫描two-pass-scanning与片上同步时序如图-4-2-所示" class="nav-link" data-scroll-target="#两阶段扫描two-pass-scanning与片上同步时序如图-4-2-所示">2. 两阶段扫描（Two-Pass Scanning）与片上同步时序（如<strong>图 4-2</strong> 所示）</a></li>
   <li><a href="#正确性不变量与数值防御" id="toc-正确性不变量与数值防御" class="nav-link" data-scroll-target="#正确性不变量与数值防御">3. 正确性不变量与数值防御</a></li>
@@ -582,19 +581,23 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="rmsnorm-的数学定义与相比-layernorm-的架构优势" class="level3">
+<h3 class="anchored" data-anchor-id="rmsnorm-的数学定义与相比-layernorm-的架构优势">1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势</h3>
+<p>均方根层归一化（Root Mean Square Layer Normalization, RMSNorm）是现代大语言模型（如 LLaMA 系列、Mistral、Qwen、DeepSeek）中近乎通用的归一化层标准，全面替代了经典的 LayerNorm。</p>
+<section id="a.-核心数学公式推导如图-4-1-所示" class="level4">
+<h4 class="anchored" data-anchor-id="a.-核心数学公式推导如图-4-1-所示">A. 核心数学公式推导（如<strong>图 4-1</strong> 所示）</h4>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
 <p></p><figure class="figure"><p></p>
 <div>
 <pre class="mermaid mermaid-js">flowchart LR
-    subgraph RMSNormMath["RMSNorm 核心计算链路"]
-        direction TB
-        X["输入向量 x"] --&gt; Square["平方累加: sum(x_i^2)"]
-        Square --&gt; Mean["均方根: RMS = sqrt(mean(x^2) + eps)"]
-        Mean --&gt; Scale["归一化并仿射: y_i = (x_i / RMS) * weight_i"]
+    subgraph RMSNorm_Math["RMSNorm 均方根计算图"]
+        X["输入向量 x_i (Hidden 维度)"] --&gt; Sq["平方: x_i^2"]
+        Sq --&gt; Mean["均值: 1/d * sum(x_i^2)"]
+        Mean --&gt; Rsqrt["倒数平方根: rsqrt(mean + eps)"]
+        Rsqrt --&gt; Mul["尺度重标定: x_i * rsqrt * gamma_i"]
+        Mul --&gt; Y["输出 y_i"]
     end
 </pre>
 </div>
@@ -605,39 +608,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 4-1：RMSNorm 均方根归一化与缩放系数计算图</em>
 </p>
-<div class="cell" data-layout-align="default">
-<div class="cell-output-display">
-<div>
-<p></p><figure class="figure"><p></p>
-<div>
-<pre class="mermaid mermaid-js">sequenceDiagram
-    autonumber
-    participant T as 线程束 (Threads)
-    participant S as 共享内存 (SMem)
-    participant GM as 全局内存 (HBM)
-
-    Note over T,GM: 第一遍遍历 (Pass 1: 计算平方和)
-    T-&gt;&gt;GM: 读取 x 并累加本地局部平方和
-    T-&gt;&gt;S: 块内归约得出整行平方均值，计算 1 / RMS
-    Note over T,S: 同步屏障 __syncthreads()
-    Note over T,GM: 第二遍遍历 (Pass 2: 归一化与写回)
-    T-&gt;&gt;GM: 重新加载 x[i]，乘以 1/RMS 与 weight[i]
-    T-&gt;&gt;GM: 将归一化结果写回全局内存 y[i]
-</pre>
-</div>
-<p></p></figure><p></p>
-</div>
-</div>
-</div>
-<p class="caption" align="center">
-<em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em>
-</p>
-</section>
-<section id="rmsnorm-的数学定义与相比-layernorm-的架构优势" class="level3">
-<h3 class="anchored" data-anchor-id="rmsnorm-的数学定义与相比-layernorm-的架构优势">1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势</h3>
-<p>均方根层归一化（Root Mean Square Layer Normalization, RMSNorm）是现代大语言模型（如 LLaMA 系列、Mistral、Qwen、DeepSeek）中近乎通用的归一化层标准，全面替代了经典的 LayerNorm。</p>
-<section id="a.-核心数学公式推导如图-4-1-所示" class="level4">
-<h4 class="anchored" data-anchor-id="a.-核心数学公式推导如图-4-1-所示">A. 核心数学公式推导（如<strong>图 4-1</strong> 所示）</h4>
 <p>对于输入特征向量 <span class="math inline">\(x \in \mathbb{R}^N\)</span>（通常为 Transformer 隐藏层维度 <span class="math inline">\(h\)</span>），其均方根（RMS）定义为： <span class="math display">\[\text{RMS}(x) = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2 + \epsilon}\]</span> 归一化并施加可学习仿射缩放系数 <span class="math inline">\(w \in \mathbb{R}^N\)</span>（Weight / Gamma）： <span class="math display">\[y_i = \frac{x_i}{\text{RMS}(x)} \cdot w_i \quad (i = 1, \dots, N)\]</span> 为了避免在除法中出现浮点除以零，通常计算其倒数：<span class="math inline">\(\text{inv\_rms} = \frac{1}{\sqrt{\frac{1}{N} \sum x_i^2 + \epsilon}} = \text{rsqrt}\left(\frac{\sum x_i^2}{N} + \epsilon\right)\)</span>。</p>
 </section>
 <section id="b.-相比传统-layernorm-的核心优势" class="level4">
@@ -656,6 +626,35 @@ window.Quarto = {
 </section>
 <section id="两阶段扫描two-pass-scanning与片上同步时序如图-4-2-所示" class="level3">
 <h3 class="anchored" data-anchor-id="两阶段扫描two-pass-scanning与片上同步时序如图-4-2-所示">2. 两阶段扫描（Two-Pass Scanning）与片上同步时序（如<strong>图 4-2</strong> 所示）</h3>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant GM as 全局显存 (HBM)
+    participant Reg as 寄存器 / SRAM
+    participant W as Warp 归约 (__shfl_down_sync)
+    participant SM as Shared Memory (广播均方根)
+
+    Note over GM,Reg: Pass 1: 扫描并累加均方值
+    GM-&gt;&gt;Reg: 向量化加载输入 x 并平方累加
+    Reg-&gt;&gt;W: Warp 内树状折半求和
+    W-&gt;&gt;SM: 保存各 Warp 局部均值并最终广播 rsqrt_val
+    Note over Reg,GM: Pass 2: 重新读取并写回输出
+    SM-&gt;&gt;Reg: 线程获取全局 rsqrt 标量
+    GM-&gt;&gt;Reg: 重新读取 x 并结合 weight 缩放
+    Reg-&gt;&gt;GM: 向量化写回输出 y (完全融合，零多余 HBM 往返)
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em>
+</p>
 <p>在大模型中，每一行（Row）通常代表一个 Token 的隐藏维度（如 <span class="math inline">\(N = 4096 \sim 8192\)</span>）。单个 Block 绑定处理一行：</p>
 <section id="a.-第一遍扫描pass-1平方和规约" class="level4">
 <h4 class="anchored" data-anchor-id="a.-第一遍扫描pass-1平方和规约">A. 第一遍扫描（Pass 1：平方和规约）</h4>
@@ -725,7 +724,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 inverse RMS。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="b7f370b2" class="cell" data-course_role="exercise">
+<div id="7c97326a" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">4_rmsnorm</span>.cu</span>
@@ -884,7 +883,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="13ed7da3" class="cell" data-course_role="solution">
+<div id="4a564efd" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">4_rmsnorm</span>.cu</span>
@@ -1550,431 +1549,434 @@ window.Quarto = {
 <span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势</span></span>
 <span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a>    subgraph RMSNormMath[<span class="ot">"</span><span class="st">RMSNorm 核心计算链路</span><span class="ot">"</span>]</span>
-<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
-<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a>        X[<span class="ot">"</span><span class="st">输入向量 x</span><span class="ot">"</span>] --&gt; Square[<span class="ot">"</span><span class="st">平方累加: sum(x_i^2)</span><span class="ot">"</span>]</span>
-<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a>        Square --&gt; Mean[<span class="ot">"</span><span class="st">均方根: RMS = sqrt(mean(x^2) + eps)</span><span class="ot">"</span>]</span>
-<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>        Mean --&gt; Scale[<span class="ot">"</span><span class="st">归一化并仿射: y_i = (x_i / RMS) * weight_i</span><span class="ot">"</span>]</span>
-<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-1：RMSNorm 均方根归一化与缩放系数计算图<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
-<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
-<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>    participant T as 线程束 (Threads)</span>
-<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>    participant S as 共享内存 (SMem)</span>
-<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>    participant GM as 全局内存 (HBM)</span>
-<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>    Note over T,GM: 第一遍遍历 (Pass <span class="dv">1</span>: 计算平方和)</span>
-<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;GM: 读取 x 并累加本地局部平方和</span>
-<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;S: 块内归约得出整行平方均值，计算 <span class="dv">1</span> / RMS</span>
-<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a>    Note over T,S: 同步屏障 __syncthreads()</span>
-<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a>    Note over T,GM: 第二遍遍历 (Pass <span class="dv">2</span>: 归一化与写回)</span>
-<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;GM: 重新加载 x[i]，乘以 <span class="dv">1</span>/RMS 与 weight[i]</span>
-<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>    T-&gt;&gt;GM: 将归一化结果写回全局内存 <span class="ot">y</span>[i]</span>
-<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势</span></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>均方根层归一化（Root Mean Square Layer Normalization, RMSNorm）是现代大语言模型（如 LLaMA 系列、Mistral、Qwen、DeepSeek）中近乎通用的归一化层标准，全面替代了经典的 LayerNorm。</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. 核心数学公式推导（如**图 4-1** 所示）</span></span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>    subgraph RMSNorm_Math[<span class="ot">"</span><span class="st">RMSNorm 均方根计算图</span><span class="ot">"</span>]</span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>        X[<span class="ot">"</span><span class="st">输入向量 x_i (Hidden 维度)</span><span class="ot">"</span>] --&gt; Sq[<span class="ot">"</span><span class="st">平方: x_i^2</span><span class="ot">"</span>]</span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>        Sq --&gt; Mean[<span class="ot">"</span><span class="st">均值: 1/d * sum(x_i^2)</span><span class="ot">"</span>]</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>        Mean --&gt; Rsqrt[<span class="ot">"</span><span class="st">倒数平方根: rsqrt(mean + eps)</span><span class="ot">"</span>]</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>        Rsqrt --&gt; Mul[<span class="ot">"</span><span class="st">尺度重标定: x_i * rsqrt * gamma_i</span><span class="ot">"</span>]</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>        Mul --&gt; Y[<span class="ot">"</span><span class="st">输出 y_i</span><span class="ot">"</span>]</span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-1：RMSNorm 均方根归一化与缩放系数计算图<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>对于输入特征向量 $x \in \mathbb{R}^N$（通常为 Transformer 隐藏层维度 $h$），其均方根（RMS）定义为：</span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>$$\text{RMS}(x) = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2 + \epsilon}$$</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>归一化并施加可学习仿射缩放系数 $w \in \mathbb{R}^N$（Weight / Gamma）：</span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a>$$y_i = \frac{x_i}{\text{RMS}(x)} \cdot w_i \quad (i = 1, \dots, N)$$</span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>为了避免在除法中出现浮点除以零，通常计算其倒数：$\text{inv<span class="sc">\_</span>rms} = \frac{1}{\sqrt{\frac{1}{N} \sum x_i^2 + \epsilon}} = \text{rsqrt}\left(\frac{\sum x_i^2}{N} + \epsilon\right)$。</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 相比传统 LayerNorm 的核心优势</span></span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a>在传统 LayerNorm 中：</span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a>$$\mu = \frac{1}{N} \sum_{i=1}^N x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=1}^N (x_i - \mu)^2, \quad y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot w_i + b_i$$</span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**消除了均值中心化（Zero-Mean Shift）**：Zhang et al. (2019) 发现，LayerNorm 保持训练数值稳定的核心是其**尺度不变性（Scaling Invariance）**，平移方差中心化（减均值）对模型收敛的贡献微乎其微。</span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**计算与显存开销双重削减**：</span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>LayerNorm 需要计算两次全局统计约简（一次均值 $\mu$、一次方差 $\sigma^2$）；而 RMSNorm **仅需一次单规约（$\sum x_i^2$）**；</span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>移除了偏置参数 $b$（Beta），减少了可训练参数量并降低了参数读取带宽；</span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>算子执行耗时直接下降 10%~20%，显著提升了小 Batch 推理场景的执行速度。</span>
 <span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a>均方根层归一化（Root Mean Square Layer Normalization, RMSNorm）是现代大语言模型（如 LLaMA 系列、Mistral、Qwen、DeepSeek）中近乎通用的归一化层标准，全面替代了经典的 LayerNorm。</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 两阶段扫描（Two-Pass Scanning）与片上同步时序（如**图 4-2** 所示）</span></span>
 <span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. 核心数学公式推导（如**图 4-1** 所示）</span></span>
-<span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a>对于输入特征向量 $x \in \mathbb{R}^N$（通常为 Transformer 隐藏层维度 $h$），其均方根（RMS）定义为：</span>
-<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a>$$\text{RMS}(x) = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2 + \epsilon}$$</span>
-<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a>归一化并施加可学习仿射缩放系数 $w \in \mathbb{R}^N$（Weight / Gamma）：</span>
-<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>$$y_i = \frac{x_i}{\text{RMS}(x)} \cdot w_i \quad (i = 1, \dots, N)$$</span>
-<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a>为了避免在除法中出现浮点除以零，通常计算其倒数：$\text{inv<span class="sc">\_</span>rms} = \frac{1}{\sqrt{\frac{1}{N} \sum x_i^2 + \epsilon}} = \text{rsqrt}\left(\frac{\sum x_i^2}{N} + \epsilon\right)$。</span>
-<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 相比传统 LayerNorm 的核心优势</span></span>
-<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>在传统 LayerNorm 中：</span>
-<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a>$$\mu = \frac{1}{N} \sum_{i=1}^N x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=1}^N (x_i - \mu)^2, \quad y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot w_i + b_i$$</span>
-<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**消除了均值中心化（Zero-Mean Shift）**：Zhang et al. (2019) 发现，LayerNorm 保持训练数值稳定的核心是其**尺度不变性（Scaling Invariance）**，平移方差中心化（减均值）对模型收敛的贡献微乎其微。</span>
-<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**计算与显存开销双重削减**：</span>
-<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>LayerNorm 需要计算两次全局统计约简（一次均值 $\mu$、一次方差 $\sigma^2$）；而 RMSNorm **仅需一次单规约（$\sum x_i^2$）**；</span>
-<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>移除了偏置参数 $b$（Beta），减少了可训练参数量并降低了参数读取带宽；</span>
-<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>算子执行耗时直接下降 10%~20%，显著提升了小 Batch 推理场景的执行速度。</span>
-<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 两阶段扫描（Two-Pass Scanning）与片上同步时序（如**图 4-2** 所示）</span></span>
-<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a>在大模型中，每一行（Row）通常代表一个 Token 的隐藏维度（如 $N = 4096 \sim 8192$）。单个 Block 绑定处理一行：</span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a>    participant GM as 全局显存 (HBM)</span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a>    participant Reg as 寄存器 / SRAM</span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>    participant W as Warp 归约 (__shfl_down_sync)</span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a>    participant SM as Shared Memory (广播均方根)</span>
+<span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a>    Note over GM,Reg: Pass <span class="dv">1</span>: 扫描并累加均方值</span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a>    GM-&gt;&gt;Reg: 向量化加载输入 x 并平方累加</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>    Reg-&gt;&gt;W: Warp 内树状折半求和</span>
+<span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a>    W-&gt;&gt;SM: 保存各 Warp 局部均值并最终广播 rsqrt_val</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>    Note over Reg,GM: Pass <span class="dv">2</span>: 重新读取并写回输出</span>
+<span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a>    SM-&gt;&gt;Reg: 线程获取全局 rsqrt 标量</span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>    GM-&gt;&gt;Reg: 重新读取 x 并结合 weight 缩放</span>
+<span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a>    Reg-&gt;&gt;GM: 向量化写回输出 <span class="ot">y </span>(完全融合，零多余 HBM 往返)</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. 第一遍扫描（Pass 1：平方和规约）</span></span>
-<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Block 内各线程沿列方向跨步遍历该行：</span>
-<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a>  <span class="in">```cuda</span></span>
-<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="dt">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE<span class="op">)</span> <span class="op">{</span></span>
-<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a>      local_sq_sum <span class="op">+=</span> row_in<span class="op">[</span>col<span class="op">]</span> <span class="op">*</span> row_in<span class="op">[</span>col<span class="op">];</span></span>
-<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
-<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a>  <span class="in">```</span></span>
-<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>相邻线程读取相邻列，满足 128 字节对齐合并读取；</span>
-<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>调用 <span class="in">`block_reduce_sum`</span> 将 Block 内所有线程的局部平方和累加为全局行平方和 <span class="in">`sq_sum`</span>；</span>
-<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>由 <span class="in">`tid == 0`</span> 线程调用硬件单周期快速指令 <span class="in">`rsqrtf(sq_sum / N + eps)`</span> 计算出全行共享的 <span class="in">`inv_rms`</span>，并存入共享内存 <span class="in">`smem_inv_rms`</span>。</span>
-<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 显式障栅同步（`__syncthreads()`）</span></span>
-<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a>在进入第二阶段之前，**必须显式调用 `__syncthreads()`**！</span>
-<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a>若遗漏该同步屏障，非 0 号 Warp 的线程在读取 <span class="in">`smem_inv_rms`</span> 时，0 号线程可能尚未完成倒数平方根的写回，导致后续计算读入未初始化的脏数据或 NaN。</span>
-<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a><span class="fu">#### C. 第二遍扫描（Pass 2：归一化与写回）</span></span>
-<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>同步完成后，全体线程并发从共享内存中加载统一的 <span class="in">`inv_rms`</span> 广播标量；</span>
-<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>线程再次沿列方向遍历，重新从全局内存读取该行输入 <span class="in">`row_in[col]`</span>，并同步读取权重 <span class="in">`weight[col]`</span>；</span>
-<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>在寄存器中完成连续乘法：<span class="in">`row_out[col] = row_in[col] * inv_rms * weight[col]`</span>；</span>
-<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>最终以合并写入事务写回全局内存 <span class="in">`output`</span>。</span>
-<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性不变量与数值防御</span></span>
-<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**数值下溢防御常数 $\epsilon$ 的添加位置**：</span>
-<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>极其关键的不变量：$\epsilon$ **必须加在均方根的均值项上、开方符号之前**（即 $\sqrt{\frac{\sum x^2}{N} + \epsilon}$），严禁误写为 $\frac{\sqrt{\sum x^2}}{N} + \epsilon$。</span>
-<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>典型设置：$\epsilon = 10^{-5}$ 或 $10^{-6}$。当输入向量全为 0 时，$\epsilon$ 确保开方后分母不为 0，防止除以零产生 <span class="in">`NaN`</span>。</span>
-<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**高精度平方累积（FP32 Accumulation）**：</span>
-<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>即便输入数据是 FP16 或 BF16 格式，在循环计算 <span class="in">`x * x`</span> 并在 Block 内求和时，**必须强制提升至 FP32 寄存器进行累加**。</span>
-<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>否则在 $N = 8192$ 等长隐藏维下，成千上万个小浮点数的平方和极易在低精度浮点下发生精度饱和下溢或指数溢出。</span>
-<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程进阶：残差连接融合（Fused Add-RMSNorm）</span></span>
-<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a>在标准 Transformer Block 中，RMSNorm 紧随残差连接之后（即 $y = \text{RMSNorm}(x + \text{residual})$）。</span>
-<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**未融合状态下的内存往返灾难**：</span>
-<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a>  先启动一个单独的 Elementwise Add Kernel 将 $x + \text{residual}$ 写回 HBM；随后 RMSNorm 内核再两次从 HBM 读取该结果。</span>
+<span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a>在大模型中，每一行（Row）通常代表一个 Token 的隐藏维度（如 $N = 4096 \sim 8192$）。单个 Block 绑定处理一行：</span>
+<span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. 第一遍扫描（Pass 1：平方和规约）</span></span>
+<span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Block 内各线程沿列方向跨步遍历该行：</span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a>  <span class="in">```cuda</span></span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="dt">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a>      local_sq_sum <span class="op">+=</span> row_in<span class="op">[</span>col<span class="op">]</span> <span class="op">*</span> row_in<span class="op">[</span>col<span class="op">];</span></span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a>  <span class="in">```</span></span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>相邻线程读取相邻列，满足 128 字节对齐合并读取；</span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>调用 <span class="in">`block_reduce_sum`</span> 将 Block 内所有线程的局部平方和累加为全局行平方和 <span class="in">`sq_sum`</span>；</span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>由 <span class="in">`tid == 0`</span> 线程调用硬件单周期快速指令 <span class="in">`rsqrtf(sq_sum / N + eps)`</span> 计算出全行共享的 <span class="in">`inv_rms`</span>，并存入共享内存 <span class="in">`smem_inv_rms`</span>。</span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 显式障栅同步（`__syncthreads()`）</span></span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a>在进入第二阶段之前，**必须显式调用 `__syncthreads()`**！</span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a>若遗漏该同步屏障，非 0 号 Warp 的线程在读取 <span class="in">`smem_inv_rms`</span> 时，0 号线程可能尚未完成倒数平方根的写回，导致后续计算读入未初始化的脏数据或 NaN。</span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a><span class="fu">#### C. 第二遍扫描（Pass 2：归一化与写回）</span></span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>同步完成后，全体线程并发从共享内存中加载统一的 <span class="in">`inv_rms`</span> 广播标量；</span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>线程再次沿列方向遍历，重新从全局内存读取该行输入 <span class="in">`row_in[col]`</span>，并同步读取权重 <span class="in">`weight[col]`</span>；</span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>在寄存器中完成连续乘法：<span class="in">`row_out[col] = row_in[col] * inv_rms * weight[col]`</span>；</span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>最终以合并写入事务写回全局内存 <span class="in">`output`</span>。</span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 正确性不变量与数值防御</span></span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**数值下溢防御常数 $\epsilon$ 的添加位置**：</span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>极其关键的不变量：$\epsilon$ **必须加在均方根的均值项上、开方符号之前**（即 $\sqrt{\frac{\sum x^2}{N} + \epsilon}$），严禁误写为 $\frac{\sqrt{\sum x^2}}{N} + \epsilon$。</span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>典型设置：$\epsilon = 10^{-5}$ 或 $10^{-6}$。当输入向量全为 0 时，$\epsilon$ 确保开方后分母不为 0，防止除以零产生 <span class="in">`NaN`</span>。</span>
+<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**高精度平方累积（FP32 Accumulation）**：</span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>即便输入数据是 FP16 或 BF16 格式，在循环计算 <span class="in">`x * x`</span> 并在 Block 内求和时，**必须强制提升至 FP32 寄存器进行累加**。</span>
+<span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>否则在 $N = 8192$ 等长隐藏维下，成千上万个小浮点数的平方和极易在低精度浮点下发生精度饱和下溢或指数溢出。</span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 性能与工程进阶：残差连接融合（Fused Add-RMSNorm）</span></span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a>在标准 Transformer Block 中，RMSNorm 紧随残差连接之后（即 $y = \text{RMSNorm}(x + \text{residual})$）。</span>
 <span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**算子融合（Fused Kernel）**：</span>
-<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a>  在 Pass 1 中，线程就地加载 $x$ 与 $\text{residual}$ 相加并累加平方和，同时就地写回残差结果；在 Pass 2 中直接使用该结果计算归一化输出。</span>
-<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a>  **一次融合消除了 2 次全局内存往返读写**，在大模型前向传播中带来近 $2\times$ 的 Norm 层端到端加速。</span>
-<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示与数值推演</span></span>
-<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a>设输入向量为二维简单数组，单行 $N = 2$：$x = <span class="co">[</span><span class="ot">3.0, 4.0</span><span class="co">]</span>$，权重 $w = <span class="co">[</span><span class="ot">1.0, 2.0</span><span class="co">]</span>$，设置 $\epsilon = 0.0$：</span>
-<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**平方和累加推演（Pass 1）**：</span>
-<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a>  $$\sum_{i=1}^2 x_i^2 = 3.0^2 + 4.0^2 = 9.0 + 16.0 = 25.0$$</span>
+<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**未融合状态下的内存往返灾难**：</span>
+<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a>  先启动一个单独的 Elementwise Add Kernel 将 $x + \text{residual}$ 写回 HBM；随后 RMSNorm 内核再两次从 HBM 读取该结果。</span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**算子融合（Fused Kernel）**：</span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a>  在 Pass 1 中，线程就地加载 $x$ 与 $\text{residual}$ 相加并累加平方和，同时就地写回残差结果；在 Pass 2 中直接使用该结果计算归一化输出。</span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a>  **一次融合消除了 2 次全局内存往返读写**，在大模型前向传播中带来近 $2\times$ 的 Norm 层端到端加速。</span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a><span class="fu">## 具体演示与数值推演</span></span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a>设输入向量为二维简单数组，单行 $N = 2$：$x = <span class="co">[</span><span class="ot">3.0, 4.0</span><span class="co">]</span>$，权重 $w = <span class="co">[</span><span class="ot">1.0, 2.0</span><span class="co">]</span>$，设置 $\epsilon = 0.0$：</span>
 <span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**均方根计算**：</span>
-<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a>  $$\text{Mean} = \frac{25.0}{N} = \frac{25.0}{2} = 12.5$$</span>
-<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a>  $$\text{RMS} = \sqrt{12.5} \approx 3.5355339$$</span>
-<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a>  $$\text{inv<span class="sc">\_</span>rms} = \frac{1}{\text{RMS}} = \frac{1}{\sqrt{12.5}} \approx 0.2828427$$</span>
-<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**归一化与仿射写回（Pass 2）**：</span>
-<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第 0 列输出：</span>
-<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a>    $$y_0 = x_0 \times \text{inv<span class="sc">\_</span>rms} \times w_0 = 3.0 \times 0.2828427 \times 1.0 \approx 0.848528$$</span>
-<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第 1 列输出：</span>
-<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a>    $$y_1 = x_1 \times \text{inv<span class="sc">\_</span>rms} \times w_1 = 4.0 \times 0.2828427 \times 2.0 \approx 2.262742$$</span>
-<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**方差校验**：归一化后的中间项 $\hat{x} = <span class="co">[</span><span class="ot">\frac{3}{\sqrt{12.5}}, \frac{4}{\sqrt{12.5}}</span><span class="co">]</span>$ 其均方根严格为 $\sqrt{\frac{9/12.5 + 16/12.5}{2}} = \sqrt{\frac{25/12.5}{2}} = \sqrt{1.0} = 1.0$，数学上完美自洽。</span>
-<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
-<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a>补齐 inverse RMS。</span>
-<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
-<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
-<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">4_rmsnorm</span>.cu</span>
-<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
-<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a>namespace {</span>
-<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> warp <span class="bu">reduce</span>: 用 shuffle 在寄存器之间传值，避免 shared memory 往返。</span>
-<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
-<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
-<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
-<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> block <span class="bu">reduce</span>: warp 内 <span class="bu">reduce</span> <span class="op">+</span> shared memory 跨 warp 汇总。</span>
-<span id="cb4-176"><a href="#cb4-176" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb4-177"><a href="#cb4-177" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
-<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
-<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span></span>
-<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span></span>
+<span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**平方和累加推演（Pass 1）**：</span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a>  $$\sum_{i=1}^2 x_i^2 = 3.0^2 + 4.0^2 = 9.0 + 16.0 = 25.0$$</span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**均方根计算**：</span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a>  $$\text{Mean} = \frac{25.0}{N} = \frac{25.0}{2} = 12.5$$</span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a>  $$\text{RMS} = \sqrt{12.5} \approx 3.5355339$$</span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a>  $$\text{inv<span class="sc">\_</span>rms} = \frac{1}{\text{RMS}} = \frac{1}{\sqrt{12.5}} \approx 0.2828427$$</span>
+<span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**归一化与仿射写回（Pass 2）**：</span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第 0 列输出：</span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a>    $$y_0 = x_0 \times \text{inv<span class="sc">\_</span>rms} \times w_0 = 3.0 \times 0.2828427 \times 1.0 \approx 0.848528$$</span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>第 1 列输出：</span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a>    $$y_1 = x_1 \times \text{inv<span class="sc">\_</span>rms} \times w_1 = 4.0 \times 0.2828427 \times 2.0 \approx 2.262742$$</span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**方差校验**：归一化后的中间项 $\hat{x} = <span class="co">[</span><span class="ot">\frac{3}{\sqrt{12.5}}, \frac{4}{\sqrt{12.5}}</span><span class="co">]</span>$ 其均方根严格为 $\sqrt{\frac{9/12.5 + 16/12.5}{2}} = \sqrt{\frac{25/12.5}{2}} = \sqrt{1.0} = 1.0$，数学上完美自洽。</span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a><span class="fu">## 实践任务：唯一代码填空题</span></span>
+<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a>补齐 inverse RMS。</span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a>规则：只能修改 <span class="in">`TODO`</span>/<span class="in">`______`</span> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: exercise</span></span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">4_rmsnorm</span>.cu</span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a>namespace {</span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> warp <span class="bu">reduce</span>: 用 shuffle 在寄存器之间传值，避免 shared memory 往返。</span>
+<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
+<span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
+<span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
+<span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-175"><a href="#cb4-175" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-176"><a href="#cb4-176" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-177"><a href="#cb4-177" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-178"><a href="#cb4-178" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> block <span class="bu">reduce</span>: warp 内 <span class="bu">reduce</span> <span class="op">+</span> shared memory 跨 warp 汇总。</span>
+<span id="cb4-179"><a href="#cb4-179" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-180"><a href="#cb4-180" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-181"><a href="#cb4-181" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
+<span id="cb4-182"><a href="#cb4-182" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
 <span id="cb4-183"><a href="#cb4-183" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
-<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm: 和 LayerNorm 很像，但不减 mean，也没有 beta。</span>
-<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> <span class="bu">input</span><span class="op">/</span>output: [M, N] row<span class="op">-</span>major</span>
-<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> weight: [N]</span>
-<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 数学公式：</span>
-<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> rms <span class="op">=</span> sqrt(<span class="bu">sum</span>(x_i<span class="op">^</span><span class="dv">2</span>) <span class="op">/</span> N <span class="op">+</span> eps)</span>
-<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y_i <span class="op">=</span> x_i <span class="op">/</span> rms <span class="op">*</span> weight_i</span>
-<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 面试里常问它为什么比 LayerNorm 少一些计算：</span>
-<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm 不需要 <span class="bu">sum</span>(x)，只需要 <span class="bu">sum</span>(x<span class="op">^</span><span class="dv">2</span>)，所以少一次 reduce，</span>
-<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 同时输出阶段也少了减 mean 和 beta。</span>
-<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a>__global__ void rmsnorm_kernel(</span>
-<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ <span class="bu">input</span>,</span>
-<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ weight,</span>
-<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ output,</span>
-<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps</span>
-<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
-<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
-<span id="cb4-222"><a href="#cb4-222" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
-<span id="cb4-223"><a href="#cb4-223" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-224"><a href="#cb4-224" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_in <span class="op">=</span> <span class="bu">input</span> <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
-<span id="cb4-225"><a href="#cb4-225" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> row_out <span class="op">=</span> output <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-184"><a href="#cb4-184" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span></span>
+<span id="cb4-185"><a href="#cb4-185" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span></span>
+<span id="cb4-186"><a href="#cb4-186" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-187"><a href="#cb4-187" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-188"><a href="#cb4-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-189"><a href="#cb4-189" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-190"><a href="#cb4-190" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
+<span id="cb4-191"><a href="#cb4-191" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-192"><a href="#cb4-192" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-193"><a href="#cb4-193" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-194"><a href="#cb4-194" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-195"><a href="#cb4-195" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-196"><a href="#cb4-196" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-197"><a href="#cb4-197" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-198"><a href="#cb4-198" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-199"><a href="#cb4-199" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-200"><a href="#cb4-200" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-201"><a href="#cb4-201" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-202"><a href="#cb4-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-203"><a href="#cb4-203" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm: 和 LayerNorm 很像，但不减 mean，也没有 beta。</span>
+<span id="cb4-204"><a href="#cb4-204" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> <span class="bu">input</span><span class="op">/</span>output: [M, N] row<span class="op">-</span>major</span>
+<span id="cb4-205"><a href="#cb4-205" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> weight: [N]</span>
+<span id="cb4-206"><a href="#cb4-206" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-207"><a href="#cb4-207" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 数学公式：</span>
+<span id="cb4-208"><a href="#cb4-208" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> rms <span class="op">=</span> sqrt(<span class="bu">sum</span>(x_i<span class="op">^</span><span class="dv">2</span>) <span class="op">/</span> N <span class="op">+</span> eps)</span>
+<span id="cb4-209"><a href="#cb4-209" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y_i <span class="op">=</span> x_i <span class="op">/</span> rms <span class="op">*</span> weight_i</span>
+<span id="cb4-210"><a href="#cb4-210" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-211"><a href="#cb4-211" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 面试里常问它为什么比 LayerNorm 少一些计算：</span>
+<span id="cb4-212"><a href="#cb4-212" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm 不需要 <span class="bu">sum</span>(x)，只需要 <span class="bu">sum</span>(x<span class="op">^</span><span class="dv">2</span>)，所以少一次 reduce，</span>
+<span id="cb4-213"><a href="#cb4-213" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 同时输出阶段也少了减 mean 和 beta。</span>
+<span id="cb4-214"><a href="#cb4-214" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-215"><a href="#cb4-215" aria-hidden="true" tabindex="-1"></a>__global__ void rmsnorm_kernel(</span>
+<span id="cb4-216"><a href="#cb4-216" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ <span class="bu">input</span>,</span>
+<span id="cb4-217"><a href="#cb4-217" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ weight,</span>
+<span id="cb4-218"><a href="#cb4-218" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ output,</span>
+<span id="cb4-219"><a href="#cb4-219" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-220"><a href="#cb4-220" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb4-221"><a href="#cb4-221" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps</span>
+<span id="cb4-222"><a href="#cb4-222" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-223"><a href="#cb4-223" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
+<span id="cb4-224"><a href="#cb4-224" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
+<span id="cb4-225"><a href="#cb4-225" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
 <span id="cb4-226"><a href="#cb4-226" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-227"><a href="#cb4-227" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sq_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb4-228"><a href="#cb4-228" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-229"><a href="#cb4-229" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程处理若干列，局部累加平方和。</span>
-<span id="cb4-230"><a href="#cb4-230" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 同一轮 col<span class="op">=</span>tid 时，相邻线程访问相邻地址，访存合并。</span>
-<span id="cb4-231"><a href="#cb4-231" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb4-232"><a href="#cb4-232" aria-hidden="true" tabindex="-1"></a>        <span class="bu">float</span> x <span class="op">=</span> row_in[col]<span class="op">;</span></span>
-<span id="cb4-233"><a href="#cb4-233" aria-hidden="true" tabindex="-1"></a>        local_sq_sum <span class="op">+=</span> x <span class="op">*</span> x<span class="op">;</span></span>
-<span id="cb4-234"><a href="#cb4-234" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-235"><a href="#cb4-235" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-236"><a href="#cb4-236" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> sq_sum <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sq_sum)<span class="op">;</span></span>
-<span id="cb4-237"><a href="#cb4-237" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-238"><a href="#cb4-238" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> inv_rms 是这一行所有元素共享的标量。</span>
-<span id="cb4-239"><a href="#cb4-239" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem_inv_rms<span class="op">;</span></span>
+<span id="cb4-227"><a href="#cb4-227" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_in <span class="op">=</span> <span class="bu">input</span> <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-228"><a href="#cb4-228" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> row_out <span class="op">=</span> output <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-229"><a href="#cb4-229" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-230"><a href="#cb4-230" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sq_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-231"><a href="#cb4-231" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-232"><a href="#cb4-232" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程处理若干列，局部累加平方和。</span>
+<span id="cb4-233"><a href="#cb4-233" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 同一轮 col<span class="op">=</span>tid 时，相邻线程访问相邻地址，访存合并。</span>
+<span id="cb4-234"><a href="#cb4-234" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb4-235"><a href="#cb4-235" aria-hidden="true" tabindex="-1"></a>        <span class="bu">float</span> x <span class="op">=</span> row_in[col]<span class="op">;</span></span>
+<span id="cb4-236"><a href="#cb4-236" aria-hidden="true" tabindex="-1"></a>        local_sq_sum <span class="op">+=</span> x <span class="op">*</span> x<span class="op">;</span></span>
+<span id="cb4-237"><a href="#cb4-237" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-238"><a href="#cb4-238" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-239"><a href="#cb4-239" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> sq_sum <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sq_sum)<span class="op">;</span></span>
 <span id="cb4-240"><a href="#cb4-240" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-241"><a href="#cb4-241" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb4-242"><a href="#cb4-242" aria-hidden="true" tabindex="-1"></a>        smem_inv_rms <span class="op">=</span> ______<span class="op">;</span>  <span class="op">//</span> TODO: 稳定的 inverse RMS</span>
-<span id="cb4-243"><a href="#cb4-243" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-244"><a href="#cb4-244" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb4-245"><a href="#cb4-245" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-246"><a href="#cb4-246" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> inv_rms <span class="op">=</span> smem_inv_rms<span class="op">;</span></span>
-<span id="cb4-247"><a href="#cb4-247" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-248"><a href="#cb4-248" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 第二 <span class="cf">pass</span> 写输出。这里读 input、读 weight、写 output 都是连续访问。</span>
-<span id="cb4-249"><a href="#cb4-249" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb4-250"><a href="#cb4-250" aria-hidden="true" tabindex="-1"></a>        row_out[col] <span class="op">=</span> row_in[col] <span class="op">*</span> inv_rms <span class="op">*</span> weight[col]<span class="op">;</span></span>
-<span id="cb4-251"><a href="#cb4-251" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-252"><a href="#cb4-252" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-253"><a href="#cb4-253" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-254"><a href="#cb4-254" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
-<span id="cb4-255"><a href="#cb4-255" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-256"><a href="#cb4-256" aria-hidden="true" tabindex="-1"></a>void launch_rmsnorm(</span>
-<span id="cb4-257"><a href="#cb4-257" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> <span class="bu">input</span>,</span>
-<span id="cb4-258"><a href="#cb4-258" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> weight,</span>
-<span id="cb4-259"><a href="#cb4-259" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> output,</span>
-<span id="cb4-260"><a href="#cb4-260" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb4-261"><a href="#cb4-261" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb4-262"><a href="#cb4-262" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps,</span>
-<span id="cb4-263"><a href="#cb4-263" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
-<span id="cb4-264"><a href="#cb4-264" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb4-265"><a href="#cb4-265" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
-<span id="cb4-266"><a href="#cb4-266" aria-hidden="true" tabindex="-1"></a>    rmsnorm_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
-<span id="cb4-267"><a href="#cb4-267" aria-hidden="true" tabindex="-1"></a>        <span class="bu">input</span>, weight, output, M, N, eps</span>
-<span id="cb4-268"><a href="#cb4-268" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
-<span id="cb4-269"><a href="#cb4-269" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-270"><a href="#cb4-270" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb4-271"><a href="#cb4-271" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-272"><a href="#cb4-272" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
-<span id="cb4-273"><a href="#cb4-273" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-274"><a href="#cb4-274" aria-hidden="true" tabindex="-1"></a>有 CUDA 环境时执行 <span class="in">`nvcc -std=c++17 -c /tmp/04_rmsnorm.cu -o /tmp/04_rmsnorm.cu.o`</span>；无 CUDA 环境时只做静态审查并登记待验证。</span>
-<span id="cb4-275"><a href="#cb4-275" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-276"><a href="#cb4-276" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
-<span id="cb4-277"><a href="#cb4-277" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-278"><a href="#cb4-278" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
-<span id="cb4-279"><a href="#cb4-279" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-280"><a href="#cb4-280" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“RMSNorm：统计量与两遍访问”的工作机制。</span>
-<span id="cb4-281"><a href="#cb4-281" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-282"><a href="#cb4-282" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb4-283"><a href="#cb4-283" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-284"><a href="#cb4-284" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
-<span id="cb4-285"><a href="#cb4-285" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-286"><a href="#cb4-286" aria-hidden="true" tabindex="-1"></a>误把 <span class="in">`sum(x*x)`</span> 除以 <span class="in">`sqrt(N)`</span> 会造成什么尺度错误？</span>
-<span id="cb4-287"><a href="#cb4-287" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-288"><a href="#cb4-288" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb4-289"><a href="#cb4-289" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-290"><a href="#cb4-290" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
-<span id="cb4-291"><a href="#cb4-291" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-292"><a href="#cb4-292" aria-hidden="true" tabindex="-1"></a>RMSNorm 与 residual add 融合时能省哪些读写？</span>
-<span id="cb4-293"><a href="#cb4-293" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-294"><a href="#cb4-294" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
-<span id="cb4-295"><a href="#cb4-295" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-296"><a href="#cb4-296" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
-<span id="cb4-297"><a href="#cb4-297" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-298"><a href="#cb4-298" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
-<span id="cb4-299"><a href="#cb4-299" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
-<span id="cb4-300"><a href="#cb4-300" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
-<span id="cb4-301"><a href="#cb4-301" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-302"><a href="#cb4-302" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
-<span id="cb4-303"><a href="#cb4-303" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-304"><a href="#cb4-304" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
-<span id="cb4-305"><a href="#cb4-305" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-241"><a href="#cb4-241" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> inv_rms 是这一行所有元素共享的标量。</span>
+<span id="cb4-242"><a href="#cb4-242" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem_inv_rms<span class="op">;</span></span>
+<span id="cb4-243"><a href="#cb4-243" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-244"><a href="#cb4-244" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-245"><a href="#cb4-245" aria-hidden="true" tabindex="-1"></a>        smem_inv_rms <span class="op">=</span> ______<span class="op">;</span>  <span class="op">//</span> TODO: 稳定的 inverse RMS</span>
+<span id="cb4-246"><a href="#cb4-246" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-247"><a href="#cb4-247" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-248"><a href="#cb4-248" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-249"><a href="#cb4-249" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> inv_rms <span class="op">=</span> smem_inv_rms<span class="op">;</span></span>
+<span id="cb4-250"><a href="#cb4-250" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-251"><a href="#cb4-251" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 第二 <span class="cf">pass</span> 写输出。这里读 input、读 weight、写 output 都是连续访问。</span>
+<span id="cb4-252"><a href="#cb4-252" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb4-253"><a href="#cb4-253" aria-hidden="true" tabindex="-1"></a>        row_out[col] <span class="op">=</span> row_in[col] <span class="op">*</span> inv_rms <span class="op">*</span> weight[col]<span class="op">;</span></span>
+<span id="cb4-254"><a href="#cb4-254" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-255"><a href="#cb4-255" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-256"><a href="#cb4-256" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-257"><a href="#cb4-257" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
+<span id="cb4-258"><a href="#cb4-258" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-259"><a href="#cb4-259" aria-hidden="true" tabindex="-1"></a>void launch_rmsnorm(</span>
+<span id="cb4-260"><a href="#cb4-260" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> <span class="bu">input</span>,</span>
+<span id="cb4-261"><a href="#cb4-261" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> weight,</span>
+<span id="cb4-262"><a href="#cb4-262" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> output,</span>
+<span id="cb4-263"><a href="#cb4-263" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-264"><a href="#cb4-264" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb4-265"><a href="#cb4-265" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps,</span>
+<span id="cb4-266"><a href="#cb4-266" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
+<span id="cb4-267"><a href="#cb4-267" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-268"><a href="#cb4-268" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
+<span id="cb4-269"><a href="#cb4-269" aria-hidden="true" tabindex="-1"></a>    rmsnorm_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
+<span id="cb4-270"><a href="#cb4-270" aria-hidden="true" tabindex="-1"></a>        <span class="bu">input</span>, weight, output, M, N, eps</span>
+<span id="cb4-271"><a href="#cb4-271" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
+<span id="cb4-272"><a href="#cb4-272" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-273"><a href="#cb4-273" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-274"><a href="#cb4-274" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-275"><a href="#cb4-275" aria-hidden="true" tabindex="-1"></a><span class="fu">### 检查方法</span></span>
+<span id="cb4-276"><a href="#cb4-276" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-277"><a href="#cb4-277" aria-hidden="true" tabindex="-1"></a>有 CUDA 环境时执行 <span class="in">`nvcc -std=c++17 -c /tmp/04_rmsnorm.cu -o /tmp/04_rmsnorm.cu.o`</span>；无 CUDA 环境时只做静态审查并登记待验证。</span>
+<span id="cb4-278"><a href="#cb4-278" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-279"><a href="#cb4-279" aria-hidden="true" tabindex="-1"></a>提交时请给出：补齐后的代码、实际运行输出（环境不可用时注明“仅静态审查”）以及对失败用例的解释。</span>
+<span id="cb4-280"><a href="#cb4-280" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-281"><a href="#cb4-281" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1</span></span>
+<span id="cb4-282"><a href="#cb4-282" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-283"><a href="#cb4-283" aria-hidden="true" tabindex="-1"></a>不要背定义：请从输入、状态变化和输出三个阶段解释“RMSNorm：统计量与两遍访问”的工作机制。</span>
+<span id="cb4-284"><a href="#cb4-284" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-285"><a href="#cb4-285" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-286"><a href="#cb4-286" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-287"><a href="#cb4-287" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2</span></span>
+<span id="cb4-288"><a href="#cb4-288" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-289"><a href="#cb4-289" aria-hidden="true" tabindex="-1"></a>误把 <span class="in">`sum(x*x)`</span> 除以 <span class="in">`sqrt(N)`</span> 会造成什么尺度错误？</span>
+<span id="cb4-290"><a href="#cb4-290" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-291"><a href="#cb4-291" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-292"><a href="#cb4-292" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-293"><a href="#cb4-293" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3</span></span>
+<span id="cb4-294"><a href="#cb4-294" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-295"><a href="#cb4-295" aria-hidden="true" tabindex="-1"></a>RMSNorm 与 residual add 融合时能省哪些读写？</span>
+<span id="cb4-296"><a href="#cb4-296" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-297"><a href="#cb4-297" aria-hidden="true" tabindex="-1"></a>**你的答案：**</span>
+<span id="cb4-298"><a href="#cb4-298" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-299"><a href="#cb4-299" aria-hidden="true" tabindex="-1"></a><span class="fu">## 评分与通过规则</span></span>
+<span id="cb4-300"><a href="#cb4-300" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-301"><a href="#cb4-301" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>代码 4 分：正常输入 2 分，边界输入 1 分，解释实现 1 分；</span>
+<span id="cb4-302"><a href="#cb4-302" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Q1～Q3 各 2 分；</span>
+<span id="cb4-303"><a href="#cb4-303" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一票否决：结果碰巧正确但核心因果链错误、删除边界检查、把未运行结果说成实测。</span>
+<span id="cb4-304"><a href="#cb4-304" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-305"><a href="#cb4-305" aria-hidden="true" tabindex="-1"></a>需要提示时按四级机制请求：概念区域 → 具体方向 → 关键局部 → 完整答案。</span>
 <span id="cb4-306"><a href="#cb4-306" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-307"><a href="#cb4-307" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
-<span id="cb4-308"><a href="#cb4-308" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-311"><a href="#cb4-311" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
-<span id="cb4-312"><a href="#cb4-312" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
-<span id="cb4-313"><a href="#cb4-313" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">4_rmsnorm</span>.cu</span>
-<span id="cb4-314"><a href="#cb4-314" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
-<span id="cb4-315"><a href="#cb4-315" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-316"><a href="#cb4-316" aria-hidden="true" tabindex="-1"></a>namespace {</span>
-<span id="cb4-317"><a href="#cb4-317" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-318"><a href="#cb4-318" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> warp <span class="bu">reduce</span>: 用 shuffle 在寄存器之间传值，避免 shared memory 往返。</span>
-<span id="cb4-319"><a href="#cb4-319" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb4-320"><a href="#cb4-320" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb4-321"><a href="#cb4-321" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
-<span id="cb4-322"><a href="#cb4-322" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
-<span id="cb4-323"><a href="#cb4-323" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
-<span id="cb4-324"><a href="#cb4-324" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-325"><a href="#cb4-325" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb4-326"><a href="#cb4-326" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-327"><a href="#cb4-327" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-328"><a href="#cb4-328" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> block <span class="bu">reduce</span>: warp 内 <span class="bu">reduce</span> <span class="op">+</span> shared memory 跨 warp 汇总。</span>
-<span id="cb4-329"><a href="#cb4-329" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb4-330"><a href="#cb4-330" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
-<span id="cb4-331"><a href="#cb4-331" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
-<span id="cb4-332"><a href="#cb4-332" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
-<span id="cb4-333"><a href="#cb4-333" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-334"><a href="#cb4-334" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span></span>
-<span id="cb4-335"><a href="#cb4-335" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span></span>
+<span id="cb4-307"><a href="#cb4-307" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}</span>
+<span id="cb4-308"><a href="#cb4-308" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考答案（仅 answer 分支）</span></span>
+<span id="cb4-309"><a href="#cb4-309" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-310"><a href="#cb4-310" aria-hidden="true" tabindex="-1"></a>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</span>
+<span id="cb4-311"><a href="#cb4-311" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-314"><a href="#cb4-314" aria-hidden="true" tabindex="-1"></a><span class="in">```{python}</span></span>
+<span id="cb4-315"><a href="#cb4-315" aria-hidden="true" tabindex="-1"></a><span class="co">#| course_role: solution</span></span>
+<span id="cb4-316"><a href="#cb4-316" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>writefile <span class="op">/</span>tmp<span class="op">/</span><span class="dv">0</span><span class="er">4_rmsnorm</span>.cu</span>
+<span id="cb4-317"><a href="#cb4-317" aria-hidden="true" tabindex="-1"></a><span class="co">#include &lt;cuda_runtime.h&gt;</span></span>
+<span id="cb4-318"><a href="#cb4-318" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-319"><a href="#cb4-319" aria-hidden="true" tabindex="-1"></a>namespace {</span>
+<span id="cb4-320"><a href="#cb4-320" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-321"><a href="#cb4-321" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> warp <span class="bu">reduce</span>: 用 shuffle 在寄存器之间传值，避免 shared memory 往返。</span>
+<span id="cb4-322"><a href="#cb4-322" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-323"><a href="#cb4-323" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> warp_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-324"><a href="#cb4-324" aria-hidden="true" tabindex="-1"></a>    <span class="co">#pragma unroll</span></span>
+<span id="cb4-325"><a href="#cb4-325" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> offset <span class="op">=</span> <span class="dv">16</span><span class="op">;</span> offset <span class="op">&gt;</span> <span class="dv">0</span><span class="op">;</span> offset <span class="op">&gt;&gt;=</span> <span class="dv">1</span>) {</span>
+<span id="cb4-326"><a href="#cb4-326" aria-hidden="true" tabindex="-1"></a>        val <span class="op">+=</span> __shfl_down_sync(<span class="bn">0xffffffff</span>, val, offset)<span class="op">;</span></span>
+<span id="cb4-327"><a href="#cb4-327" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-328"><a href="#cb4-328" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-329"><a href="#cb4-329" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-330"><a href="#cb4-330" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-331"><a href="#cb4-331" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> block <span class="bu">reduce</span>: warp 内 <span class="bu">reduce</span> <span class="op">+</span> shared memory 跨 warp 汇总。</span>
+<span id="cb4-332"><a href="#cb4-332" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-333"><a href="#cb4-333" aria-hidden="true" tabindex="-1"></a>__device__ __forceinline__ <span class="bu">float</span> block_reduce_sum(<span class="bu">float</span> val) {</span>
+<span id="cb4-334"><a href="#cb4-334" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> NUM_WARPS <span class="op">=</span> (BLOCK_SIZE <span class="op">+</span> <span class="dv">31</span>) <span class="op">/</span> <span class="dv">32</span><span class="op">;</span></span>
+<span id="cb4-335"><a href="#cb4-335" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem[NUM_WARPS]<span class="op">;</span></span>
 <span id="cb4-336"><a href="#cb4-336" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-337"><a href="#cb4-337" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb4-338"><a href="#cb4-338" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-339"><a href="#cb4-339" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb4-340"><a href="#cb4-340" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
-<span id="cb4-341"><a href="#cb4-341" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-342"><a href="#cb4-342" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb4-343"><a href="#cb4-343" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-344"><a href="#cb4-344" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb4-345"><a href="#cb4-345" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb4-346"><a href="#cb4-346" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
-<span id="cb4-347"><a href="#cb4-347" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-348"><a href="#cb4-348" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-349"><a href="#cb4-349" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb4-350"><a href="#cb4-350" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
-<span id="cb4-351"><a href="#cb4-351" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-352"><a href="#cb4-352" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-353"><a href="#cb4-353" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm: 和 LayerNorm 很像，但不减 mean，也没有 beta。</span>
-<span id="cb4-354"><a href="#cb4-354" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> <span class="bu">input</span><span class="op">/</span>output: [M, N] row<span class="op">-</span>major</span>
-<span id="cb4-355"><a href="#cb4-355" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> weight: [N]</span>
-<span id="cb4-356"><a href="#cb4-356" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb4-357"><a href="#cb4-357" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 数学公式：</span>
-<span id="cb4-358"><a href="#cb4-358" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> rms <span class="op">=</span> sqrt(<span class="bu">sum</span>(x_i<span class="op">^</span><span class="dv">2</span>) <span class="op">/</span> N <span class="op">+</span> eps)</span>
-<span id="cb4-359"><a href="#cb4-359" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y_i <span class="op">=</span> x_i <span class="op">/</span> rms <span class="op">*</span> weight_i</span>
-<span id="cb4-360"><a href="#cb4-360" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
-<span id="cb4-361"><a href="#cb4-361" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 面试里常问它为什么比 LayerNorm 少一些计算：</span>
-<span id="cb4-362"><a href="#cb4-362" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm 不需要 <span class="bu">sum</span>(x)，只需要 <span class="bu">sum</span>(x<span class="op">^</span><span class="dv">2</span>)，所以少一次 reduce，</span>
-<span id="cb4-363"><a href="#cb4-363" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 同时输出阶段也少了减 mean 和 beta。</span>
-<span id="cb4-364"><a href="#cb4-364" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
-<span id="cb4-365"><a href="#cb4-365" aria-hidden="true" tabindex="-1"></a>__global__ void rmsnorm_kernel(</span>
-<span id="cb4-366"><a href="#cb4-366" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ <span class="bu">input</span>,</span>
-<span id="cb4-367"><a href="#cb4-367" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ weight,</span>
-<span id="cb4-368"><a href="#cb4-368" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ output,</span>
-<span id="cb4-369"><a href="#cb4-369" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb4-370"><a href="#cb4-370" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb4-371"><a href="#cb4-371" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps</span>
-<span id="cb4-372"><a href="#cb4-372" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb4-373"><a href="#cb4-373" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
-<span id="cb4-374"><a href="#cb4-374" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
-<span id="cb4-375"><a href="#cb4-375" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
-<span id="cb4-376"><a href="#cb4-376" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-377"><a href="#cb4-377" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_in <span class="op">=</span> <span class="bu">input</span> <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
-<span id="cb4-378"><a href="#cb4-378" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> row_out <span class="op">=</span> output <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-337"><a href="#cb4-337" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> lane <span class="op">=</span> threadIdx.x <span class="op">&amp;</span> <span class="dv">31</span><span class="op">;</span></span>
+<span id="cb4-338"><a href="#cb4-338" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> warp <span class="op">=</span> threadIdx.x <span class="op">&gt;&gt;</span> <span class="dv">5</span><span class="op">;</span></span>
+<span id="cb4-339"><a href="#cb4-339" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-340"><a href="#cb4-340" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-341"><a href="#cb4-341" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-342"><a href="#cb4-342" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (lane <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-343"><a href="#cb4-343" aria-hidden="true" tabindex="-1"></a>        smem[warp] <span class="op">=</span> val<span class="op">;</span></span>
+<span id="cb4-344"><a href="#cb4-344" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-345"><a href="#cb4-345" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-346"><a href="#cb4-346" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-347"><a href="#cb4-347" aria-hidden="true" tabindex="-1"></a>    val <span class="op">=</span> (threadIdx.x <span class="op">&lt;</span> NUM_WARPS) ? smem[lane] : <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-348"><a href="#cb4-348" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (warp <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-349"><a href="#cb4-349" aria-hidden="true" tabindex="-1"></a>        val <span class="op">=</span> warp_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(val)<span class="op">;</span></span>
+<span id="cb4-350"><a href="#cb4-350" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-351"><a href="#cb4-351" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-352"><a href="#cb4-352" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-353"><a href="#cb4-353" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> val<span class="op">;</span></span>
+<span id="cb4-354"><a href="#cb4-354" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-355"><a href="#cb4-355" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-356"><a href="#cb4-356" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm: 和 LayerNorm 很像，但不减 mean，也没有 beta。</span>
+<span id="cb4-357"><a href="#cb4-357" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> <span class="bu">input</span><span class="op">/</span>output: [M, N] row<span class="op">-</span>major</span>
+<span id="cb4-358"><a href="#cb4-358" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> weight: [N]</span>
+<span id="cb4-359"><a href="#cb4-359" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-360"><a href="#cb4-360" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 数学公式：</span>
+<span id="cb4-361"><a href="#cb4-361" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> rms <span class="op">=</span> sqrt(<span class="bu">sum</span>(x_i<span class="op">^</span><span class="dv">2</span>) <span class="op">/</span> N <span class="op">+</span> eps)</span>
+<span id="cb4-362"><a href="#cb4-362" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> y_i <span class="op">=</span> x_i <span class="op">/</span> rms <span class="op">*</span> weight_i</span>
+<span id="cb4-363"><a href="#cb4-363" aria-hidden="true" tabindex="-1"></a><span class="op">//</span></span>
+<span id="cb4-364"><a href="#cb4-364" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 面试里常问它为什么比 LayerNorm 少一些计算：</span>
+<span id="cb4-365"><a href="#cb4-365" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> RMSNorm 不需要 <span class="bu">sum</span>(x)，只需要 <span class="bu">sum</span>(x<span class="op">^</span><span class="dv">2</span>)，所以少一次 reduce，</span>
+<span id="cb4-366"><a href="#cb4-366" aria-hidden="true" tabindex="-1"></a><span class="op">//</span> 同时输出阶段也少了减 mean 和 beta。</span>
+<span id="cb4-367"><a href="#cb4-367" aria-hidden="true" tabindex="-1"></a>template<span class="op">&lt;</span><span class="bu">int</span> BLOCK_SIZE<span class="op">&gt;</span></span>
+<span id="cb4-368"><a href="#cb4-368" aria-hidden="true" tabindex="-1"></a>__global__ void rmsnorm_kernel(</span>
+<span id="cb4-369"><a href="#cb4-369" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ <span class="bu">input</span>,</span>
+<span id="cb4-370"><a href="#cb4-370" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> __restrict__ weight,</span>
+<span id="cb4-371"><a href="#cb4-371" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> __restrict__ output,</span>
+<span id="cb4-372"><a href="#cb4-372" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-373"><a href="#cb4-373" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb4-374"><a href="#cb4-374" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps</span>
+<span id="cb4-375"><a href="#cb4-375" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-376"><a href="#cb4-376" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> row <span class="op">=</span> blockIdx.x<span class="op">;</span></span>
+<span id="cb4-377"><a href="#cb4-377" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> tid <span class="op">=</span> threadIdx.x<span class="op">;</span></span>
+<span id="cb4-378"><a href="#cb4-378" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (row <span class="op">&gt;=</span> M) <span class="cf">return</span><span class="op">;</span></span>
 <span id="cb4-379"><a href="#cb4-379" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-380"><a href="#cb4-380" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sq_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
-<span id="cb4-381"><a href="#cb4-381" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-382"><a href="#cb4-382" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程处理若干列，局部累加平方和。</span>
-<span id="cb4-383"><a href="#cb4-383" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 同一轮 col<span class="op">=</span>tid 时，相邻线程访问相邻地址，访存合并。</span>
-<span id="cb4-384"><a href="#cb4-384" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb4-385"><a href="#cb4-385" aria-hidden="true" tabindex="-1"></a>        <span class="bu">float</span> x <span class="op">=</span> row_in[col]<span class="op">;</span></span>
-<span id="cb4-386"><a href="#cb4-386" aria-hidden="true" tabindex="-1"></a>        local_sq_sum <span class="op">+=</span> x <span class="op">*</span> x<span class="op">;</span></span>
-<span id="cb4-387"><a href="#cb4-387" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-388"><a href="#cb4-388" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-389"><a href="#cb4-389" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> sq_sum <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sq_sum)<span class="op">;</span></span>
-<span id="cb4-390"><a href="#cb4-390" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-391"><a href="#cb4-391" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> inv_rms 是这一行所有元素共享的标量。</span>
-<span id="cb4-392"><a href="#cb4-392" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem_inv_rms<span class="op">;</span></span>
+<span id="cb4-380"><a href="#cb4-380" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> row_in <span class="op">=</span> <span class="bu">input</span> <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-381"><a href="#cb4-381" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> row_out <span class="op">=</span> output <span class="op">+</span> row <span class="op">*</span> N<span class="op">;</span></span>
+<span id="cb4-382"><a href="#cb4-382" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-383"><a href="#cb4-383" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> local_sq_sum <span class="op">=</span> <span class="fl">0.0</span><span class="er">f</span><span class="op">;</span></span>
+<span id="cb4-384"><a href="#cb4-384" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-385"><a href="#cb4-385" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 每个线程处理若干列，局部累加平方和。</span>
+<span id="cb4-386"><a href="#cb4-386" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 同一轮 col<span class="op">=</span>tid 时，相邻线程访问相邻地址，访存合并。</span>
+<span id="cb4-387"><a href="#cb4-387" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb4-388"><a href="#cb4-388" aria-hidden="true" tabindex="-1"></a>        <span class="bu">float</span> x <span class="op">=</span> row_in[col]<span class="op">;</span></span>
+<span id="cb4-389"><a href="#cb4-389" aria-hidden="true" tabindex="-1"></a>        local_sq_sum <span class="op">+=</span> x <span class="op">*</span> x<span class="op">;</span></span>
+<span id="cb4-390"><a href="#cb4-390" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-391"><a href="#cb4-391" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-392"><a href="#cb4-392" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> sq_sum <span class="op">=</span> block_reduce_sum<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;</span>(local_sq_sum)<span class="op">;</span></span>
 <span id="cb4-393"><a href="#cb4-393" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-394"><a href="#cb4-394" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
-<span id="cb4-395"><a href="#cb4-395" aria-hidden="true" tabindex="-1"></a>        smem_inv_rms <span class="op">=</span> rsqrtf(sq_sum <span class="op">/</span> static_cast<span class="op">&lt;</span><span class="bu">float</span><span class="op">&gt;</span>(N) <span class="op">+</span> eps)<span class="op">;</span></span>
-<span id="cb4-396"><a href="#cb4-396" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-397"><a href="#cb4-397" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
-<span id="cb4-398"><a href="#cb4-398" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-399"><a href="#cb4-399" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> inv_rms <span class="op">=</span> smem_inv_rms<span class="op">;</span></span>
-<span id="cb4-400"><a href="#cb4-400" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-401"><a href="#cb4-401" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 第二 <span class="cf">pass</span> 写输出。这里读 input、读 weight、写 output 都是连续访问。</span>
-<span id="cb4-402"><a href="#cb4-402" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
-<span id="cb4-403"><a href="#cb4-403" aria-hidden="true" tabindex="-1"></a>        row_out[col] <span class="op">=</span> row_in[col] <span class="op">*</span> inv_rms <span class="op">*</span> weight[col]<span class="op">;</span></span>
-<span id="cb4-404"><a href="#cb4-404" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb4-405"><a href="#cb4-405" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-406"><a href="#cb4-406" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-407"><a href="#cb4-407" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
-<span id="cb4-408"><a href="#cb4-408" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-409"><a href="#cb4-409" aria-hidden="true" tabindex="-1"></a>void launch_rmsnorm(</span>
-<span id="cb4-410"><a href="#cb4-410" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> <span class="bu">input</span>,</span>
-<span id="cb4-411"><a href="#cb4-411" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> weight,</span>
-<span id="cb4-412"><a href="#cb4-412" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> output,</span>
-<span id="cb4-413"><a href="#cb4-413" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
-<span id="cb4-414"><a href="#cb4-414" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
-<span id="cb4-415"><a href="#cb4-415" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps,</span>
-<span id="cb4-416"><a href="#cb4-416" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
-<span id="cb4-417"><a href="#cb4-417" aria-hidden="true" tabindex="-1"></a>) {</span>
-<span id="cb4-418"><a href="#cb4-418" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
-<span id="cb4-419"><a href="#cb4-419" aria-hidden="true" tabindex="-1"></a>    rmsnorm_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
-<span id="cb4-420"><a href="#cb4-420" aria-hidden="true" tabindex="-1"></a>        <span class="bu">input</span>, weight, output, M, N, eps</span>
-<span id="cb4-421"><a href="#cb4-421" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
-<span id="cb4-422"><a href="#cb4-422" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb4-423"><a href="#cb4-423" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb4-424"><a href="#cb4-424" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-425"><a href="#cb4-425" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
-<span id="cb4-426"><a href="#cb4-426" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-427"><a href="#cb4-427" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输入状态**：全局显存中连续存放的输入张量 $X \in \mathbb{R}^{M \times N}$、可学习权重向量 $w \in \mathbb{R}^N$、极小正数 $\epsilon$ 以及发射配置 <span class="in">`&lt;&lt;&lt;M, BLOCK_SIZE&gt;&gt;&gt;`</span>。</span>
-<span id="cb4-428"><a href="#cb4-428" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**状态变化（两阶段扫描与片上规约）**：</span>
-<span id="cb4-429"><a href="#cb4-429" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>**第一阶段（平方和汇聚）**：每个 Block 绑定一行，线程沿列方向跨步加载 $x_i$，在私有寄存器中累加局部平方和 $x_i^2$；随后通过 Warp Shuffle 与 Shared Memory 快速树状折叠出该行的全局平方和 $\sum x^2$；</span>
-<span id="cb4-430"><a href="#cb4-430" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>**片上倒数标量广播**：由 <span class="in">`tid == 0`</span> 线程计算 $\text{inv<span class="sc">\_</span>rms} = \text{rsqrtf}(\frac{\sum x^2}{N} + \epsilon)$，写入共享内存并通过 <span class="in">`__syncthreads()`</span> 广播同步给 Block 内所有线程；</span>
-<span id="cb4-431"><a href="#cb4-431" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>**第二阶段（归一化与仿射写回）**：所有线程并发从共享内存读取 <span class="in">`inv_rms`</span>，重新从全局显存读取对应的输入 $x_i$ 与权重 $w_i$，在寄存器中计算 $y_i = x_i \cdot \text{inv<span class="sc">\_</span>rms} \cdot w_i$。</span>
-<span id="cb4-432"><a href="#cb4-432" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-433"><a href="#cb4-433" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输出状态**：输出张量 $Y \in \mathbb{R}^{M \times N}$ 写回全局显存，各行特征向量均方根被精确拉齐至 1.0 附近，数值方差达到归一化标准。</span>
-<span id="cb4-434"><a href="#cb4-434" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-435"><a href="#cb4-435" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
-<span id="cb4-436"><a href="#cb4-436" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-437"><a href="#cb4-437" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**尺度畸变推导**：</span>
-<span id="cb4-438"><a href="#cb4-438" aria-hidden="true" tabindex="-1"></a>  RMSNorm 的数学定义是均值的方根：$\text{RMS} = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2} = \frac{\sqrt{\sum x_i^2}}{\sqrt{N}}$。</span>
-<span id="cb4-439"><a href="#cb4-439" aria-hidden="true" tabindex="-1"></a>  若错误地在除法中漏掉平方根运算，或者将开方写为 $\frac{\sum x_i^2}{\sqrt{N}}$：</span>
-<span id="cb4-440"><a href="#cb4-440" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>缩放因子的量纲发生严重漂移：平方和原本具有二次量纲 $O(<span class="sc">\|</span>x<span class="sc">\|</span>^2)$，若除以 $\sqrt{N}$，其倒数尺度的数量级与理论值偏差达到 $\sqrt{N}$ 倍！</span>
-<span id="cb4-441"><a href="#cb4-441" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>以大模型常见隐藏维度 $N = 4096$ 为例，$\sqrt{N} = 64$。输出激活值将被错误放大或缩小整整 64 倍！</span>
-<span id="cb4-442"><a href="#cb4-442" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**后果**：直接导致下游自注意力（Attention）的 QK 点积激活值爆炸，Softmax 输出极端饱和产生 NaN，梯度在反向传播首步即发生彻底爆炸。</span>
-<span id="cb4-443"><a href="#cb4-443" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-444"><a href="#cb4-444" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
-<span id="cb4-445"><a href="#cb4-445" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-446"><a href="#cb4-446" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**未融合状态下的读写开销**：</span>
-<span id="cb4-447"><a href="#cb4-447" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>Residual Add Kernel：读取输入 $X$（$MN$ 个数）、读取残差 $\text{Res}$（$MN$ 个数），将结果 $X_{\text{new}}$ 写回显存（$MN$ 个数）$\implies$ 消耗 $3 MN$ 次访存；</span>
-<span id="cb4-448"><a href="#cb4-448" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>RMSNorm Kernel：Pass 1 读取 $X_{\text{new}}$（$MN$），Pass 2 再次读取 $X_{\text{new}}$（$MN$）、读取权重 $W$（$N$），写出 $Y$（$MN$）$\implies$ 消耗 $3 MN + N$ 次访存；</span>
-<span id="cb4-449"><a href="#cb4-449" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**总访存量**：$3 MN + 3 MN + N \approx 6 MN$ 个元素的全局显存读写。</span>
-<span id="cb4-450"><a href="#cb4-450" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**算子融合后的优化收益**：</span>
-<span id="cb4-451"><a href="#cb4-451" aria-hidden="true" tabindex="-1"></a>  在 Pass 1 中，线程同时加载 $X$ 与 $\text{Res}$ 就地相加，并在本地完成平方和统计，同时可顺手将相加后的残差写回全局内存（若后续网络仍需残差输出）；在 Pass 2 中直接从 L2 缓存或寄存器复用该数据完成归一化。</span>
-<span id="cb4-452"><a href="#cb4-452" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**节省量**：直接省去了独立的 Add 内核调度开销，消灭了 $2 MN$ 次中间全局显存往返读写，显存带宽节约率高达 33%~50%！</span>
-<span id="cb4-453"><a href="#cb4-453" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-454"><a href="#cb4-454" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
-<span id="cb4-455"><a href="#cb4-455" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-456"><a href="#cb4-456" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Programming Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-programming-guide/)</span></span>
-<span id="cb4-457"><a href="#cb4-457" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Best Practices Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)</span></span>
+<span id="cb4-394"><a href="#cb4-394" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> inv_rms 是这一行所有元素共享的标量。</span>
+<span id="cb4-395"><a href="#cb4-395" aria-hidden="true" tabindex="-1"></a>    __shared__ <span class="bu">float</span> smem_inv_rms<span class="op">;</span></span>
+<span id="cb4-396"><a href="#cb4-396" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-397"><a href="#cb4-397" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (tid <span class="op">==</span> <span class="dv">0</span>) {</span>
+<span id="cb4-398"><a href="#cb4-398" aria-hidden="true" tabindex="-1"></a>        smem_inv_rms <span class="op">=</span> rsqrtf(sq_sum <span class="op">/</span> static_cast<span class="op">&lt;</span><span class="bu">float</span><span class="op">&gt;</span>(N) <span class="op">+</span> eps)<span class="op">;</span></span>
+<span id="cb4-399"><a href="#cb4-399" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-400"><a href="#cb4-400" aria-hidden="true" tabindex="-1"></a>    __syncthreads()<span class="op">;</span></span>
+<span id="cb4-401"><a href="#cb4-401" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-402"><a href="#cb4-402" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> inv_rms <span class="op">=</span> smem_inv_rms<span class="op">;</span></span>
+<span id="cb4-403"><a href="#cb4-403" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-404"><a href="#cb4-404" aria-hidden="true" tabindex="-1"></a>    <span class="op">//</span> 第二 <span class="cf">pass</span> 写输出。这里读 input、读 weight、写 output 都是连续访问。</span>
+<span id="cb4-405"><a href="#cb4-405" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (<span class="bu">int</span> col <span class="op">=</span> tid<span class="op">;</span> col <span class="op">&lt;</span> N<span class="op">;</span> col <span class="op">+=</span> BLOCK_SIZE) {</span>
+<span id="cb4-406"><a href="#cb4-406" aria-hidden="true" tabindex="-1"></a>        row_out[col] <span class="op">=</span> row_in[col] <span class="op">*</span> inv_rms <span class="op">*</span> weight[col]<span class="op">;</span></span>
+<span id="cb4-407"><a href="#cb4-407" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-408"><a href="#cb4-408" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-409"><a href="#cb4-409" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-410"><a href="#cb4-410" aria-hidden="true" tabindex="-1"></a>} <span class="op">//</span> namespace</span>
+<span id="cb4-411"><a href="#cb4-411" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-412"><a href="#cb4-412" aria-hidden="true" tabindex="-1"></a>void launch_rmsnorm(</span>
+<span id="cb4-413"><a href="#cb4-413" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> <span class="bu">input</span>,</span>
+<span id="cb4-414"><a href="#cb4-414" aria-hidden="true" tabindex="-1"></a>    const <span class="bu">float</span><span class="op">*</span> weight,</span>
+<span id="cb4-415"><a href="#cb4-415" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span><span class="op">*</span> output,</span>
+<span id="cb4-416"><a href="#cb4-416" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> M,</span>
+<span id="cb4-417"><a href="#cb4-417" aria-hidden="true" tabindex="-1"></a>    <span class="bu">int</span> N,</span>
+<span id="cb4-418"><a href="#cb4-418" aria-hidden="true" tabindex="-1"></a>    <span class="bu">float</span> eps,</span>
+<span id="cb4-419"><a href="#cb4-419" aria-hidden="true" tabindex="-1"></a>    cudaStream_t stream</span>
+<span id="cb4-420"><a href="#cb4-420" aria-hidden="true" tabindex="-1"></a>) {</span>
+<span id="cb4-421"><a href="#cb4-421" aria-hidden="true" tabindex="-1"></a>    constexpr <span class="bu">int</span> BLOCK_SIZE <span class="op">=</span> <span class="dv">256</span><span class="op">;</span></span>
+<span id="cb4-422"><a href="#cb4-422" aria-hidden="true" tabindex="-1"></a>    rmsnorm_kernel<span class="op">&lt;</span>BLOCK_SIZE<span class="op">&gt;&lt;&lt;&lt;</span>M, BLOCK_SIZE, <span class="dv">0</span>, stream<span class="op">&gt;&gt;&gt;</span>(</span>
+<span id="cb4-423"><a href="#cb4-423" aria-hidden="true" tabindex="-1"></a>        <span class="bu">input</span>, weight, output, M, N, eps</span>
+<span id="cb4-424"><a href="#cb4-424" aria-hidden="true" tabindex="-1"></a>    )<span class="op">;</span></span>
+<span id="cb4-425"><a href="#cb4-425" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb4-426"><a href="#cb4-426" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-427"><a href="#cb4-427" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-428"><a href="#cb4-428" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q1 参考答案</span></span>
+<span id="cb4-429"><a href="#cb4-429" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-430"><a href="#cb4-430" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输入状态**：全局显存中连续存放的输入张量 $X \in \mathbb{R}^{M \times N}$、可学习权重向量 $w \in \mathbb{R}^N$、极小正数 $\epsilon$ 以及发射配置 <span class="in">`&lt;&lt;&lt;M, BLOCK_SIZE&gt;&gt;&gt;`</span>。</span>
+<span id="cb4-431"><a href="#cb4-431" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**状态变化（两阶段扫描与片上规约）**：</span>
+<span id="cb4-432"><a href="#cb4-432" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>**第一阶段（平方和汇聚）**：每个 Block 绑定一行，线程沿列方向跨步加载 $x_i$，在私有寄存器中累加局部平方和 $x_i^2$；随后通过 Warp Shuffle 与 Shared Memory 快速树状折叠出该行的全局平方和 $\sum x^2$；</span>
+<span id="cb4-433"><a href="#cb4-433" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>**片上倒数标量广播**：由 <span class="in">`tid == 0`</span> 线程计算 $\text{inv<span class="sc">\_</span>rms} = \text{rsqrtf}(\frac{\sum x^2}{N} + \epsilon)$，写入共享内存并通过 <span class="in">`__syncthreads()`</span> 广播同步给 Block 内所有线程；</span>
+<span id="cb4-434"><a href="#cb4-434" aria-hidden="true" tabindex="-1"></a><span class="ss">  3. </span>**第二阶段（归一化与仿射写回）**：所有线程并发从共享内存读取 <span class="in">`inv_rms`</span>，重新从全局显存读取对应的输入 $x_i$ 与权重 $w_i$，在寄存器中计算 $y_i = x_i \cdot \text{inv<span class="sc">\_</span>rms} \cdot w_i$。</span>
+<span id="cb4-435"><a href="#cb4-435" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-436"><a href="#cb4-436" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**输出状态**：输出张量 $Y \in \mathbb{R}^{M \times N}$ 写回全局显存，各行特征向量均方根被精确拉齐至 1.0 附近，数值方差达到归一化标准。</span>
+<span id="cb4-437"><a href="#cb4-437" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-438"><a href="#cb4-438" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q2 参考答案</span></span>
+<span id="cb4-439"><a href="#cb4-439" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-440"><a href="#cb4-440" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**尺度畸变推导**：</span>
+<span id="cb4-441"><a href="#cb4-441" aria-hidden="true" tabindex="-1"></a>  RMSNorm 的数学定义是均值的方根：$\text{RMS} = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2} = \frac{\sqrt{\sum x_i^2}}{\sqrt{N}}$。</span>
+<span id="cb4-442"><a href="#cb4-442" aria-hidden="true" tabindex="-1"></a>  若错误地在除法中漏掉平方根运算，或者将开方写为 $\frac{\sum x_i^2}{\sqrt{N}}$：</span>
+<span id="cb4-443"><a href="#cb4-443" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>缩放因子的量纲发生严重漂移：平方和原本具有二次量纲 $O(<span class="sc">\|</span>x<span class="sc">\|</span>^2)$，若除以 $\sqrt{N}$，其倒数尺度的数量级与理论值偏差达到 $\sqrt{N}$ 倍！</span>
+<span id="cb4-444"><a href="#cb4-444" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>以大模型常见隐藏维度 $N = 4096$ 为例，$\sqrt{N} = 64$。输出激活值将被错误放大或缩小整整 64 倍！</span>
+<span id="cb4-445"><a href="#cb4-445" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**后果**：直接导致下游自注意力（Attention）的 QK 点积激活值爆炸，Softmax 输出极端饱和产生 NaN，梯度在反向传播首步即发生彻底爆炸。</span>
+<span id="cb4-446"><a href="#cb4-446" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-447"><a href="#cb4-447" aria-hidden="true" tabindex="-1"></a><span class="fu">### Q3 参考答案</span></span>
+<span id="cb4-448"><a href="#cb4-448" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-449"><a href="#cb4-449" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**未融合状态下的读写开销**：</span>
+<span id="cb4-450"><a href="#cb4-450" aria-hidden="true" tabindex="-1"></a><span class="ss">  1. </span>Residual Add Kernel：读取输入 $X$（$MN$ 个数）、读取残差 $\text{Res}$（$MN$ 个数），将结果 $X_{\text{new}}$ 写回显存（$MN$ 个数）$\implies$ 消耗 $3 MN$ 次访存；</span>
+<span id="cb4-451"><a href="#cb4-451" aria-hidden="true" tabindex="-1"></a><span class="ss">  2. </span>RMSNorm Kernel：Pass 1 读取 $X_{\text{new}}$（$MN$），Pass 2 再次读取 $X_{\text{new}}$（$MN$）、读取权重 $W$（$N$），写出 $Y$（$MN$）$\implies$ 消耗 $3 MN + N$ 次访存；</span>
+<span id="cb4-452"><a href="#cb4-452" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**总访存量**：$3 MN + 3 MN + N \approx 6 MN$ 个元素的全局显存读写。</span>
+<span id="cb4-453"><a href="#cb4-453" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**算子融合后的优化收益**：</span>
+<span id="cb4-454"><a href="#cb4-454" aria-hidden="true" tabindex="-1"></a>  在 Pass 1 中，线程同时加载 $X$ 与 $\text{Res}$ 就地相加，并在本地完成平方和统计，同时可顺手将相加后的残差写回全局内存（若后续网络仍需残差输出）；在 Pass 2 中直接从 L2 缓存或寄存器复用该数据完成归一化。</span>
+<span id="cb4-455"><a href="#cb4-455" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**节省量**：直接省去了独立的 Add 内核调度开销，消灭了 $2 MN$ 次中间全局显存往返读写，显存带宽节约率高达 33%~50%！</span>
+<span id="cb4-456"><a href="#cb4-456" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-457"><a href="#cb4-457" aria-hidden="true" tabindex="-1"></a><span class="fu">## 参考资料</span></span>
 <span id="cb4-458"><a href="#cb4-458" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-459"><a href="#cb4-459" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
-<span id="cb4-460"><a href="#cb4-460" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb4-459"><a href="#cb4-459" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Programming Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-programming-guide/)</span></span>
+<span id="cb4-460"><a href="#cb4-460" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span><span class="co">[</span><span class="ot">CUDA Best Practices Guide</span><span class="co">](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)</span></span>
+<span id="cb4-461"><a href="#cb4-461" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-462"><a href="#cb4-462" aria-hidden="true" tabindex="-1"></a>资料用于建立事实基线；面试回答仍需用自己的语言组织。</span>
+<span id="cb4-463"><a href="#cb4-463" aria-hidden="true" tabindex="-1"></a>:::</span>
 </code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
 </div></div></div></div></div>
 </div> <!-- /content -->

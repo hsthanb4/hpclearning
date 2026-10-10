@@ -499,7 +499,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -570,8 +569,25 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p><strong>基于人类反馈的强化学习（RLHF）</strong>与<strong>基于可验证奖励的强化学习（RLVR）</strong>是现代大语言模型（LLM）从初始预训练/指令微调（SFT）模型演进至具备复杂推理能力、高对齐度超级智能（如 InstructGPT、Claude、DeepSeek-R1）的核心后训练（Post-Training）范式。 在 LLM 对齐领域，必须明确区分两个<strong>完全正交的独立维度</strong>：</p>
+<ol type="1">
+<li><strong>奖励来源轴（Reward Source）</strong>：
+<ul>
+<li><strong>RLHF（神经奖励模型）</strong>：主要面向开放式创作、安全性、对话助手等无法用代码严格判定的主观任务。先基于人类偏好对 <span class="math inline">\((x, y_w, y_l)\)</span> 训练一个参数化的标量奖励模型（Reward Model, RM），利用 Bradley-Terry 似然对回答打分： <span class="math display">\[ \mathcal{L}_{\text{RM}}(\phi) = - \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma \left( r_\phi(x, y_w) - r_\phi(x, y_l) \right) \right] \]</span></li>
+<li><strong>RLVR（可验证规则奖励）</strong>：主要面向数学推理（GSM8K、MATH）、代码生成（HumanEval、LeetCode）等有客观真值的形式系统。直接利用符号数学解析器、Python 代码沙箱单元测试、正则表达式等规则引擎充当真值判定器（Oracle），奖励严格为二值（0/1）或步骤过程得分。</li>
+</ul></li>
+<li><strong>策略优化器轴（Policy Optimizer）</strong>：PPO、GRPO、REINFORCE 或 DPO。二者可自由组合（例如 DeepSeek-R1-Zero 采用的是 RLVR + GRPO，而 InstructGPT 采用的是 RLHF + PPO）。</li>
+</ol>
+<p>后训练解决的核心工程问题是：<strong>如何将序列生成任务解构为 Token 级的马尔可夫决策过程，并通过参考策略（Reference Policy, <span class="math inline">\(\pi_{\text{ref}}\)</span>）的 KL 散度锚定，防止模型在追逐高奖励过程中发生语义漂移（Language Degradation）与奖励欺骗（Reward Hacking）</strong>。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>RLHF 四模型拓扑与端到端训练流水线如图 10-1 与图 10-2 所示：</p>
+<ol type="1">
+<li><strong>四模型拓扑与 Token 级 KL 惩罚（图 10-1）</strong>：</li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -593,6 +609,14 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 10-1：大模型对齐 RLHF 四模型拓扑与 Token 级 KL 惩罚锚定</em>
 </p>
+<p>在标准 RLHF 流程中，GPU 集群上同时运行四个模型角色： - <strong>Actor <span class="math inline">\(\pi_\theta\)</span></strong>：正在被梯度优化的生成策略； - <strong>Reference <span class="math inline">\(\pi_{\text{ref}}\)</span></strong>：冻结的 SFT 初始模型，充当锚点； - <strong>Critic <span class="math inline">\(V_\psi\)</span></strong>：评估当前 Token 前缀价值的网络（PPO 专有）； - <strong>Reward Model <span class="math inline">\(r_\phi\)</span></strong>（或规则判题器）：在生成完毕后给出终局标量打分。 为了防止策略发生不可控漂移，优化目标被形式化为最大化带 KL 惩罚的期望回报： <span class="math display">\[ \max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta} \left[ R(x, y) \right] - \beta D_{\text{KL}}\left(\pi_\theta(y \mid x) \parallel \pi_{\text{ref}}(y \mid x)\right) \]</span></p>
+<ol start="2" type="1">
+<li><strong>点级 Token 奖励整形（Reward Shaping）</strong>： 根据因果概率分解，全序列的 KL 散度等于各 Token 相对熵的求和 <span class="math inline">\(\sum_{t=1}^T \log \frac{\pi_\theta(y_t)}{\pi_{\text{ref}}(y_t)}\)</span>。PPO 将 KL 惩罚分解注入到每个时序步的即时奖励中：
+<ul>
+<li>对于中间生成的回答 Token（<span class="math inline">\(t &lt; T-1\)</span>）：<span class="math inline">\(r_t^{\text{shaped}} = - \beta \left( \log \pi_\theta(y_t \mid x, y_{&lt;t}) - \log \pi_{\text{ref}}(y_t \mid x, y_{&lt;t}) \right)\)</span>；</li>
+<li>对于回答的最后一个有效 Token（<span class="math inline">\(t = T-1\)</span>）： <span class="math display">\[ r_{T-1}^{\text{shaped}} = R_{\text{env}}(x, y) - \beta \left( \log \pi_\theta(y_{T-1}) - \log \pi_{\text{ref}}(y_{T-1}) \right) \]</span> 这种塑造将终局全局奖励与密集的路径偏差惩罚平滑拼接，随后无缝输入 GAE 优势递推引擎（图 10-2）。</li>
+</ul></li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -613,36 +637,7 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 10-2：RLHF / RLVR 后训练全链路端到端数据流水线</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p><strong>基于人类反馈的强化学习（RLHF）</strong>与<strong>基于可验证奖励的强化学习（RLVR）</strong>是现代大语言模型（LLM）从初始预训练/指令微调（SFT）模型演进至具备复杂推理能力、高对齐度超级智能（如 InstructGPT、Claude、DeepSeek-R1）的核心后训练（Post-Training）范式。 在 LLM 对齐领域，必须明确区分两个<strong>完全正交的独立维度</strong>：</p>
-<ol type="1">
-<li><strong>奖励来源轴（Reward Source）</strong>：
-<ul>
-<li><strong>RLHF（神经奖励模型）</strong>：主要面向开放式创作、安全性、对话助手等无法用代码严格判定的主观任务。先基于人类偏好对 <span class="math inline">\((x, y_w, y_l)\)</span> 训练一个参数化的标量奖励模型（Reward Model, RM），利用 Bradley-Terry 似然对回答打分： <span class="math display">\[ \mathcal{L}_{\text{RM}}(\phi) = - \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma \left( r_\phi(x, y_w) - r_\phi(x, y_l) \right) \right] \]</span></li>
-<li><strong>RLVR（可验证规则奖励）</strong>：主要面向数学推理（GSM8K、MATH）、代码生成（HumanEval、LeetCode）等有客观真值的形式系统。直接利用符号数学解析器、Python 代码沙箱单元测试、正则表达式等规则引擎充当真值判定器（Oracle），奖励严格为二值（0/1）或步骤过程得分。</li>
-</ul></li>
-<li><strong>策略优化器轴（Policy Optimizer）</strong>：PPO、GRPO、REINFORCE 或 DPO。二者可自由组合（例如 DeepSeek-R1-Zero 采用的是 RLVR + GRPO，而 InstructGPT 采用的是 RLHF + PPO）。</li>
-</ol>
-<p>后训练解决的核心工程问题是：<strong>如何将序列生成任务解构为 Token 级的马尔可夫决策过程，并通过参考策略（Reference Policy, <span class="math inline">\(\pi_{\text{ref}}\)</span>）的 KL 散度锚定，防止模型在追逐高奖励过程中发生语义漂移（Language Degradation）与奖励欺骗（Reward Hacking）</strong>。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>RLHF 四模型拓扑与端到端训练流水线如图 10-1 与图 10-2 所示：</p>
-<ol type="1">
-<li><strong>四模型拓扑与 Token 级 KL 惩罚（图 10-1）</strong>： 在标准 RLHF 流程中，GPU 集群上同时运行四个模型角色：
-<ul>
-<li><strong>Actor <span class="math inline">\(\pi_\theta\)</span></strong>：正在被梯度优化的生成策略；</li>
-<li><strong>Reference <span class="math inline">\(\pi_{\text{ref}}\)</span></strong>：冻结的 SFT 初始模型，充当锚点；</li>
-<li><strong>Critic <span class="math inline">\(V_\psi\)</span></strong>：评估当前 Token 前缀价值的网络（PPO 专有）；</li>
-<li><strong>Reward Model <span class="math inline">\(r_\phi\)</span></strong>（或规则判题器）：在生成完毕后给出终局标量打分。 为了防止策略发生不可控漂移，优化目标被形式化为最大化带 KL 惩罚的期望回报： <span class="math display">\[ \max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta} \left[ R(x, y) \right] - \beta D_{\text{KL}}\left(\pi_\theta(y \mid x) \parallel \pi_{\text{ref}}(y \mid x)\right) \]</span></li>
-</ul></li>
-<li><strong>点级 Token 奖励整形（Reward Shaping）</strong>： 根据因果概率分解，全序列的 KL 散度等于各 Token 相对熵的求和 <span class="math inline">\(\sum_{t=1}^T \log \frac{\pi_\theta(y_t)}{\pi_{\text{ref}}(y_t)}\)</span>。PPO 将 KL 惩罚分解注入到每个时序步的即时奖励中：
-<ul>
-<li>对于中间生成的回答 Token（<span class="math inline">\(t &lt; T-1\)</span>）：<span class="math inline">\(r_t^{\text{shaped}} = - \beta \left( \log \pi_\theta(y_t \mid x, y_{&lt;t}) - \log \pi_{\text{ref}}(y_t \mid x, y_{&lt;t}) \right)\)</span>；</li>
-<li>对于回答的最后一个有效 Token（<span class="math inline">\(t = T-1\)</span>）： <span class="math display">\[ r_{T-1}^{\text{shaped}} = R_{\text{env}}(x, y) - \beta \left( \log \pi_\theta(y_{T-1}) - \log \pi_{\text{ref}}(y_{T-1}) \right) \]</span> 这种塑造将终局全局奖励与密集的路径偏差惩罚平滑拼接，随后无缝输入 GAE 优势递推引擎（图 10-2）。</li>
-</ul></li>
+<ol start="3" type="1">
 <li><strong>KL 估计器的数学无偏性与点态非负性（<span class="math inline">\(k_1\)</span> vs <span class="math inline">\(k_3\)</span>）</strong>：
 <ul>
 <li><strong>经典估计量 <span class="math inline">\(k_1\)</span></strong>：<span class="math inline">\(k_1 = \log \pi_\theta - \log \pi_{\text{ref}}\)</span>。在单 Token 采样点上，<span class="math inline">\(k_1\)</span> 完全可以为负数（当当前策略对某个 Token 的预测概率偶然低于参考模型时），但其在策略分布下的数学期望严格收敛于真值 KL；</li>
@@ -692,7 +687,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐每 token shaped reward。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="25756cb7" class="cell" data-course_role="exercise">
+<div id="8f689899" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> math</span>
@@ -771,7 +766,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="356707a3" class="cell" data-course_role="solution">
+<div id="883627bb" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> math</span>
@@ -1361,62 +1356,62 @@ window.Quarto = {
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    Prompt[<span class="ot">"</span><span class="st">输入 Prompt x</span><span class="ot">"</span>] --&gt; Actor[<span class="ot">"</span><span class="st">生成策略模型 π_θ (Active)</span><span class="ot">"</span>]</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>    Prompt --&gt; Ref[<span class="ot">"</span><span class="st">参考基础模型 π_ref (Frozen)</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>    Actor --&gt; Response[<span class="ot">"</span><span class="st">生成回复文本 y = (y_1, y_2, ..., y_T)</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    Response --&gt; RM[<span class="ot">"</span><span class="st">奖励模型 r_ϕ(x, y) 或规则验证器 (RLVR)</span><span class="ot">"</span>]</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    Actor &amp; Ref --&gt; KL[<span class="ot">"</span><span class="st">Token 级 KL 散度: D_KL = log π_θ(y_t) - log π_ref(y_t)</span><span class="ot">"</span>]</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>    RM &amp; KL --&gt; FinalReward[<span class="ot">"</span><span class="st">最终组合标量/密集奖励: R = RM(x, y) - β * D_KL</span><span class="ot">"</span>]</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 10-1：大模型对齐 RLHF 四模型拓扑与 Token 级 KL 惩罚锚定<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    PromptBatch[<span class="ot">"</span><span class="st">采样 Prompt 批次</span><span class="ot">"</span>] --&gt; VLLM[<span class="ot">"</span><span class="st">高性能推理引擎生成候选文本</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    VLLM --&gt; RMScore[<span class="ot">"</span><span class="st">奖励模型打分 / 编译器验证 (RLVR)</span><span class="ot">"</span>]</span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    RMScore --&gt; KLPenalty[<span class="ot">"</span><span class="st">计算对参考模型的 KL 漂移惩罚</span><span class="ot">"</span>]</span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>    KLPenalty --&gt; GAEAdv[<span class="ot">"</span><span class="st">沿 Token 序列递归生成 GAE 优势信号</span><span class="ot">"</span>]</span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>    GAEAdv --&gt; PPOUpdate[<span class="ot">"</span><span class="st">分布式框架 (Megatron/DeepSpeed) 反向传播更新权重</span><span class="ot">"</span>]</span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 10-2：RLHF / RLVR 后训练全链路端到端数据流水线<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>**基于人类反馈的强化学习（RLHF）**与**基于可验证奖励的强化学习（RLVR）**是现代大语言模型（LLM）从初始预训练/指令微调（SFT）模型演进至具备复杂推理能力、高对齐度超级智能（如 InstructGPT、Claude、DeepSeek-R1）的核心后训练（Post-Training）范式。</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>在 LLM 对齐领域，必须明确区分两个**完全正交的独立维度**：</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**奖励来源轴（Reward Source）**：</span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**RLHF（神经奖励模型）**：主要面向开放式创作、安全性、对话助手等无法用代码严格判定的主观任务。先基于人类偏好对 $(x, y_w, y_l)$ 训练一个参数化的标量奖励模型（Reward Model, RM），利用 Bradley-Terry 似然对回答打分：</span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>     $$ \mathcal{L}_{\text{RM}}(\phi) = - \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma \left( r_\phi(x, y_w) - r_\phi(x, y_l) \right) \right] $$</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**RLVR（可验证规则奖励）**：主要面向数学推理（GSM8K、MATH）、代码生成（HumanEval、LeetCode）等有客观真值的形式系统。直接利用符号数学解析器、Python 代码沙箱单元测试、正则表达式等规则引擎充当真值判定器（Oracle），奖励严格为二值（0/1）或步骤过程得分。</span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**策略优化器轴（Policy Optimizer）**：PPO、GRPO、REINFORCE 或 DPO。二者可自由组合（例如 DeepSeek-R1-Zero 采用的是 RLVR + GRPO，而 InstructGPT 采用的是 RLHF + PPO）。</span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>后训练解决的核心工程问题是：**如何将序列生成任务解构为 Token 级的马尔可夫决策过程，并通过参考策略（Reference Policy, $\pi_{\text{ref}}$）的 KL 散度锚定，防止模型在追逐高奖励过程中发生语义漂移（Language Degradation）与奖励欺骗（Reward Hacking）**。</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>**基于人类反馈的强化学习（RLHF）**与**基于可验证奖励的强化学习（RLVR）**是现代大语言模型（LLM）从初始预训练/指令微调（SFT）模型演进至具备复杂推理能力、高对齐度超级智能（如 InstructGPT、Claude、DeepSeek-R1）的核心后训练（Post-Training）范式。</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>在 LLM 对齐领域，必须明确区分两个**完全正交的独立维度**：</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**奖励来源轴（Reward Source）**：</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**RLHF（神经奖励模型）**：主要面向开放式创作、安全性、对话助手等无法用代码严格判定的主观任务。先基于人类偏好对 $(x, y_w, y_l)$ 训练一个参数化的标量奖励模型（Reward Model, RM），利用 Bradley-Terry 似然对回答打分：</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>     $$ \mathcal{L}_{\text{RM}}(\phi) = - \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma \left( r_\phi(x, y_w) - r_\phi(x, y_l) \right) \right] $$</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**RLVR（可验证规则奖励）**：主要面向数学推理（GSM8K、MATH）、代码生成（HumanEval、LeetCode）等有客观真值的形式系统。直接利用符号数学解析器、Python 代码沙箱单元测试、正则表达式等规则引擎充当真值判定器（Oracle），奖励严格为二值（0/1）或步骤过程得分。</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**策略优化器轴（Policy Optimizer）**：PPO、GRPO、REINFORCE 或 DPO。二者可自由组合（例如 DeepSeek-R1-Zero 采用的是 RLVR + GRPO，而 InstructGPT 采用的是 RLHF + PPO）。</span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>后训练解决的核心工程问题是：**如何将序列生成任务解构为 Token 级的马尔可夫决策过程，并通过参考策略（Reference Policy, $\pi_{\text{ref}}$）的 KL 散度锚定，防止模型在追逐高奖励过程中发生语义漂移（Language Degradation）与奖励欺骗（Reward Hacking）**。</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>RLHF 四模型拓扑与端到端训练流水线如图 10-1 与图 10-2 所示：</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**四模型拓扑与 Token 级 KL 惩罚（图 10-1）**：</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    Prompt[<span class="ot">"</span><span class="st">输入 Prompt x</span><span class="ot">"</span>] --&gt; Actor[<span class="ot">"</span><span class="st">生成策略模型 π_θ (Active)</span><span class="ot">"</span>]</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    Prompt --&gt; Ref[<span class="ot">"</span><span class="st">参考基础模型 π_ref (Frozen)</span><span class="ot">"</span>]</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    Actor --&gt; Response[<span class="ot">"</span><span class="st">生成回复文本 y = (y_1, y_2, ..., y_T)</span><span class="ot">"</span>]</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    Response --&gt; RM[<span class="ot">"</span><span class="st">奖励模型 r_ϕ(x, y) 或规则验证器 (RLVR)</span><span class="ot">"</span>]</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    Actor &amp; Ref --&gt; KL[<span class="ot">"</span><span class="st">Token 级 KL 散度: D_KL = log π_θ(y_t) - log π_ref(y_t)</span><span class="ot">"</span>]</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    RM &amp; KL --&gt; FinalReward[<span class="ot">"</span><span class="st">最终组合标量/密集奖励: R = RM(x, y) - β * D_KL</span><span class="ot">"</span>]</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 10-1：大模型对齐 RLHF 四模型拓扑与 Token 级 KL 惩罚锚定<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>   在标准 RLHF 流程中，GPU 集群上同时运行四个模型角色：</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Actor $\pi_\theta$**：正在被梯度优化的生成策略；</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Reference $\pi_{\text{ref}}$**：冻结的 SFT 初始模型，充当锚点；</span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Critic $V_\psi$**：评估当前 Token 前缀价值的网络（PPO 专有）；</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Reward Model $r_\phi$**（或规则判题器）：在生成完毕后给出终局标量打分。</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a>   为了防止策略发生不可控漂移，优化目标被形式化为最大化带 KL 惩罚的期望回报：</span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a>   $$ \max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta} \left[ R(x, y) \right] - \beta D_{\text{KL}}\left(\pi_\theta(y \mid x) \parallel \pi_{\text{ref}}(y \mid x)\right) $$</span>
 <span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>RLHF 四模型拓扑与端到端训练流水线如图 10-1 与图 10-2 所示：</span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**四模型拓扑与 Token 级 KL 惩罚（图 10-1）**：</span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>   在标准 RLHF 流程中，GPU 集群上同时运行四个模型角色：</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Actor $\pi_\theta$**：正在被梯度优化的生成策略；</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Reference $\pi_{\text{ref}}$**：冻结的 SFT 初始模型，充当锚点；</span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Critic $V_\psi$**：评估当前 Token 前缀价值的网络（PPO 专有）；</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**Reward Model $r_\phi$**（或规则判题器）：在生成完毕后给出终局标量打分。</span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>   为了防止策略发生不可控漂移，优化目标被形式化为最大化带 KL 惩罚的期望回报：</span>
-<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>   $$ \max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta} \left[ R(x, y) \right] - \beta D_{\text{KL}}\left(\pi_\theta(y \mid x) \parallel \pi_{\text{ref}}(y \mid x)\right) $$</span>
-<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**点级 Token 奖励整形（Reward Shaping）**：</span>
-<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>   根据因果概率分解，全序列的 KL 散度等于各 Token 相对熵的求和 $\sum_{t=1}^T \log \frac{\pi_\theta(y_t)}{\pi_{\text{ref}}(y_t)}$。PPO 将 KL 惩罚分解注入到每个时序步的即时奖励中：</span>
-<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对于中间生成的回答 Token（$t &lt; T-1$）：$r_t^{\text{shaped}} = - \beta \left( \log \pi_\theta(y_t \mid x, y_{&lt;t}) - \log \pi_{\text{ref}}(y_t \mid x, y_{&lt;t}) \right)$；</span>
-<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对于回答的最后一个有效 Token（$t = T-1$）：</span>
-<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a>     $$ r_{T-1}^{\text{shaped}} = R_{\text{env}}(x, y) - \beta \left( \log \pi_\theta(y_{T-1}) - \log \pi_{\text{ref}}(y_{T-1}) \right) $$</span>
-<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a>   这种塑造将终局全局奖励与密集的路径偏差惩罚平滑拼接，随后无缝输入 GAE 优势递推引擎（图 10-2）。</span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**点级 Token 奖励整形（Reward Shaping）**：</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>   根据因果概率分解，全序列的 KL 散度等于各 Token 相对熵的求和 $\sum_{t=1}^T \log \frac{\pi_\theta(y_t)}{\pi_{\text{ref}}(y_t)}$。PPO 将 KL 惩罚分解注入到每个时序步的即时奖励中：</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对于中间生成的回答 Token（$t &lt; T-1$）：$r_t^{\text{shaped}} = - \beta \left( \log \pi_\theta(y_t \mid x, y_{&lt;t}) - \log \pi_{\text{ref}}(y_t \mid x, y_{&lt;t}) \right)$；</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>对于回答的最后一个有效 Token（$t = T-1$）：</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>     $$ r_{T-1}^{\text{shaped}} = R_{\text{env}}(x, y) - \beta \left( \log \pi_\theta(y_{T-1}) - \log \pi_{\text{ref}}(y_{T-1}) \right) $$</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>   这种塑造将终局全局奖励与密集的路径偏差惩罚平滑拼接，随后无缝输入 GAE 优势递推引擎（图 10-2）。</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a>    PromptBatch[<span class="ot">"</span><span class="st">采样 Prompt 批次</span><span class="ot">"</span>] --&gt; VLLM[<span class="ot">"</span><span class="st">高性能推理引擎生成候选文本</span><span class="ot">"</span>]</span>
+<span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a>    VLLM --&gt; RMScore[<span class="ot">"</span><span class="st">奖励模型打分 / 编译器验证 (RLVR)</span><span class="ot">"</span>]</span>
+<span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a>    RMScore --&gt; KLPenalty[<span class="ot">"</span><span class="st">计算对参考模型的 KL 漂移惩罚</span><span class="ot">"</span>]</span>
+<span id="cb3-83"><a href="#cb3-83" aria-hidden="true" tabindex="-1"></a>    KLPenalty --&gt; GAEAdv[<span class="ot">"</span><span class="st">沿 Token 序列递归生成 GAE 优势信号</span><span class="ot">"</span>]</span>
+<span id="cb3-84"><a href="#cb3-84" aria-hidden="true" tabindex="-1"></a>    GAEAdv --&gt; PPOUpdate[<span class="ot">"</span><span class="st">分布式框架 (Megatron/DeepSpeed) 反向传播更新权重</span><span class="ot">"</span>]</span>
+<span id="cb3-85"><a href="#cb3-85" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-86"><a href="#cb3-86" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 10-2：RLHF / RLVR 后训练全链路端到端数据流水线<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-87"><a href="#cb3-87" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-88"><a href="#cb3-88" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-89"><a href="#cb3-89" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**KL 估计器的数学无偏性与点态非负性（$k_1$ vs $k_3$）**：</span>
 <span id="cb3-90"><a href="#cb3-90" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>**经典估计量 $k_1$**：$k_1 = \log \pi_\theta - \log \pi_{\text{ref}}$。在单 Token 采样点上，$k_1$ 完全可以为负数（当当前策略对某个 Token 的预测概率偶然低于参考模型时），但其在策略分布下的数学期望严格收敛于真值 KL；</span>

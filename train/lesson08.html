@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#本课目标" id="toc-本课目标" class="nav-link active" data-scroll-target="#本课目标">本课目标</a></li>
   <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#上下文并行cp的提出背景与第一性原理" id="toc-上下文并行cp的提出背景与第一性原理" class="nav-link" data-scroll-target="#上下文并行cp的提出背景与第一性原理">1. 上下文并行（CP）的提出背景与第一性原理</a></li>
   <li><a href="#ring-attention-的环形流转与异步重叠机制" id="toc-ring-attention-的环形流转与异步重叠机制" class="nav-link" data-scroll-target="#ring-attention-的环形流转与异步重叠机制">2. Ring Attention 的环形流转与异步重叠机制</a></li>
   <li><a href="#与-flashattention-的理论同源性online-softmax" id="toc-与-flashattention-的理论同源性online-softmax" class="nav-link" data-scroll-target="#与-flashattention-的理论同源性online-softmax">3. 与 FlashAttention 的理论同源性：Online Softmax</a></li>
@@ -592,8 +591,14 @@ window.Quarto = {
 </section>
 <section id="核心概念" class="level2">
 <h2 class="anchored" data-anchor-id="核心概念">核心概念</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="上下文并行cp的提出背景与第一性原理" class="level3">
+<h3 class="anchored" data-anchor-id="上下文并行cp的提出背景与第一性原理">1. 上下文并行（CP）的提出背景与第一性原理</h3>
+<p>随着大语言模型应用从短文本对话演进到长文档分析、代码库解析、超长推理（如 128k、256k 乃至 1M 上下文），系统显存面临着<strong>序列长度 <span class="math inline">\(s\)</span> 引发的非线性膨胀危机</strong>：</p>
+<ul>
+<li><strong>自注意力机制二次方显存</strong>：原生 Attention 的分数矩阵维度为 <span class="math inline">\((s, s)\)</span>，显存复杂度为 <span class="math inline">\(O(s^2)\)</span>；即便采用 FlashAttention 避免物化分数矩阵，前向与反向中的输入/输出激活、残差连接以及 KV 缓存显存仍然随 <span class="math inline">\(s\)</span> 呈线性增长。在 128k 序列下，仅单样本激活显存就高达数百吉字节。</li>
+<li><strong>TP 扩展性的物理壁障</strong>：第 6 课已指出，张量并行（TP）受限于机内 NVLink 超高带宽，通常最大只能取 <span class="math inline">\(\text{TP}=8\)</span>。仅靠机内 TP 无法跨机扩展以消化百万级别的超长序列。</li>
+</ul>
+<p><strong>上下文并行（Context Parallelism, CP）</strong>应运而生。如<strong>图 8-1 与图 8-2</strong> 所示，CP 是一种<strong>全局序列分块并行架构</strong>：</p>
 <div class="img-card">
 <img src="assets/figs/train_cp_ring_attention_math.png" class="img-fluid" style="width:95.0%">
 <p class="caption">
@@ -605,12 +610,12 @@ window.Quarto = {
 <div>
 <p></p><figure class="figure"><p></p>
 <div>
-<pre class="mermaid mermaid-js">flowchart TD
-    subgraph CPArchitecture["Context Parallelism (Ring Attention) 数据切分"]
-        Seq["超长序列 (如 128k ~ 1M Tokens)"] --&gt; B0["Card 0: Q0, K0, V0 (0~32k)"]
-        Seq --&gt; B1["Card 1: Q1, K1, V1 (32~64k)"]
-        Seq --&gt; B2["Card 2: Q2, K2, V2 (64~96k)"]
-        Seq --&gt; B3["Card 3: Q3, K3, V3 (96~128k)"]
+<pre class="mermaid mermaid-js">flowchart LR
+    subgraph ContextPartition["上下文并行长序列切分"]
+        Seq["超长序列 S (如 128k Tokens)"] --&gt; C0["分块 Chunk 0 ➔ GPU 0"]
+        Seq --&gt; C1["分块 Chunk 1 ➔ GPU 1"]
+        Seq --&gt; C2["分块 Chunk 2 ➔ GPU 2"]
+        Seq --&gt; C3["分块 Chunk 3 ➔ GPU 3"]
     end
 </pre>
 </div>
@@ -621,6 +626,17 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 8-2：上下文并行按序列切块并分配至独立 GPU 拓扑</em>
 </p>
+<ul>
+<li>它将长达 <span class="math inline">\(s\)</span> 的输入序列在最外层直接沿序列维度均匀切分为 <span class="math inline">\(N_{\text{cp}}\)</span> 个子序列片段，分配给集群中的 <span class="math inline">\(N_{\text{cp}}\)</span> 张 GPU（通常跨物理节点，结合 RDMA 网络）。</li>
+<li>每张 GPU 分配到的局部序列长度仅为 <span class="math inline">\(s_{\text{local}} = \frac{s}{N_{\text{cp}}}\)</span>。</li>
+<li><strong>与逐 Token 算子的天然正交性</strong>：Transformer 中的 MLP（Feed-Forward）、LayerNorm/RMSNorm、Embedding 以及各类残差连接完全是<strong>逐 Token 独立计算（Token-wise）</strong>的。在 CP 模式下，这些模块在各卡上进行完全本地的张量运算，<strong>全程产生 0 跨卡通信开销</strong>！</li>
+<li><strong>自注意力的唯一性挑战</strong>：整个网络中，<strong>唯独多头自注意力（Self-Attention）模块</strong>打破了 Token 间的独立性——根据 Attention 公式 <span class="math inline">\(\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) V\)</span>，每个 Token 的 Query 必须与全序列所有历史 Token 的 Key/Value 进行点积计算。因此，如何在各 GPU 仅持有局部切片的前提下，低显存、高带宽地计算出全量注意力，是 CP 的核心难题。</li>
+</ul>
+</section>
+<section id="ring-attention-的环形流转与异步重叠机制" class="level3">
+<h3 class="anchored" data-anchor-id="ring-attention-的环形流转与异步重叠机制">2. Ring Attention 的环形流转与异步重叠机制</h3>
+<p>为了解决注意力跨卡计算的问题，UC Berkeley 提出了经典的 <strong>Ring Attention（环形注意力）</strong> 算法。其核心思想是：<strong>让局部 Query 始终固定在本地显存，而让 Key/Value 块沿着逻辑通信环异步流转轮巡</strong>。</p>
+<p>如<strong>图 8-3</strong> 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -628,15 +644,15 @@ window.Quarto = {
 <div>
 <pre class="mermaid mermaid-js">sequenceDiagram
     autonumber
-    participant Q as Local Query Block (常驻本地)
-    participant KV as Local Key/Value Block
-    participant P2P as 异步 P2P 环形发送 (Ring Send/Recv)
-    participant Acc as FlashAttention Online Accumulator
+    participant GPU0 as GPU 0 (Q_0 固定)
+    participant GPU1 as GPU 1 (Q_1 固定)
+    participant P2P as 环形 P2P 异步通信 (KV 轮转)
 
-    Q-&gt;&gt;Acc: 与本地 KV0 计算局部注意力
-    KV-&gt;&gt;P2P: 异步把 KV 发送给下邻居，接收上邻居 KV
-    P2P--&gt;&gt;Acc: 用接收到的 KV1 计算注意力，并通过 Online Softmax 配平更新
-    Note over Q,Acc: 轮转 N-1 次后完成全序列因果注意力且显存恒定
+    Note over GPU0,GPU1: Step 0: 计算本地 Q_i 与 K_i, V_i 的注意力
+    GPU0-&gt;&gt;P2P: 发送 K_0, V_0 ➔ GPU 1，接收来自前驱的 KV
+    GPU1-&gt;&gt;P2P: 发送 K_1, V_1 ➔ GPU 2，接收来自前驱的 KV
+    Note over GPU0,GPU1: Step 1: 异步接收下一块 KV，同时计算当前重叠块注意力
+    Note over GPU0,GPU1: 利用 Online Softmax 动态更新分母与局部输出，无需中间显存
 </pre>
 </div>
 <p></p></figure><p></p>
@@ -646,20 +662,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 8-3：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程</em>
 </p>
-</section>
-<section id="上下文并行cp的提出背景与第一性原理" class="level3">
-<h3 class="anchored" data-anchor-id="上下文并行cp的提出背景与第一性原理">1. 上下文并行（CP）的提出背景与第一性原理</h3>
-<p>随着大语言模型应用从短文本对话演进到长文档分析、代码库解析、超长推理（如 128k、256k 乃至 1M 上下文），系统显存面临着<strong>序列长度 <span class="math inline">\(s\)</span> 引发的非线性膨胀危机</strong>：</p>
-<ul>
-<li><strong>自注意力机制二次方显存</strong>：原生 Attention 的分数矩阵维度为 <span class="math inline">\((s, s)\)</span>，显存复杂度为 <span class="math inline">\(O(s^2)\)</span>；即便采用 FlashAttention 避免物化分数矩阵，前向与反向中的输入/输出激活、残差连接以及 KV 缓存显存仍然随 <span class="math inline">\(s\)</span> 呈线性增长。在 128k 序列下，仅单样本激活显存就高达数百吉字节。</li>
-<li><strong>TP 扩展性的物理壁障</strong>：第 6 课已指出，张量并行（TP）受限于机内 NVLink 超高带宽，通常最大只能取 <span class="math inline">\(\text{TP}=8\)</span>。仅靠机内 TP 无法跨机扩展以消化百万级别的超长序列。</li>
-</ul>
-<p><strong>上下文并行（Context Parallelism, CP）</strong>应运而生。如<strong>图 8-1 与图 8-2</strong> 所示，CP 是一种<strong>全局序列分块并行架构</strong>： - 它将长达 <span class="math inline">\(s\)</span> 的输入序列在最外层直接沿序列维度均匀切分为 <span class="math inline">\(N_{\text{cp}}\)</span> 个子序列片段，分配给集群中的 <span class="math inline">\(N_{\text{cp}}\)</span> 张 GPU（通常跨物理节点，结合 RDMA 网络）。 - 每张 GPU 分配到的局部序列长度仅为 <span class="math inline">\(s_{\text{local}} = \frac{s}{N_{\text{cp}}}\)</span>。 - <strong>与逐 Token 算子的天然正交性</strong>：Transformer 中的 MLP（Feed-Forward）、LayerNorm/RMSNorm、Embedding 以及各类残差连接完全是<strong>逐 Token 独立计算（Token-wise）</strong>的。在 CP 模式下，这些模块在各卡上进行完全本地的张量运算，<strong>全程产生 0 跨卡通信开销</strong>！ - <strong>自注意力的唯一性挑战</strong>：整个网络中，<strong>唯独多头自注意力（Self-Attention）模块</strong>打破了 Token 间的独立性——根据 Attention 公式 <span class="math inline">\(\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) V\)</span>，每个 Token 的 Query 必须与全序列所有历史 Token 的 Key/Value 进行点积计算。因此，如何在各 GPU 仅持有局部切片的前提下，低显存、高带宽地计算出全量注意力，是 CP 的核心难题。</p>
-</section>
-<section id="ring-attention-的环形流转与异步重叠机制" class="level3">
-<h3 class="anchored" data-anchor-id="ring-attention-的环形流转与异步重叠机制">2. Ring Attention 的环形流转与异步重叠机制</h3>
-<p>为了解决注意力跨卡计算的问题，UC Berkeley 提出了经典的 <strong>Ring Attention（环形注意力）</strong> 算法。其核心思想是：<strong>让局部 Query 始终固定在本地显存，而让 Key/Value 块沿着逻辑通信环异步流转轮巡</strong>。</p>
-<p>如<strong>图 8-3</strong> 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：</p>
 <ol type="1">
 <li><p><strong>初始状态</strong>：每个 Rank <span class="math inline">\(r \in [0, N_{\text{cp}}-1]\)</span> 均持有本地的子序列块 <span class="math inline">\(Q_r, K_r, V_r\)</span>，形状均为 <span class="math inline">\((b, s_{\text{local}}, h)\)</span>。</p></li>
 <li><p><strong><span class="math inline">\(N_{\text{cp}}\)</span> 步环形流水循环</strong>：在每一个时间步 <span class="math inline">\(t \in [0, N_{\text{cp}}-1]\)</span>：</p>
@@ -783,7 +785,7 @@ window.Quarto = {
 <section id="代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
 <p>模拟 chunk 分配与 Ring Attention 轮转，验证 Zig-Zag 的负载均衡。</p>
-<div id="12f2ef86" class="cell" data-course_role="exercise">
+<div id="4b35eb58" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> sequential_assignment(num_ranks: <span class="bu">int</span>, chunks_per_rank: <span class="bu">int</span>):</span>
@@ -901,7 +903,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
-<div id="dc3eb4af" class="cell" data-course_role="solution">
+<div id="0c133c6d" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> sequential_assignment(num_ranks: <span class="bu">int</span>, chunks_per_rank: <span class="bu">int</span>):</span>
@@ -1546,57 +1548,57 @@ window.Quarto = {
 <span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念</span></span>
 <span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 上下文并行（CP）的提出背景与第一性原理</span></span>
 <span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/train_cp_ring_attention_math.png)</span>{width="95%"}</span>
-<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 8-1：上下文并行（Context Parallelism / Ring Attention）环形流水线与因果掩码平衡数学模型<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a>随着大语言模型应用从短文本对话演进到长文档分析、代码库解析、超长推理（如 128k、256k 乃至 1M 上下文），系统显存面临着**序列长度 $s$ 引发的非线性膨胀危机**：</span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**自注意力机制二次方显存**：原生 Attention 的分数矩阵维度为 $(s, s)$，显存复杂度为 $O(s^2)$；即便采用 FlashAttention 避免物化分数矩阵，前向与反向中的输入/输出激活、残差连接以及 KV 缓存显存仍然随 $s$ 呈线性增长。在 128k 序列下，仅单样本激活显存就高达数百吉字节。</span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**TP 扩展性的物理壁障**：第 6 课已指出，张量并行（TP）受限于机内 NVLink 超高带宽，通常最大只能取 $\text{TP}=8$。仅靠机内 TP 无法跨机扩展以消化百万级别的超长序列。</span>
 <span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a>    subgraph CPArchitecture[<span class="ot">"</span><span class="st">Context Parallelism (Ring Attention) 数据切分</span><span class="ot">"</span>]</span>
-<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>        Seq[<span class="ot">"</span><span class="st">超长序列 (如 128k ~ 1M Tokens)</span><span class="ot">"</span>] --&gt; B0[<span class="ot">"</span><span class="st">Card 0: Q0, K0, V0 (0~32k)</span><span class="ot">"</span>]</span>
-<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>        Seq --&gt; B1[<span class="ot">"</span><span class="st">Card 1: Q1, K1, V1 (32~64k)</span><span class="ot">"</span>]</span>
-<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a>        Seq --&gt; B2[<span class="ot">"</span><span class="st">Card 2: Q2, K2, V2 (64~96k)</span><span class="ot">"</span>]</span>
-<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>        Seq --&gt; B3[<span class="ot">"</span><span class="st">Card 3: Q3, K3, V3 (96~128k)</span><span class="ot">"</span>]</span>
-<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-2：上下文并行按序列切块并分配至独立 GPU 拓扑<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
-<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
-<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a>    participant Q as Local Query Block (常驻本地)</span>
-<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a>    participant KV as Local Key/Value Block</span>
-<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a>    participant P2P as 异步 P2P 环形发送 (Ring Send/Recv)</span>
-<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a>    participant Acc as FlashAttention Online Accumulator</span>
-<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a>    Q-&gt;&gt;Acc: 与本地 KV0 计算局部注意力</span>
-<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>    KV-&gt;&gt;P2P: 异步把 KV 发送给下邻居，接收上邻居 KV</span>
-<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a>    P2P--&gt;&gt;Acc: 用接收到的 KV1 计算注意力，并通过 Online Softmax 配平更新</span>
-<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a>    Note over Q,Acc: 轮转 N<span class="dv">-1</span> 次后完成全序列因果注意力且显存恒定</span>
-<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-3：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 上下文并行（CP）的提出背景与第一性原理</span></span>
-<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a>随着大语言模型应用从短文本对话演进到长文档分析、代码库解析、超长推理（如 128k、256k 乃至 1M 上下文），系统显存面临着**序列长度 $s$ 引发的非线性膨胀危机**：</span>
-<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**自注意力机制二次方显存**：原生 Attention 的分数矩阵维度为 $(s, s)$，显存复杂度为 $O(s^2)$；即便采用 FlashAttention 避免物化分数矩阵，前向与反向中的输入/输出激活、残差连接以及 KV 缓存显存仍然随 $s$ 呈线性增长。在 128k 序列下，仅单样本激活显存就高达数百吉字节。</span>
-<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**TP 扩展性的物理壁障**：第 6 课已指出，张量并行（TP）受限于机内 NVLink 超高带宽，通常最大只能取 $\text{TP}=8$。仅靠机内 TP 无法跨机扩展以消化百万级别的超长序列。</span>
-<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a>**上下文并行（Context Parallelism, CP）**应运而生。如**图 8-1 与图 8-2** 所示，CP 是一种**全局序列分块并行架构**：</span>
-<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>它将长达 $s$ 的输入序列在最外层直接沿序列维度均匀切分为 $N_{\text{cp}}$ 个子序列片段，分配给集群中的 $N_{\text{cp}}$ 张 GPU（通常跨物理节点，结合 RDMA 网络）。</span>
-<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每张 GPU 分配到的局部序列长度仅为 $s_{\text{local}} = \frac{s}{N_{\text{cp}}}$。</span>
-<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**与逐 Token 算子的天然正交性**：Transformer 中的 MLP（Feed-Forward）、LayerNorm/RMSNorm、Embedding 以及各类残差连接完全是**逐 Token 独立计算（Token-wise）**的。在 CP 模式下，这些模块在各卡上进行完全本地的张量运算，**全程产生 0 跨卡通信开销**！</span>
-<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**自注意力的唯一性挑战**：整个网络中，**唯独多头自注意力（Self-Attention）模块**打破了 Token 间的独立性——根据 Attention 公式 $\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) V$，每个 Token 的 Query 必须与全序列所有历史 Token 的 Key/Value 进行点积计算。因此，如何在各 GPU 仅持有局部切片的前提下，低显存、高带宽地计算出全量注意力，是 CP 的核心难题。</span>
-<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Ring Attention 的环形流转与异步重叠机制</span></span>
-<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a>为了解决注意力跨卡计算的问题，UC Berkeley 提出了经典的 **Ring Attention（环形注意力）** 算法。其核心思想是：**让局部 Query 始终固定在本地显存，而让 Key/Value 块沿着逻辑通信环异步流转轮巡**。</span>
-<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a>如**图 8-3** 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a>**上下文并行（Context Parallelism, CP）**应运而生。如**图 8-1 与图 8-2** 所示，CP 是一种**全局序列分块并行架构**：</span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/train_cp_ring_attention_math.png)</span>{width="95%"}</span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 8-1：上下文并行（Context Parallelism / Ring Attention）环形流水线与因果掩码平衡数学模型<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a>    subgraph ContextPartition[<span class="ot">"</span><span class="st">上下文并行长序列切分</span><span class="ot">"</span>]</span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a>        Seq[<span class="ot">"</span><span class="st">超长序列 S (如 128k Tokens)</span><span class="ot">"</span>] --&gt; C0[<span class="ot">"</span><span class="st">分块 Chunk 0 ➔ GPU 0</span><span class="ot">"</span>]</span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a>        Seq --&gt; C1[<span class="ot">"</span><span class="st">分块 Chunk 1 ➔ GPU 1</span><span class="ot">"</span>]</span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a>        Seq --&gt; C2[<span class="ot">"</span><span class="st">分块 Chunk 2 ➔ GPU 2</span><span class="ot">"</span>]</span>
+<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a>        Seq --&gt; C3[<span class="ot">"</span><span class="st">分块 Chunk 3 ➔ GPU 3</span><span class="ot">"</span>]</span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-2：上下文并行按序列切块并分配至独立 GPU 拓扑<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>它将长达 $s$ 的输入序列在最外层直接沿序列维度均匀切分为 $N_{\text{cp}}$ 个子序列片段，分配给集群中的 $N_{\text{cp}}$ 张 GPU（通常跨物理节点，结合 RDMA 网络）。</span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每张 GPU 分配到的局部序列长度仅为 $s_{\text{local}} = \frac{s}{N_{\text{cp}}}$。</span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**与逐 Token 算子的天然正交性**：Transformer 中的 MLP（Feed-Forward）、LayerNorm/RMSNorm、Embedding 以及各类残差连接完全是**逐 Token 独立计算（Token-wise）**的。在 CP 模式下，这些模块在各卡上进行完全本地的张量运算，**全程产生 0 跨卡通信开销**！</span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**自注意力的唯一性挑战**：整个网络中，**唯独多头自注意力（Self-Attention）模块**打破了 Token 间的独立性——根据 Attention 公式 $\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) V$，每个 Token 的 Query 必须与全序列所有历史 Token 的 Key/Value 进行点积计算。因此，如何在各 GPU 仅持有局部切片的前提下，低显存、高带宽地计算出全量注意力，是 CP 的核心难题。</span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Ring Attention 的环形流转与异步重叠机制</span></span>
+<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a>为了解决注意力跨卡计算的问题，UC Berkeley 提出了经典的 **Ring Attention（环形注意力）** 算法。其核心思想是：**让局部 Query 始终固定在本地显存，而让 Key/Value 块沿着逻辑通信环异步流转轮巡**。</span>
+<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a>如**图 8-3** 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：</span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a>    participant GPU0 as GPU <span class="dv">0</span> (Q_0 固定)</span>
+<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a>    participant GPU1 as GPU <span class="dv">1</span> (Q_1 固定)</span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a>    participant P2P as 环形 P2P 异步通信 (KV 轮转)</span>
+<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a>    Note over GPU0,GPU1: Step <span class="dv">0</span>: 计算本地 Q_i 与 K_i, V_i 的注意力</span>
+<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a>    GPU0-&gt;&gt;P2P: 发送 K_0, V_0 ➔ GPU <span class="dv">1</span>，接收来自前驱的 KV</span>
+<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a>    GPU1-&gt;&gt;P2P: 发送 K_1, V_1 ➔ GPU <span class="dv">2</span>，接收来自前驱的 KV</span>
+<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a>    Note over GPU0,GPU1: Step <span class="dv">1</span>: 异步接收下一块 KV，同时计算当前重叠块注意力</span>
+<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a>    Note over GPU0,GPU1: 利用 Online Softmax 动态更新分母与局部输出，无需中间显存</span>
+<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 8-3：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**初始状态**：每个 Rank $r \in <span class="co">[</span><span class="ot">0, N_{\text{cp}}-1</span><span class="co">]</span>$ 均持有本地的子序列块 $Q_r, K_r, V_r$，形状均为 $(b, s_{\text{local}}, h)$。</span>
 <span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a></span>

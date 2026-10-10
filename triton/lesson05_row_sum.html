@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -581,8 +580,13 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在科学计算与深度学习中，跨维度规约（Reduction，如求和、均值、方差、Softmax 分母）是高频核心模式。对于矩阵 <span class="math inline">\(X \in \mathbb{R}^{M \times N}\)</span>，行求和操作（Row Sum）输出一个 <span class="math inline">\(M\)</span> 维列向量： <span class="math display">\[ y_i = \sum_{j=0}^{N-1} X_{i, j} \]</span> 传统 CUDA 实现中，行归约需要由一个 Thread Block 协作完成，开发者必须精细管理共享内存、多轮 <code>__syncthreads()</code> 同步壁垒以及 Warp Shuffle 洗牌指令。 而在 Triton 中，规约通过内置原语 <code>tl.sum</code> 在 Program 块内对张量直接完成。 本课解决的核心工程问题是：<strong>当矩阵列数 <span class="math inline">\(N\)</span> 不是 2 的幂次时，如何通过填充“代数单位元（Algebraic Identity Element）”，让 SIMD 折半树状规约硬件与任意物理形状完美解耦，保证计算的绝对正确性</strong>。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>行归约的代数保护与片上树状折半数据通路如图 5-1 与图 5-2 所示：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -619,14 +623,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 5-2：行归约内部树状累加与写回流程</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在科学计算与深度学习中，跨维度规约（Reduction，如求和、均值、方差、Softmax 分母）是高频核心模式。对于矩阵 <span class="math inline">\(X \in \mathbb{R}^{M \times N}\)</span>，行求和操作（Row Sum）输出一个 <span class="math inline">\(M\)</span> 维列向量： <span class="math display">\[ y_i = \sum_{j=0}^{N-1} X_{i, j} \]</span> 传统 CUDA 实现中，行归约需要由一个 Thread Block 协作完成，开发者必须精细管理共享内存、多轮 <code>__syncthreads()</code> 同步壁垒以及 Warp Shuffle 洗牌指令。 而在 Triton 中，规约通过内置原语 <code>tl.sum</code> 在 Program 块内对张量直接完成。 本课解决的核心工程问题是：<strong>当矩阵列数 <span class="math inline">\(N\)</span> 不是 2 的幂次时，如何通过填充“代数单位元（Algebraic Identity Element）”，让 SIMD 折半树状规约硬件与任意物理形状完美解耦，保证计算的绝对正确性</strong>。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>行归约的代数保护与片上树状折半数据通路如图 5-1 与图 5-2 所示：</p>
 <ol type="1">
 <li><p><strong>行绑定与 2 的幂次对齐</strong>： 网格以行维度划分 <code>grid = (M,)</code>，Program <span class="math inline">\(i\)</span> 绑定矩阵第 <span class="math inline">\(i\)</span> 行。由于硬件 SIMD/Tensor 树状折半规约算法严格依赖 2 的幂次分治架构，Triton 要求张量块大小必须为 2 的幂：<code>BLOCK = triton.next_power_of_2(N)</code>。</p></li>
 <li><p><strong>带单位元的安全合并加载（Identity-padded Masked Load）</strong>： 构造谓词 <code>mask = cols &lt; N</code>。在执行 <code>tl.load</code> 时，必须显式指定 <code>other=0.0</code>： <code>values = tl.load(x + row * stride_m + cols, mask=mask, other=0.0)</code> 对于有效索引 <span class="math inline">\(j &lt; N\)</span>，加载真实的显存数值；对于超出 <span class="math inline">\(N\)</span> 的 Padding lanes（数量为 <span class="math inline">\(\text{BLOCK} - N\)</span>），硬件直接将其在寄存器中初始化为加法单位元 <span class="math inline">\(0.0\)</span>。</p></li>
@@ -671,7 +667,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 masked load 的 other。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="6e36fc12" class="cell" data-course_role="exercise">
+<div id="50da1ee0" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -743,7 +739,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="0461ce47" class="cell" data-course_role="solution">
+<div id="0aa9d4ee" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1306,35 +1302,35 @@ window.Quarto = {
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    RowData[<span class="ot">"</span><span class="st">矩阵第 row 行数据</span><span class="ot">"</span>] --&gt; MaskPadding[<span class="ot">"</span><span class="st">超出真实列数 N 的元素填充单位元 0.0 (加法零元)</span><span class="ot">"</span>]</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>    MaskPadding --&gt; TLSum[<span class="ot">"</span><span class="st">tl.sum(block, axis=1) 沿列求和</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>    TLSum --&gt; Scalar[<span class="ot">"</span><span class="st">输出当前行总和标量</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 5-1：Triton 行归约结构与 Padding 加法单位元保护图<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>在科学计算与深度学习中，跨维度规约（Reduction，如求和、均值、方差、Softmax 分母）是高频核心模式。对于矩阵 $X \in \mathbb{R}^{M \times N}$，行求和操作（Row Sum）输出一个 $M$ 维列向量：</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>$$ y_i = \sum_{j=0}^{N-1} X_{i, j} $$</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>传统 CUDA 实现中，行归约需要由一个 Thread Block 协作完成，开发者必须精细管理共享内存、多轮 <span class="in">`__syncthreads()`</span> 同步壁垒以及 Warp Shuffle 洗牌指令。</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>而在 Triton 中，规约通过内置原语 <span class="in">`tl.sum`</span> 在 Program 块内对张量直接完成。</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**当矩阵列数 $N$ 不是 2 的幂次时，如何通过填充“代数单位元（Algebraic Identity Element）”，让 SIMD 折半树状规约硬件与任意物理形状完美解耦，保证计算的绝对正确性**。</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>行归约的代数保护与片上树状折半数据通路如图 5-1 与图 5-2 所示：</span>
 <span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    Prog[<span class="ot">"</span><span class="st">Program 绑定矩阵单行</span><span class="ot">"</span>] --&gt; Load[<span class="ot">"</span><span class="st">分块加载行内数据并应用掩码</span><span class="ot">"</span>]</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    Load --&gt; Tree[<span class="ot">"</span><span class="st">Triton 片上折半树状规约</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Tree --&gt; Store[<span class="ot">"</span><span class="st">单值写回输出向量 out[row]</span><span class="ot">"</span>]</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>    RowData[<span class="ot">"</span><span class="st">矩阵第 row 行数据</span><span class="ot">"</span>] --&gt; MaskPadding[<span class="ot">"</span><span class="st">超出真实列数 N 的元素填充单位元 0.0 (加法零元)</span><span class="ot">"</span>]</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    MaskPadding --&gt; TLSum[<span class="ot">"</span><span class="st">tl.sum(block, axis=1) 沿列求和</span><span class="ot">"</span>]</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    TLSum --&gt; Scalar[<span class="ot">"</span><span class="st">输出当前行总和标量</span><span class="ot">"</span>]</span>
 <span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 5-2：行归约内部树状累加与写回流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 5-1：Triton 行归约结构与 Padding 加法单位元保护图<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>在科学计算与深度学习中，跨维度规约（Reduction，如求和、均值、方差、Softmax 分母）是高频核心模式。对于矩阵 $X \in \mathbb{R}^{M \times N}$，行求和操作（Row Sum）输出一个 $M$ 维列向量：</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>$$ y_i = \sum_{j=0}^{N-1} X_{i, j} $$</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>传统 CUDA 实现中，行归约需要由一个 Thread Block 协作完成，开发者必须精细管理共享内存、多轮 <span class="in">`__syncthreads()`</span> 同步壁垒以及 Warp Shuffle 洗牌指令。</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>而在 Triton 中，规约通过内置原语 <span class="in">`tl.sum`</span> 在 Program 块内对张量直接完成。</span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**当矩阵列数 $N$ 不是 2 的幂次时，如何通过填充“代数单位元（Algebraic Identity Element）”，让 SIMD 折半树状规约硬件与任意物理形状完美解耦，保证计算的绝对正确性**。</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    Prog[<span class="ot">"</span><span class="st">Program 绑定矩阵单行</span><span class="ot">"</span>] --&gt; Load[<span class="ot">"</span><span class="st">分块加载行内数据并应用掩码</span><span class="ot">"</span>]</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>    Load --&gt; Tree[<span class="ot">"</span><span class="st">Triton 片上折半树状规约</span><span class="ot">"</span>]</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    Tree --&gt; Store[<span class="ot">"</span><span class="st">单值写回输出向量 out[row]</span><span class="ot">"</span>]</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 5-2：行归约内部树状累加与写回流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>行归约的代数保护与片上树状折半数据通路如图 5-1 与图 5-2 所示：</span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**行绑定与 2 的幂次对齐**：</span>
 <span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a>   网格以行维度划分 <span class="in">`grid = (M,)`</span>，Program $i$ 绑定矩阵第 $i$ 行。由于硬件 SIMD/Tensor 树状折半规约算法严格依赖 2 的幂次分治架构，Triton 要求张量块大小必须为 2 的幂：<span class="in">`BLOCK = triton.next_power_of_2(N)`</span>。</span>

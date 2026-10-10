@@ -475,7 +475,6 @@ window.Quarto = {
   <li><a href="#与既有六条主线的边界" id="toc-与既有六条主线的边界" class="nav-link" data-scroll-target="#与既有六条主线的边界">与既有六条主线的边界</a></li>
   <li><a href="#核心概念与运行机制" id="toc-核心概念与运行机制" class="nav-link" data-scroll-target="#核心概念与运行机制">核心概念与运行机制</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -538,8 +537,22 @@ window.Quarto = {
 </section>
 <section id="核心概念与运行机制" class="level2">
 <h2 class="anchored" data-anchor-id="核心概念与运行机制">核心概念与运行机制</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在单机多卡与大规模分布式集群中，模型并行（TP/PP）、数据并行（DDP/FSDP）以及专家并行（EP）的实现依赖于多进程间高带宽、确定性的协同通信。然而，裸套接字（Raw Sockets）或简单点对点通信无法支撑复杂的多机拓扑协同。</p>
+<p><strong>分布式运行时（Distributed Runtime / ProcessGroup）</strong>构建了跨进程、跨机器的分布式契约与拓扑抽象：</p>
+<ol type="1">
+<li><p><strong>Rendezvous（会合发现服务）</strong>：解决<strong>“动态节点如何发现彼此外界网络地址并构建统一拓扑视图”</strong>的问题。在集群启动阶段，各 Rank 进程通过中心化的键值存储（如 PyTorch 原生 <code>TCPStore</code> 或 <code>etcd</code>），向主节点（Master Rank 0）注册本节点 IP 与端口，协同交换 <code>ncclUniqueId</code>，完成全局 <code>World Size</code>、<code>Rank ID</code> 与物理机节点的拓扑锚定；</p></li>
+<li><p><strong>ProcessGroup（进程组管理）</strong>：在底层构建通信上下文（如 NVIDIA NCCL 的 <code>ncclComm_t</code>），管理 Ring-AllReduce / Tree-AllReduce 的双向物理连接；</p></li>
+<li><p><strong>Collective Contract（集合通信契约）</strong>：集合通信并非单向消息传递，而是一组严格要求组内所有 Rank <strong>全员参与、顺序对齐、参数同态</strong>的分布式强约束协议。</p></li>
+</ol>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>集合通信从初始化握手到底层异步执行历经严密的控制面与数据面解耦（如图 3-1 与 图 3-2 所示）：</p>
+<ol type="1">
+<li><strong>Rendezvous 握手与 Communicator 实例化（图 3-1）</strong>：</li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -567,6 +580,14 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 3-1：分布式训练集合通信初始化与 ProcessGroup 物理拓扑映射</em>
 </p>
+<ul>
+<li>当调用 <code>dist.init_process_group(backend="nccl", ...)</code> 时，Rank 0 调用 NCCL 底层 API <code>ncclGetUniqueId</code> 生成一个全局唯一的 128 字节通信握手标识符；</li>
+<li>Rank 0 将该 ID 写入 <code>TCPStore</code>，其余所有 Rank 从 <code>TCPStore</code> 阻塞式拉取该 ID；</li>
+<li>各 Rank 依据此 ID 在各卡调用 <code>ncclCommInitRank</code>，完成跨卡 NVLink 拓扑探测、跨节点 InfiniBand/RoCE 队列对（QP）交换与 Ring/Tree 通信环拓扑构筑，生成本 Rank 绑定的 <code>ncclComm_t</code> 句柄。</li>
+</ul>
+<ol start="2" type="1">
+<li><strong>非阻塞异步发射与流同步契约（图 3-2）</strong>：</li>
+</ol>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -588,35 +609,12 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 3-2：异步集合通信下发、流同步契约与句柄等待流程</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在单机多卡与大规模分布式集群中，模型并行（TP/PP）、数据并行（DDP/FSDP）以及专家并行（EP）的实现依赖于多进程间高带宽、确定性的协同通信。然而，裸套接字（Raw Sockets）或简单点对点通信无法支撑复杂的多机拓扑协同。</p>
-<p><strong>分布式运行时（Distributed Runtime / ProcessGroup）</strong>构建了跨进程、跨机器的分布式契约与拓扑抽象：</p>
-<ol type="1">
-<li><p><strong>Rendezvous（会合发现服务）</strong>：解决<strong>“动态节点如何发现彼此外界网络地址并构建统一拓扑视图”</strong>的问题。在集群启动阶段，各 Rank 进程通过中心化的键值存储（如 PyTorch 原生 <code>TCPStore</code> 或 <code>etcd</code>），向主节点（Master Rank 0）注册本节点 IP 与端口，协同交换 <code>ncclUniqueId</code>，完成全局 <code>World Size</code>、<code>Rank ID</code> 与物理机节点的拓扑锚定；</p></li>
-<li><p><strong>ProcessGroup（进程组管理）</strong>：在底层构建通信上下文（如 NVIDIA NCCL 的 <code>ncclComm_t</code>），管理 Ring-AllReduce / Tree-AllReduce 的双向物理连接；</p></li>
-<li><p><strong>Collective Contract（集合通信契约）</strong>：集合通信并非单向消息传递，而是一组严格要求组内所有 Rank <strong>全员参与、顺序对齐、参数同态</strong>的分布式强约束协议。</p></li>
-</ol>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>集合通信从初始化握手到底层异步执行历经严密的控制面与数据面解耦（如图 3-1 与 图 3-2 所示）：</p>
-<ol type="1">
-<li><strong>Rendezvous 握手与 Communicator 实例化（图 3-1）</strong>：
-<ul>
-<li>当调用 <code>dist.init_process_group(backend="nccl", ...)</code> 时，Rank 0 调用 NCCL 底层 API <code>ncclGetUniqueId</code> 生成一个全局唯一的 128 字节通信握手标识符；</li>
-<li>Rank 0 将该 ID 写入 <code>TCPStore</code>，其余所有 Rank 从 <code>TCPStore</code> 阻塞式拉取该 ID；</li>
-<li>各 Rank 依据此 ID 在各卡调用 <code>ncclCommInitRank</code>，完成跨卡 NVLink 拓扑探测、跨节点 InfiniBand/RoCE 队列对（QP）交换与 Ring/Tree 通信环拓扑构筑，生成本 Rank 绑定的 <code>ncclComm_t</code> 句柄。</li>
-</ul></li>
-<li><strong>非阻塞异步发射与流同步契约（图 3-2）</strong>：
 <ul>
 <li>如图 3-2 所示，当在 Python 中调用 <code>dist.all_reduce(tensor, async_op=True)</code> 时，CPU 线程绝不阻塞等待跨卡通信完成，而是迅速向专用的 CUDA 通信 Stream（Communication Stream）压入一个底层 NCCL 算子；</li>
 <li>该函数立即返回一个 <code>Work</code> 异步句柄；</li>
 <li>主计算流（Compute Stream）若需要读取 AllReduce 之后的张量，必须通过 CUDA Event 建立硬件级流间同步依赖（或在 CPU 侧显式调用 <code>work.wait()</code>）；</li>
 <li>GPU 硬件在后台通过 NVLink 直接内存访问（Peer-to-Peer DMA）或 RDMA 搬运数据，实现计算与通信的极致重叠（Overlap）。</li>
-</ul></li>
-</ol>
+</ul>
 </section>
 <section id="正确性条件与常见误区" class="level3">
 <h3 class="anchored" data-anchor-id="正确性条件与常见误区">3. 正确性条件与常见误区</h3>
@@ -678,7 +676,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐 collective 合同校验；每个调用为 <code>(op,count,dtype,sequence)</code>。</p>
 <p>只能修改 <code>TODO</code>/<code>______</code> 位置，不得删除断言或放宽通过条件。</p>
-<div id="d2e6b2ef" class="cell" data-course_role="exercise">
+<div id="4f945e42" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> validate_collective(calls_by_rank):</span>
@@ -736,7 +734,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先独立完成。核对后请改变一个规模或故障条件重新推演。</p>
-<div id="d3f5591f" class="cell" data-course_role="solution">
+<div id="40688142" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> validate_collective(calls_by_rank):</span>
@@ -1289,58 +1287,58 @@ window.Quarto = {
 <span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念与运行机制</span></span>
 <span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>    subgraph Rendezvous[<span class="ot">"</span><span class="st">Rendezvous 发现中心 (TCPStore / etcd)</span><span class="ot">"</span>]</span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>        Store[<span class="ot">"</span><span class="st">全局键值协调: Master IP:Port, World Size=8</span><span class="ot">"</span>]</span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>    subgraph Cluster[<span class="ot">"</span><span class="st">分布式进程拓扑</span><span class="ot">"</span>]</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>        R0[<span class="ot">"</span><span class="st">Rank 0 (Local 0)</span><span class="ot">"</span>] &lt;--&gt; Store</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>        R1[<span class="ot">"</span><span class="st">Rank 1 (Local 1)</span><span class="ot">"</span>] &lt;--&gt; Store</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>        R7[<span class="ot">"</span><span class="st">Rank 7 (Local 7)</span><span class="ot">"</span>] &lt;--&gt; Store</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>    subgraph Backends[<span class="ot">"</span><span class="st">通信后端 (ProcessGroupNCCL)</span><span class="ot">"</span>]</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>        Comm[<span class="ot">"</span><span class="st">NCCL Communicator (ncclComm_t 唯一定位环与通信拓扑)</span><span class="ot">"</span>]</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>    Cluster --&gt; Backends</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：分布式训练集合通信初始化与 ProcessGroup 物理拓扑映射<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    Host[<span class="ot">"</span><span class="st">Python 发起 dist.all_reduce(tensor)</span><span class="ot">"</span>] --&gt; Enqueue[<span class="ot">"</span><span class="st">向底层 CUDA 通信 Stream 压入 NCCL 内核</span><span class="ot">"</span>]</span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>    Enqueue --&gt; ReturnWork[<span class="ot">"</span><span class="st">立即返回异步句柄 (Work Handle) 不阻塞 CPU</span><span class="ot">"</span>]</span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>    ReturnWork --&gt; ComputeStream[<span class="ot">"</span><span class="st">计算 Stream 插入 Event 依赖或调用 work.wait()</span><span class="ot">"</span>]</span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    ComputeStream --&gt; SyncCheck{<span class="ot">"</span><span class="st">GPU 通信是否物理完成?</span><span class="ot">"</span>}</span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    SyncCheck --&gt;|完成| Next[<span class="ot">"</span><span class="st">安全使用 AllReduce 汇总后张量结果</span><span class="ot">"</span>]</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    SyncCheck --&gt;|等待| GPUWait[<span class="ot">"</span><span class="st">GPU 硬件执行跨卡数据交换与规约</span><span class="ot">"</span>]</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：异步集合通信下发、流同步契约与句柄等待流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a>在单机多卡与大规模分布式集群中，模型并行（TP/PP）、数据并行（DDP/FSDP）以及专家并行（EP）的实现依赖于多进程间高带宽、确定性的协同通信。然而，裸套接字（Raw Sockets）或简单点对点通信无法支撑复杂的多机拓扑协同。</span>
-<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>**分布式运行时（Distributed Runtime / ProcessGroup）**构建了跨进程、跨机器的分布式契约与拓扑抽象：</span>
-<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Rendezvous（会合发现服务）**：解决**“动态节点如何发现彼此外界网络地址并构建统一拓扑视图”**的问题。在集群启动阶段，各 Rank 进程通过中心化的键值存储（如 PyTorch 原生 <span class="in">`TCPStore`</span> 或 <span class="in">`etcd`</span>），向主节点（Master Rank 0）注册本节点 IP 与端口，协同交换 <span class="in">`ncclUniqueId`</span>，完成全局 <span class="in">`World Size`</span>、<span class="in">`Rank ID`</span> 与物理机节点的拓扑锚定；</span>
-<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**ProcessGroup（进程组管理）**：在底层构建通信上下文（如 NVIDIA NCCL 的 <span class="in">`ncclComm_t`</span>），管理 Ring-AllReduce / Tree-AllReduce 的双向物理连接；</span>
-<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**Collective Contract（集合通信契约）**：集合通信并非单向消息传递，而是一组严格要求组内所有 Rank **全员参与、顺序对齐、参数同态**的分布式强约束协议。</span>
-<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
-<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>集合通信从初始化握手到底层异步执行历经严密的控制面与数据面解耦（如图 3-1 与 图 3-2 所示）：</span>
-<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Rendezvous 握手与 Communicator 实例化（图 3-1）**：</span>
-<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当调用 <span class="in">`dist.init_process_group(backend="nccl", ...)`</span> 时，Rank 0 调用 NCCL 底层 API <span class="in">`ncclGetUniqueId`</span> 生成一个全局唯一的 128 字节通信握手标识符；</span>
-<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Rank 0 将该 ID 写入 <span class="in">`TCPStore`</span>，其余所有 Rank 从 <span class="in">`TCPStore`</span> 阻塞式拉取该 ID；</span>
-<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>各 Rank 依据此 ID 在各卡调用 <span class="in">`ncclCommInitRank`</span>，完成跨卡 NVLink 拓扑探测、跨节点 InfiniBand/RoCE 队列对（QP）交换与 Ring/Tree 通信环拓扑构筑，生成本 Rank 绑定的 <span class="in">`ncclComm_t`</span> 句柄。</span>
-<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**非阻塞异步发射与流同步契约（图 3-2）**：</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>在单机多卡与大规模分布式集群中，模型并行（TP/PP）、数据并行（DDP/FSDP）以及专家并行（EP）的实现依赖于多进程间高带宽、确定性的协同通信。然而，裸套接字（Raw Sockets）或简单点对点通信无法支撑复杂的多机拓扑协同。</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>**分布式运行时（Distributed Runtime / ProcessGroup）**构建了跨进程、跨机器的分布式契约与拓扑抽象：</span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Rendezvous（会合发现服务）**：解决**“动态节点如何发现彼此外界网络地址并构建统一拓扑视图”**的问题。在集群启动阶段，各 Rank 进程通过中心化的键值存储（如 PyTorch 原生 <span class="in">`TCPStore`</span> 或 <span class="in">`etcd`</span>），向主节点（Master Rank 0）注册本节点 IP 与端口，协同交换 <span class="in">`ncclUniqueId`</span>，完成全局 <span class="in">`World Size`</span>、<span class="in">`Rank ID`</span> 与物理机节点的拓扑锚定；</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**ProcessGroup（进程组管理）**：在底层构建通信上下文（如 NVIDIA NCCL 的 <span class="in">`ncclComm_t`</span>），管理 Ring-AllReduce / Tree-AllReduce 的双向物理连接；</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**Collective Contract（集合通信契约）**：集合通信并非单向消息传递，而是一组严格要求组内所有 Rank **全员参与、顺序对齐、参数同态**的分布式强约束协议。</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>集合通信从初始化握手到底层异步执行历经严密的控制面与数据面解耦（如图 3-1 与 图 3-2 所示）：</span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Rendezvous 握手与 Communicator 实例化（图 3-1）**：</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    subgraph Rendezvous[<span class="ot">"</span><span class="st">Rendezvous 发现中心 (TCPStore / etcd)</span><span class="ot">"</span>]</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>        Store[<span class="ot">"</span><span class="st">全局键值协调: Master IP:Port, World Size=8</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    subgraph Cluster[<span class="ot">"</span><span class="st">分布式进程拓扑</span><span class="ot">"</span>]</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>        R0[<span class="ot">"</span><span class="st">Rank 0 (Local 0)</span><span class="ot">"</span>] &lt;--&gt; Store</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>        R1[<span class="ot">"</span><span class="st">Rank 1 (Local 1)</span><span class="ot">"</span>] &lt;--&gt; Store</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>        R7[<span class="ot">"</span><span class="st">Rank 7 (Local 7)</span><span class="ot">"</span>] &lt;--&gt; Store</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>    subgraph Backends[<span class="ot">"</span><span class="st">通信后端 (ProcessGroupNCCL)</span><span class="ot">"</span>]</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>        Comm[<span class="ot">"</span><span class="st">NCCL Communicator (ncclComm_t 唯一定位环与通信拓扑)</span><span class="ot">"</span>]</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    Cluster --&gt; Backends</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-1：分布式训练集合通信初始化与 ProcessGroup 物理拓扑映射<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>当调用 <span class="in">`dist.init_process_group(backend="nccl", ...)`</span> 时，Rank 0 调用 NCCL 底层 API <span class="in">`ncclGetUniqueId`</span> 生成一个全局唯一的 128 字节通信握手标识符；</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>Rank 0 将该 ID 写入 <span class="in">`TCPStore`</span>，其余所有 Rank 从 <span class="in">`TCPStore`</span> 阻塞式拉取该 ID；</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>各 Rank 依据此 ID 在各卡调用 <span class="in">`ncclCommInitRank`</span>，完成跨卡 NVLink 拓扑探测、跨节点 InfiniBand/RoCE 队列对（QP）交换与 Ring/Tree 通信环拓扑构筑，生成本 Rank 绑定的 <span class="in">`ncclComm_t`</span> 句柄。</span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**非阻塞异步发射与流同步契约（图 3-2）**：</span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-71"><a href="#cb3-71" aria-hidden="true" tabindex="-1"></a>    Host[<span class="ot">"</span><span class="st">Python 发起 dist.all_reduce(tensor)</span><span class="ot">"</span>] --&gt; Enqueue[<span class="ot">"</span><span class="st">向底层 CUDA 通信 Stream 压入 NCCL 内核</span><span class="ot">"</span>]</span>
+<span id="cb3-72"><a href="#cb3-72" aria-hidden="true" tabindex="-1"></a>    Enqueue --&gt; ReturnWork[<span class="ot">"</span><span class="st">立即返回异步句柄 (Work Handle) 不阻塞 CPU</span><span class="ot">"</span>]</span>
+<span id="cb3-73"><a href="#cb3-73" aria-hidden="true" tabindex="-1"></a>    ReturnWork --&gt; ComputeStream[<span class="ot">"</span><span class="st">计算 Stream 插入 Event 依赖或调用 work.wait()</span><span class="ot">"</span>]</span>
+<span id="cb3-74"><a href="#cb3-74" aria-hidden="true" tabindex="-1"></a>    ComputeStream --&gt; SyncCheck{<span class="ot">"</span><span class="st">GPU 通信是否物理完成?</span><span class="ot">"</span>}</span>
+<span id="cb3-75"><a href="#cb3-75" aria-hidden="true" tabindex="-1"></a>    SyncCheck --&gt;|完成| Next[<span class="ot">"</span><span class="st">安全使用 AllReduce 汇总后张量结果</span><span class="ot">"</span>]</span>
+<span id="cb3-76"><a href="#cb3-76" aria-hidden="true" tabindex="-1"></a>    SyncCheck --&gt;|等待| GPUWait[<span class="ot">"</span><span class="st">GPU 硬件执行跨卡数据交换与规约</span><span class="ot">"</span>]</span>
+<span id="cb3-77"><a href="#cb3-77" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-78"><a href="#cb3-78" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 3-2：异步集合通信下发、流同步契约与句柄等待流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-79"><a href="#cb3-79" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-80"><a href="#cb3-80" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>如图 3-2 所示，当在 Python 中调用 <span class="in">`dist.all_reduce(tensor, async_op=True)`</span> 时，CPU 线程绝不阻塞等待跨卡通信完成，而是迅速向专用的 CUDA 通信 Stream（Communication Stream）压入一个底层 NCCL 算子；</span>
 <span id="cb3-81"><a href="#cb3-81" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>该函数立即返回一个 <span class="in">`Work`</span> 异步句柄；</span>
 <span id="cb3-82"><a href="#cb3-82" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>主计算流（Compute Stream）若需要读取 AllReduce 之后的张量，必须通过 CUDA Event 建立硬件级流间同步依赖（或在 CPU 侧显式调用 <span class="in">`work.wait()`</span>）；</span>

@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#本课目标" id="toc-本课目标" class="nav-link active" data-scroll-target="#本课目标">本课目标</a></li>
   <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#数据并行dpddp的数学本质与并行语义" id="toc-数据并行dpddp的数学本质与并行语义" class="nav-link" data-scroll-target="#数据并行dpddp的数学本质与并行语义">1. 数据并行（DP/DDP）的数学本质与并行语义</a></li>
   <li><a href="#朴素实现的瓶颈计算与通信完全串行" id="toc-朴素实现的瓶颈计算与通信完全串行" class="nav-link" data-scroll-target="#朴素实现的瓶颈计算与通信完全串行">2. 朴素实现的瓶颈：计算与通信完全串行</a></li>
   <li><a href="#优化一梯度后向钩子与通信隐藏post-accumulate-grad-hook" id="toc-优化一梯度后向钩子与通信隐藏post-accumulate-grad-hook" class="nav-link" data-scroll-target="#优化一梯度后向钩子与通信隐藏post-accumulate-grad-hook">3. 优化一：梯度后向钩子与通信隐藏（Post-Accumulate Grad Hook）</a></li>
@@ -594,8 +593,9 @@ window.Quarto = {
 </section>
 <section id="核心概念" class="level2">
 <h2 class="anchored" data-anchor-id="核心概念">核心概念</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="数据并行dpddp的数学本质与并行语义" class="level3">
+<h3 class="anchored" data-anchor-id="数据并行dpddp的数学本质与并行语义">1. 数据并行（DP/DDP）的数学本质与并行语义</h3>
+<p>数据并行（Data Parallelism）在数学本质上是<strong>空间维度展开的梯度累积</strong>。如<strong>图 4-1 与图 4-2</strong> 所示，整个集群拥有 <span class="math inline">\(N\)</span> 个并行工作进程（Rank 0 至 Rank <span class="math inline">\(N-1\)</span>），每个 GPU 显存内都完整存放了一份同构的模型参数副本 <span class="math inline">\(W\)</span>：</p>
 <div class="img-card">
 <img src="assets/figs/train_ddp_ring_allreduce_math.png" class="img-fluid" style="width:95.0%">
 <p class="caption">
@@ -630,38 +630,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 4-2：数据并行（DDP）同构副本前向与全量梯度归约架构</em>
 </p>
-<div class="cell" data-layout-align="default">
-<div class="cell-output-display">
-<div>
-<p></p><figure class="figure"><p></p>
-<div>
-<pre class="mermaid mermaid-js">sequenceDiagram
-    autonumber
-    participant B as 反向求导 (Backward Compute)
-    participant Bucket as 梯度分桶 (Bucket 0 / Bucket 1)
-    participant NCCL as 异步通信流 (Ring AllReduce)
-    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线
-    B-&gt;&gt;Bucket: 逐层反向求导 (Layer N)
-    Bucket--&gt;&gt;Bucket: 梯度写入，达到阈值 (如 25MB)
-    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket 0)
-    B-&gt;&gt;Bucket: 继续求导上一层 (Layer N-1, N-2)
-    Note right of NCCL: 环形通信与计算并行执行
-    NCCL--&gt;&gt;NCCL: Bucket 0 同步完成
-    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket 1)
-    NCCL--&gt;&gt;NCCL: 全部 Bucket 同步完毕
-</pre>
-</div>
-<p></p></figure><p></p>
-</div>
-</div>
-</div>
-<p class="caption" align="center">
-<em>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em>
-</p>
-</section>
-<section id="数据并行dpddp的数学本质与并行语义" class="level3">
-<h3 class="anchored" data-anchor-id="数据并行dpddp的数学本质与并行语义">1. 数据并行（DP/DDP）的数学本质与并行语义</h3>
-<p>数据并行（Data Parallelism）在数学本质上是<strong>空间维度展开的梯度累积</strong>。如<strong>图 4-1 与图 4-2</strong> 所示，整个集群拥有 <span class="math inline">\(N\)</span> 个并行工作进程（Rank 0 至 Rank <span class="math inline">\(N-1\)</span>），每个 GPU 显存内都完整存放了一份同构的模型参数副本 <span class="math inline">\(W\)</span>。</p>
 <p>当一个全局 Batch（Global Batch Size, GBS）的数据输入系统时，各 Rank 分别取走互不重叠的数据子集（Micro Batch, MBS）。由于各 Rank 上的前向传播与反向传播计算完全基于各自的本地数据进行，彼此之间没有任何数据依赖，因此计算阶段具备天然的完全并行性。</p>
 <p>然而，优化器更新全局参数时，必须基于全局样本的真实平均梯度。设 <span class="math inline">\(\text{GBS} = \text{MBS} \times \text{grad\_accum} \times \text{DP}\)</span>，全局目标损失对参数 <span class="math inline">\(\theta\)</span> 的梯度定义为：</p>
 <p><span class="math display">\[\nabla_\theta \mathcal{L}_{\text{global}} = \frac{1}{\text{GBS}} \sum_{i=1}^{\text{GBS}} \nabla_\theta \ell(x_i; \theta) = \frac{1}{\text{DP}} \sum_{r=0}^{\text{DP}-1} \left( \frac{1}{\text{MBS} \times \text{grad\_accum}} \sum_{m=1}^{\text{grad\_accum}} \sum_{j=1}^{\text{MBS}} \nabla_\theta \ell(x_{r, m, j}; \theta) \right)\]</span></p>
@@ -691,7 +659,35 @@ window.Quarto = {
 <li>此时，默认的计算流（<code>compute_stream</code>）无须任何等待，继续向前推进计算 Layer <span class="math inline">\(k-1\)</span>、Layer <span class="math inline">\(k-2\)</span> 的反向求导。</li>
 <li>只要浅层的反向计算耗时大于等于深层梯度的网络传输耗时，绝大部分通信时间就被反向计算完全掩盖（<span class="math inline">\(T_{\text{comm}}\)</span> 隐藏在 <span class="math inline">\(T_{\text{bwd}}\)</span> 背后）。</li>
 </ul>
-<p>如<strong>图 4-3</strong> 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行。</p>
+<p>如<strong>图 4-3</strong> 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行：</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant B as 反向求导 (Backward Compute)
+    participant Bucket as 梯度分桶 (Bucket 0 / Bucket 1)
+    participant NCCL as 异步通信流 (Ring AllReduce)
+    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线
+    B-&gt;&gt;Bucket: 逐层反向求导 (Layer N)
+    Bucket--&gt;&gt;Bucket: 梯度写入，达到阈值 (如 25MB)
+    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket 0)
+    B-&gt;&gt;Bucket: 继续求导上一层 (Layer N-1, N-2)
+    Note right of NCCL: 环形通信与计算并行执行
+    NCCL--&gt;&gt;NCCL: Bucket 0 同步完成
+    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket 1)
+    NCCL--&gt;&gt;NCCL: 全部 Bucket 同步完毕
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em>
+</p>
 </section>
 <section id="优化二梯度分桶策略gradient-bucketing" class="level3">
 <h3 class="anchored" data-anchor-id="优化二梯度分桶策略gradient-bucketing">4. 优化二：梯度分桶策略（Gradient Bucketing）</h3>
@@ -756,7 +752,7 @@ window.Quarto = {
 <section id="代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
 <p>补全以下程序：梯度分桶 + 朴素/重叠两种方案的完成时间模拟。</p>
-<div id="8151c13e" class="cell" data-course_role="exercise">
+<div id="fd33a0ff" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
@@ -906,7 +902,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
-<div id="1b65769e" class="cell" data-course_role="solution">
+<div id="e934a1c9" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> dataclasses <span class="im">import</span> dataclass</span>
@@ -1591,96 +1587,96 @@ window.Quarto = {
 <span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念</span></span>
 <span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 数据并行（DP/DDP）的数学本质与并行语义</span></span>
 <span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
-<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/train_ddp_ring_allreduce_math.png)</span>{width="95%"}</span>
-<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 4-1：数据并行（DDP）Ring AllReduce 通信拓扑、分块流动与代数复杂度数学证明<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a>:::</span>
-<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>    subgraph DataParallel[<span class="ot">"</span><span class="st">数据并行架构 (DDP)</span><span class="ot">"</span>]</span>
-<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>        Data[<span class="ot">"</span><span class="st">全局 Batch 训练数据</span><span class="ot">"</span>] --&gt; Split1[<span class="ot">"</span><span class="st">分片 0 (Rank 0)</span><span class="ot">"</span>]</span>
-<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a>        Data --&gt; Split2[<span class="ot">"</span><span class="st">分片 1 (Rank 1)</span><span class="ot">"</span>]</span>
-<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>        Data --&gt; Split3[<span class="ot">"</span><span class="st">分片 2 (Rank 2)</span><span class="ot">"</span>]</span>
-<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>        Split1 --&gt; Model0[<span class="ot">"</span><span class="st">卡 0: 模型完整副本 W</span><span class="ot">"</span>]</span>
-<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>        Split2 --&gt; Model1[<span class="ot">"</span><span class="st">卡 1: 模型完整副本 W</span><span class="ot">"</span>]</span>
-<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a>        Split3 --&gt; Model2[<span class="ot">"</span><span class="st">卡 2: 模型完整副本 W</span><span class="ot">"</span>]</span>
-<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a>        Model0 --&gt; Grad0[<span class="ot">"</span><span class="st">本地梯度 g_0</span><span class="ot">"</span>]</span>
-<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a>        Model1 --&gt; Grad1[<span class="ot">"</span><span class="st">本地梯度 g_1</span><span class="ot">"</span>]</span>
-<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a>        Model2 --&gt; Grad2[<span class="ot">"</span><span class="st">本地梯度 g_2</span><span class="ot">"</span>]</span>
-<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a>        Grad0 &amp; Grad1 &amp; Grad2 --&gt; AR[<span class="ot">"</span><span class="st">Ring AllReduce 全局同步</span><span class="ot">"</span>]</span>
-<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>        AR --&gt; Update[<span class="ot">"</span><span class="st">各卡同步更新同构参数 W_new</span><span class="ot">"</span>]</span>
-<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-2：数据并行（DDP）同构副本前向与全量梯度归约架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
-<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
-<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a>    participant B as 反向求导 (Backward Compute)</span>
-<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a>    participant Bucket as 梯度分桶 (Bucket <span class="dv">0</span> / Bucket <span class="dv">1</span>)</span>
-<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a>    participant NCCL as 异步通信流 (Ring AllReduce)</span>
-<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a>    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线</span>
-<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a>    B-&gt;&gt;Bucket: 逐层反向求导 (Layer N)</span>
-<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a>    Bucket--&gt;&gt;Bucket: 梯度写入，达到阈值 (如 <span class="dv">25</span>MB)</span>
-<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a>    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket <span class="dv">0</span>)</span>
-<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a>    B-&gt;&gt;Bucket: 继续求导上一层 (Layer N<span class="dv">-1</span>, N<span class="dv">-2</span>)</span>
-<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>    Note right of NCCL: 环形通信与计算并行执行</span>
-<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a>    NCCL--&gt;&gt;NCCL: Bucket <span class="dv">0</span> 同步完成</span>
-<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a>    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket <span class="dv">1</span>)</span>
-<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a>    NCCL--&gt;&gt;NCCL: 全部 Bucket 同步完毕</span>
-<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 数据并行（DP/DDP）的数学本质与并行语义</span></span>
-<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a>数据并行（Data Parallelism）在数学本质上是**空间维度展开的梯度累积**。如**图 4-1 与图 4-2** 所示，整个集群拥有 $N$ 个并行工作进程（Rank 0 至 Rank $N-1$），每个 GPU 显存内都完整存放了一份同构的模型参数副本 $W$。</span>
-<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a>当一个全局 Batch（Global Batch Size, GBS）的数据输入系统时，各 Rank 分别取走互不重叠的数据子集（Micro Batch, MBS）。由于各 Rank 上的前向传播与反向传播计算完全基于各自的本地数据进行，彼此之间没有任何数据依赖，因此计算阶段具备天然的完全并行性。</span>
-<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a>然而，优化器更新全局参数时，必须基于全局样本的真实平均梯度。设 $\text{GBS} = \text{MBS} \times \text{grad<span class="sc">\_</span>accum} \times \text{DP}$，全局目标损失对参数 $\theta$ 的梯度定义为：</span>
-<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a>$$\nabla_\theta \mathcal{L}_{\text{global}} = \frac{1}{\text{GBS}} \sum_{i=1}^{\text{GBS}} \nabla_\theta \ell(x_i; \theta) = \frac{1}{\text{DP}} \sum_{r=0}^{\text{DP}-1} \left( \frac{1}{\text{MBS} \times \text{grad\_accum}} \sum_{m=1}^{\text{grad\_accum}} \sum_{j=1}^{\text{MBS}} \nabla_\theta \ell(x_{r, m, j}; \theta) \right)$$</span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a>数据并行（Data Parallelism）在数学本质上是**空间维度展开的梯度累积**。如**图 4-1 与图 4-2** 所示，整个集群拥有 $N$ 个并行工作进程（Rank 0 至 Rank $N-1$），每个 GPU 显存内都完整存放了一份同构的模型参数副本 $W$：</span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a>::: {.img-card}</span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a><span class="al">![](assets/figs/train_ddp_ring_allreduce_math.png)</span>{width="95%"}</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="dt">&gt;</span>图 4-1：数据并行（DDP）Ring AllReduce 通信拓扑、分块流动与代数复杂度数学证明<span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a>    subgraph DataParallel[<span class="ot">"</span><span class="st">数据并行架构 (DDP)</span><span class="ot">"</span>]</span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>        Data[<span class="ot">"</span><span class="st">全局 Batch 训练数据</span><span class="ot">"</span>] --&gt; Split1[<span class="ot">"</span><span class="st">分片 0 (Rank 0)</span><span class="ot">"</span>]</span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>        Data --&gt; Split2[<span class="ot">"</span><span class="st">分片 1 (Rank 1)</span><span class="ot">"</span>]</span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>        Data --&gt; Split3[<span class="ot">"</span><span class="st">分片 2 (Rank 2)</span><span class="ot">"</span>]</span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a>        Split1 --&gt; Model0[<span class="ot">"</span><span class="st">卡 0: 模型完整副本 W</span><span class="ot">"</span>]</span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a>        Split2 --&gt; Model1[<span class="ot">"</span><span class="st">卡 1: 模型完整副本 W</span><span class="ot">"</span>]</span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a>        Split3 --&gt; Model2[<span class="ot">"</span><span class="st">卡 2: 模型完整副本 W</span><span class="ot">"</span>]</span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a>        Model0 --&gt; Grad0[<span class="ot">"</span><span class="st">本地梯度 g_0</span><span class="ot">"</span>]</span>
+<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a>        Model1 --&gt; Grad1[<span class="ot">"</span><span class="st">本地梯度 g_1</span><span class="ot">"</span>]</span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>        Model2 --&gt; Grad2[<span class="ot">"</span><span class="st">本地梯度 g_2</span><span class="ot">"</span>]</span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a>        Grad0 &amp; Grad1 &amp; Grad2 --&gt; AR[<span class="ot">"</span><span class="st">Ring AllReduce 全局同步</span><span class="ot">"</span>]</span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a>        AR --&gt; Update[<span class="ot">"</span><span class="st">各卡同步更新同构参数 W_new</span><span class="ot">"</span>]</span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-2：数据并行（DDP）同构副本前向与全量梯度归约架构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>当一个全局 Batch（Global Batch Size, GBS）的数据输入系统时，各 Rank 分别取走互不重叠的数据子集（Micro Batch, MBS）。由于各 Rank 上的前向传播与反向传播计算完全基于各自的本地数据进行，彼此之间没有任何数据依赖，因此计算阶段具备天然的完全并行性。</span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a>然而，优化器更新全局参数时，必须基于全局样本的真实平均梯度。设 $\text{GBS} = \text{MBS} \times \text{grad<span class="sc">\_</span>accum} \times \text{DP}$，全局目标损失对参数 $\theta$ 的梯度定义为：</span>
+<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a>$$\nabla_\theta \mathcal{L}_{\text{global}} = \frac{1}{\text{GBS}} \sum_{i=1}^{\text{GBS}} \nabla_\theta \ell(x_i; \theta) = \frac{1}{\text{DP}} \sum_{r=0}^{\text{DP}-1} \left( \frac{1}{\text{MBS} \times \text{grad\_accum}} \sum_{m=1}^{\text{grad\_accum}} \sum_{j=1}^{\text{MBS}} \nabla_\theta \ell(x_{r, m, j}; \theta) \right)$$</span>
+<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a>由此可见，每个 Rank 独立求导得到的仅是其本地分片的梯度之和。在执行优化器更新（<span class="in">`optimizer.step()`</span>）之前，必须通过第 3 课所讲的 **AllReduce（求和后归一化除以 DP 规模）** 算子，在所有参与数据并行的节点间同步梯度。这保证了所有副本在步结时取得完全相同的新权重 $W_{\text{new}}$。</span>
+<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a>训练规模的核心计量维度公式为：</span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a>$$\text{GBS} = \text{MBS} \times \text{grad<span class="sc">\_</span>accum} \times \text{DP}$$</span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>$$\text{Batch Tokens} = \text{GBS} \times \text{seq<span class="sc">\_</span>len} = \text{MBS} \times \text{grad<span class="sc">\_</span>accum} \times \text{DP} \times \text{seq<span class="sc">\_</span>len}$$</span>
+<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a>在维持全局 Batch 大小不变的前提下，增大 $\text{DP}$ 规模可以直接等比削减串行累积步数 $\text{grad<span class="sc">\_</span>accum}$，从而大幅缩短每步训练的墙钟时间。</span>
+<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 朴素实现的瓶颈：计算与通信完全串行</span></span>
+<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a>在最原始的 DistributedDataParallel 朴素实现中，执行流程遵循严格的阶段式阻塞顺序：</span>
+<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**前向与反向完全执行完毕**：所有网络层反向计算结束，显存中产生所有参数的梯度张量。</span>
+<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**一次性阻塞式 AllReduce**：启动 NCCL 通信，将全模型参数量 $\Psi$ 对应的全部梯度张量进行同步传输。</span>
+<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**优化器更新**：等待通信全部完成后，统一更新权重。</span>
+<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a>这种串行逻辑存在巨大的算力浪费。其一步总耗时为：</span>
+<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a>$$T_{\text{step}} = T_{\text{fwd}} + T_{\text{bwd}} + T_{\text{comm}} + T_{\text{opt}}$$</span>
 <span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a>由此可见，每个 Rank 独立求导得到的仅是其本地分片的梯度之和。在执行优化器更新（<span class="in">`optimizer.step()`</span>）之前，必须通过第 3 课所讲的 **AllReduce（求和后归一化除以 DP 规模）** 算子，在所有参与数据并行的节点间同步梯度。这保证了所有副本在步结时取得完全相同的新权重 $W_{\text{new}}$。</span>
+<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a>在 Ring AllReduce 模式下，传输全模型梯度的网络通信时间为 $T_{\text{comm}} \approx 2 \times \frac{\Psi \times \text{sizeof(dtype)}}{B_{\text{bus}}}$。在万卡集群或跨节点低速网络（如普通以太网）下，$T_{\text{comm}}$ 往往占据整步耗时的 30%~60%。在通信期间，数十万 TFLOPS 的 Tensor Core 处于完全空闲状态，吞吐极度低下。</span>
 <span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a>训练规模的核心计量维度公式为：</span>
-<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a>$$\text{GBS} = \text{MBS} \times \text{grad<span class="sc">\_</span>accum} \times \text{DP}$$</span>
-<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a>$$\text{Batch Tokens} = \text{GBS} \times \text{seq<span class="sc">\_</span>len} = \text{MBS} \times \text{grad<span class="sc">\_</span>accum} \times \text{DP} \times \text{seq<span class="sc">\_</span>len}$$</span>
+<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 优化一：梯度后向钩子与通信隐藏（Post-Accumulate Grad Hook）</span></span>
+<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a>要消除空闲等待，核心思路是实现**计算与通信的异步重叠（Overlap）**。</span>
 <span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a>在维持全局 Batch 大小不变的前提下，增大 $\text{DP}$ 规模可以直接等比削减串行累积步数 $\text{grad<span class="sc">\_</span>accum}$，从而大幅缩短每步训练的墙钟时间。</span>
+<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a>注意到自动微分（Autograd）的反向传播是反向有向无环图（DAG）的倒序执行过程：从最后一层（输出层 Layer $L$）逐层反向推进到第一层（输入层 Layer $1$）。当输出层 Layer $L$ 的参数求导计算完毕时，其梯度 $\nabla W_L$ 的数值已经完全确定，绝不会再受到后续浅层网络求导计算的影响。</span>
 <span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 朴素实现的瓶颈：计算与通信完全串行</span></span>
+<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a>现代 PyTorch DDP 内部通过为每个可训练参数注册底层回调（如 <span class="in">`register_post_accumulate_grad_hook`</span>）实现通信重叠：</span>
 <span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a>在最原始的 DistributedDataParallel 朴素实现中，执行流程遵循严格的阶段式阻塞顺序：</span>
-<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**前向与反向完全执行完毕**：所有网络层反向计算结束，显存中产生所有参数的梯度张量。</span>
-<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**一次性阻塞式 AllReduce**：启动 NCCL 通信，将全模型参数量 $\Psi$ 对应的全部梯度张量进行同步传输。</span>
-<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**优化器更新**：等待通信全部完成后，统一更新权重。</span>
-<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a>这种串行逻辑存在巨大的算力浪费。其一步总耗时为：</span>
-<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a>$$T_{\text{step}} = T_{\text{fwd}} + T_{\text{bwd}} + T_{\text{comm}} + T_{\text{opt}}$$</span>
-<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a>在 Ring AllReduce 模式下，传输全模型梯度的网络通信时间为 $T_{\text{comm}} \approx 2 \times \frac{\Psi \times \text{sizeof(dtype)}}{B_{\text{bus}}}$。在万卡集群或跨节点低速网络（如普通以太网）下，$T_{\text{comm}}$ 往往占据整步耗时的 30%~60%。在通信期间，数十万 TFLOPS 的 Tensor Core 处于完全空闲状态，吞吐极度低下。</span>
-<span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 优化一：梯度后向钩子与通信隐藏（Post-Accumulate Grad Hook）</span></span>
-<span id="cb5-112"><a href="#cb5-112" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-113"><a href="#cb5-113" aria-hidden="true" tabindex="-1"></a>要消除空闲等待，核心思路是实现**计算与通信的异步重叠（Overlap）**。</span>
-<span id="cb5-114"><a href="#cb5-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-115"><a href="#cb5-115" aria-hidden="true" tabindex="-1"></a>注意到自动微分（Autograd）的反向传播是反向有向无环图（DAG）的倒序执行过程：从最后一层（输出层 Layer $L$）逐层反向推进到第一层（输入层 Layer $1$）。当输出层 Layer $L$ 的参数求导计算完毕时，其梯度 $\nabla W_L$ 的数值已经完全确定，绝不会再受到后续浅层网络求导计算的影响。</span>
-<span id="cb5-116"><a href="#cb5-116" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-117"><a href="#cb5-117" aria-hidden="true" tabindex="-1"></a>现代 PyTorch DDP 内部通过为每个可训练参数注册底层回调（如 <span class="in">`register_post_accumulate_grad_hook`</span>）实现通信重叠：</span>
-<span id="cb5-118"><a href="#cb5-118" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-119"><a href="#cb5-119" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>当反向计算图推进并生成参数 $W_k$ 的梯度时，Hook 立即被触发。</span>
-<span id="cb5-120"><a href="#cb5-120" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>DDP 自动将该梯度的 AllReduce 异步投递到独立的 CUDA 通信流（<span class="in">`nccl_stream`</span>）中执行。</span>
-<span id="cb5-121"><a href="#cb5-121" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>此时，默认的计算流（<span class="in">`compute_stream`</span>）无须任何等待，继续向前推进计算 Layer $k-1$、Layer $k-2$ 的反向求导。</span>
-<span id="cb5-122"><a href="#cb5-122" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>只要浅层的反向计算耗时大于等于深层梯度的网络传输耗时，绝大部分通信时间就被反向计算完全掩盖（$T_{\text{comm}}$ 隐藏在 $T_{\text{bwd}}$ 背后）。</span>
-<span id="cb5-123"><a href="#cb5-123" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-124"><a href="#cb5-124" aria-hidden="true" tabindex="-1"></a>如**图 4-3** 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行。</span>
+<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>当反向计算图推进并生成参数 $W_k$ 的梯度时，Hook 立即被触发。</span>
+<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>DDP 自动将该梯度的 AllReduce 异步投递到独立的 CUDA 通信流（<span class="in">`nccl_stream`</span>）中执行。</span>
+<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>此时，默认的计算流（<span class="in">`compute_stream`</span>）无须任何等待，继续向前推进计算 Layer $k-1$、Layer $k-2$ 的反向求导。</span>
+<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>只要浅层的反向计算耗时大于等于深层梯度的网络传输耗时，绝大部分通信时间就被反向计算完全掩盖（$T_{\text{comm}}$ 隐藏在 $T_{\text{bwd}}$ 背后）。</span>
+<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a>如**图 4-3** 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行：</span>
+<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a>    participant B as 反向求导 (Backward Compute)</span>
+<span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a>    participant Bucket as 梯度分桶 (Bucket <span class="dv">0</span> / Bucket <span class="dv">1</span>)</span>
+<span id="cb5-112"><a href="#cb5-112" aria-hidden="true" tabindex="-1"></a>    participant NCCL as 异步通信流 (Ring AllReduce)</span>
+<span id="cb5-113"><a href="#cb5-113" aria-hidden="true" tabindex="-1"></a>    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线</span>
+<span id="cb5-114"><a href="#cb5-114" aria-hidden="true" tabindex="-1"></a>    B-&gt;&gt;Bucket: 逐层反向求导 (Layer N)</span>
+<span id="cb5-115"><a href="#cb5-115" aria-hidden="true" tabindex="-1"></a>    Bucket--&gt;&gt;Bucket: 梯度写入，达到阈值 (如 <span class="dv">25</span>MB)</span>
+<span id="cb5-116"><a href="#cb5-116" aria-hidden="true" tabindex="-1"></a>    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket <span class="dv">0</span>)</span>
+<span id="cb5-117"><a href="#cb5-117" aria-hidden="true" tabindex="-1"></a>    B-&gt;&gt;Bucket: 继续求导上一层 (Layer N<span class="dv">-1</span>, N<span class="dv">-2</span>)</span>
+<span id="cb5-118"><a href="#cb5-118" aria-hidden="true" tabindex="-1"></a>    Note right of NCCL: 环形通信与计算并行执行</span>
+<span id="cb5-119"><a href="#cb5-119" aria-hidden="true" tabindex="-1"></a>    NCCL--&gt;&gt;NCCL: Bucket <span class="dv">0</span> 同步完成</span>
+<span id="cb5-120"><a href="#cb5-120" aria-hidden="true" tabindex="-1"></a>    Bucket-&gt;&gt;NCCL: 异步触发 AllReduce (Bucket <span class="dv">1</span>)</span>
+<span id="cb5-121"><a href="#cb5-121" aria-hidden="true" tabindex="-1"></a>    NCCL--&gt;&gt;NCCL: 全部 Bucket 同步完毕</span>
+<span id="cb5-122"><a href="#cb5-122" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-123"><a href="#cb5-123" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-124"><a href="#cb5-124" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-125"><a href="#cb5-125" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-126"><a href="#cb5-126" aria-hidden="true" tabindex="-1"></a><span class="fu">### 4. 优化二：梯度分桶策略（Gradient Bucketing）</span></span>
 <span id="cb5-127"><a href="#cb5-127" aria-hidden="true" tabindex="-1"></a></span>

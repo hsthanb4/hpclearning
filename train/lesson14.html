@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#本课目标" id="toc-本课目标" class="nav-link active" data-scroll-target="#本课目标">本课目标</a></li>
   <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示" id="toc-现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示" class="nav-link" data-scroll-target="#现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示">1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如<strong>图 14-1</strong> 所示）</a></li>
   <li><a href="#混合精度训练的三大支柱与动态损失缩放" id="toc-混合精度训练的三大支柱与动态损失缩放" class="nav-link" data-scroll-target="#混合精度训练的三大支柱与动态损失缩放">2. 混合精度训练的三大支柱与动态损失缩放</a></li>
   <li><a href="#前沿-fp8-训练范式与多精度显存账本deepseek-v3-核心工程" id="toc-前沿-fp8-训练范式与多精度显存账本deepseek-v3-核心工程" class="nav-link" data-scroll-target="#前沿-fp8-训练范式与多精度显存账本deepseek-v3-核心工程">3. 前沿 FP8 训练范式与多精度显存账本（DeepSeek-V3 核心工程）</a></li>
@@ -590,19 +589,20 @@ window.Quarto = {
 </section>
 <section id="核心概念" class="level2">
 <h2 class="anchored" data-anchor-id="核心概念">核心概念</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示" class="level3">
+<h3 class="anchored" data-anchor-id="现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示">1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如<strong>图 14-1</strong> 所示）</h3>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
 <p></p><figure class="figure"><p></p>
 <div>
-<pre class="mermaid mermaid-js">flowchart LR
-    subgraph Formats["数值精度格式位数对比"]
-        FP32["FP32: 1 符号位 + 8 指数位 + 23 尾数位 (4 Bytes)"]
-        FP16["FP16: 1 符号位 + 5 指数位 + 10 尾数位 (动态范围小，易下溢)"]
-        BF16["BF16: 1 符号位 + 8 指数位 + 7 尾数位 (动态范围与 FP32 一致)"]
-        FP8["FP8 E4M3 / E5M2: 8 位精度标准 (针对推理与训练前向加速)"]
+<pre class="mermaid mermaid-js">flowchart TD
+    subgraph FloatFormats["主流深度学习浮点格式位宽构成"]
+        direction TB
+        FP32["FP32 (单精度): 1 符号位 + 8 指数位 + 23 尾数位 (动态范围 10^-38 ~ 10^38)"]
+        FP16["FP16 (半精度): 1 符号位 + 5 指数位 + 10 尾数位 (动态范围仅 65504, 易溢出)"]
+        BF16["BF16 (Brain Float): 1 符号位 + 8 指数位 + 7 尾数位 (动态范围与 FP32 完全相同)"]
+        FP8["FP8 (E4M3 / E5M2): 8 位极窄位宽 (Hopper/Blackwell 前向计算新宠)"]
     end
 </pre>
 </div>
@@ -613,42 +613,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 14-1：现代深度学习主流浮点数值格式位宽与动态范围对比</em>
 </p>
-<div class="cell" data-layout-align="default">
-<div class="cell-output-display">
-<div>
-<p></p><figure class="figure"><p></p>
-<div>
-<pre class="mermaid mermaid-js">sequenceDiagram
-    autonumber
-    participant Net as 网络前向计算 (BF16)
-    participant Loss as 损失计算 (FP32)
-    participant Scaler as Loss Scaler (损失缩放器)
-    participant Back as 反向求导 (BF16)
-    participant Optimizer as 优化器更新 (FP32 Master Weights)
-
-    Net-&gt;&gt;Loss: 输出预测并计算标量 Loss
-    Loss-&gt;&gt;Scaler: 放大 Loss (乘以 scale_factor)
-    Scaler-&gt;&gt;Back: 反向链式求导，梯度放大避免下溢
-    Back-&gt;&gt;Scaler: 检查梯度是否出现 Inf / NaN
-    alt 无溢出
-        Scaler-&gt;&gt;Optimizer: 梯度除以 scale_factor 恢复真实量级，更新参数
-        Scaler--&gt;&gt;Scaler: 连续 N 步无溢出则增大 scale_factor
-    else 发生溢出
-        Scaler-&gt;&gt;Optimizer: 丢弃当前步更新 (Skip Step)
-        Scaler--&gt;&gt;Scaler: 减小 scale_factor (除以 2)
-    end
-</pre>
-</div>
-<p></p></figure><p></p>
-</div>
-</div>
-</div>
-<p class="caption" align="center">
-<em>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流</em>
-</p>
-</section>
-<section id="现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示" class="level3">
-<h3 class="anchored" data-anchor-id="现代浮点格式拓扑与动态范围-vs-精度权衡如图-14-1-所示">1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如<strong>图 14-1</strong> 所示）</h3>
 <p>在现代大模型软硬件协同体系中，数值精度的选择直接决定了矩阵乘法单元（Tensor Core）的计算吞吐量与显存占用上限。 IEEE 754 标准浮点数由三个字段定义：<strong>符号位（Sign Bit <span class="math inline">\(s\)</span>）</strong>、<strong>指数位（Exponent <span class="math inline">\(e\)</span>）</strong>与<strong>尾数位（Mantissa / Fraction <span class="math inline">\(m\)</span>）</strong>： <span class="math display">\[v = (-1)^s \times 2^{e - \text{bias}} \times \left(1 + \sum_{i=1}^m b_i 2^{-i}\right)\]</span></p>
 <p>各主流精度的位布局与关键数值特性如下表所示：</p>
 <table class="caption-top table">
@@ -750,6 +714,38 @@ window.Quarto = {
 </section>
 <section id="支柱二动态损失缩放dynamic-loss-scaling如图-14-2-所示" class="level4">
 <h4 class="anchored" data-anchor-id="支柱二动态损失缩放dynamic-loss-scaling如图-14-2-所示">支柱二：动态损失缩放（Dynamic Loss Scaling，如<strong>图 14-2</strong> 所示）</h4>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant Loss as 计算 Loss
+    participant Scale as 损失缩放因子 (Scale S)
+    participant Bwd as 反向梯度计算 (BF16/FP16)
+    participant Check as 溢出检查 (Inf/NaN 检测)
+    participant Opt as 优化器更新 (FP32 主权重)
+
+    Loss-&gt;&gt;Scale: 乘以 Scale (放大梯度)
+    Scale-&gt;&gt;Bwd: 反向传播计算放大后的梯度 g_scaled
+    Bwd-&gt;&gt;Check: 扫描梯度张量是否有 Inf/NaN
+    alt 存在溢出 (Overflow)
+        Check--&gt;&gt;Opt: 跳过本步优化器更新 (Skip Step)
+        Check-&gt;&gt;Scale: 动态减小 Scale (如 S = S / 2)
+    else 无溢出 (Finite)
+        Check-&gt;&gt;Opt: 反缩放 g = g_scaled / S ➔ 正常更新参数
+        Check-&gt;&gt;Scale: 连续 N 步正常 ➔ 放大 Scale (如 S = S * 2)
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流</em>
+</p>
 <p>在不得不使用 FP16 的老旧硬件（如 V100）上，必须引入自适应损失缩放器（Loss Scaler）：</p>
 <ol type="1">
 <li><p><strong>反向前放大</strong>：在反向传播启动前，将标量损失乘以一个巨大的缩放系数 <span class="math inline">\(S\)</span>（如 <span class="math inline">\(S = 2^{15} = 32768\)</span>）：<span class="math inline">\(\mathcal{L}_{\text{scaled}} = \mathcal{L} \times S\)</span>；</p></li>
@@ -874,7 +870,7 @@ window.Quarto = {
 <section id="代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
 <p>实现浮点格式属性计算 + 低精度更新吸收模拟 + 各方案显存账本。</p>
-<div id="a182d761" class="cell" data-course_role="exercise">
+<div id="25da8cf2" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -993,7 +989,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
-<div id="99473b48" class="cell" data-course_role="solution">
+<div id="08e97e98" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1665,81 +1661,81 @@ window.Quarto = {
 <span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念</span></span>
 <span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如**图 14-1** 所示）</span></span>
 <span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a>    subgraph Formats[<span class="ot">"</span><span class="st">数值精度格式位数对比</span><span class="ot">"</span>]</span>
-<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a>        FP32[<span class="ot">"</span><span class="st">FP32: 1 符号位 + 8 指数位 + 23 尾数位 (4 Bytes)</span><span class="ot">"</span>]</span>
-<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a>        FP16[<span class="ot">"</span><span class="st">FP16: 1 符号位 + 5 指数位 + 10 尾数位 (动态范围小，易下溢)</span><span class="ot">"</span>]</span>
-<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a>        BF16[<span class="ot">"</span><span class="st">BF16: 1 符号位 + 8 指数位 + 7 尾数位 (动态范围与 FP32 一致)</span><span class="ot">"</span>]</span>
-<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a>        FP8[<span class="ot">"</span><span class="st">FP8 E4M3 / E5M2: 8 位精度标准 (针对推理与训练前向加速)</span><span class="ot">"</span>]</span>
-<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 14-1：现代深度学习主流浮点数值格式位宽与动态范围对比<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
-<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
-<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a>    participant Net as 网络前向计算 (BF16)</span>
-<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a>    participant Loss as 损失计算 (FP32)</span>
-<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a>    participant Scaler as Loss Scaler (损失缩放器)</span>
-<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>    participant Back as 反向求导 (BF16)</span>
-<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a>    participant Optimizer as 优化器更新 (FP32 Master Weights)</span>
-<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a>    Net-&gt;&gt;Loss: 输出预测并计算标量 Loss</span>
-<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a>    Loss-&gt;&gt;Scaler: 放大 Loss (乘以 scale_factor)</span>
-<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a>    Scaler-&gt;&gt;Back: 反向链式求导，梯度放大避免下溢</span>
-<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a>    Back-&gt;&gt;Scaler: 检查梯度是否出现 Inf / NaN</span>
-<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a>    alt 无溢出</span>
-<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>        Scaler-&gt;&gt;Optimizer: 梯度除以 scale_factor 恢复真实量级，更新参数</span>
-<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a>        Scaler--&gt;&gt;Scaler: 连续 N 步无溢出则增大 scale_factor</span>
-<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span> 发生溢出</span>
-<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a>        Scaler-&gt;&gt;Optimizer: 丢弃当前步更新 (Skip Step)</span>
-<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a>        Scaler--&gt;&gt;Scaler: 减小 scale_factor (除以 <span class="dv">2</span>)</span>
-<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a>    subgraph FloatFormats[<span class="ot">"</span><span class="st">主流深度学习浮点格式位宽构成</span><span class="ot">"</span>]</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a>        FP32[<span class="ot">"</span><span class="st">FP32 (单精度): 1 符号位 + 8 指数位 + 23 尾数位 (动态范围 10^-38 ~ 10^38)</span><span class="ot">"</span>]</span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a>        FP16[<span class="ot">"</span><span class="st">FP16 (半精度): 1 符号位 + 5 指数位 + 10 尾数位 (动态范围仅 65504, 易溢出)</span><span class="ot">"</span>]</span>
+<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a>        BF16[<span class="ot">"</span><span class="st">BF16 (Brain Float): 1 符号位 + 8 指数位 + 7 尾数位 (动态范围与 FP32 完全相同)</span><span class="ot">"</span>]</span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a>        FP8[<span class="ot">"</span><span class="st">FP8 (E4M3 / E5M2): 8 位极窄位宽 (Hopper/Blackwell 前向计算新宠)</span><span class="ot">"</span>]</span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 14-1：现代深度学习主流浮点数值格式位宽与动态范围对比<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>在现代大模型软硬件协同体系中，数值精度的选择直接决定了矩阵乘法单元（Tensor Core）的计算吞吐量与显存占用上限。</span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a>IEEE 754 标准浮点数由三个字段定义：**符号位（Sign Bit $s$）**、**指数位（Exponent $e$）**与**尾数位（Mantissa / Fraction $m$）**：</span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a>$$v = (-1)^s \times 2^{e - \text{bias}} \times \left(1 + \sum_{i=1}^m b_i 2^{-i}\right)$$</span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a>各主流精度的位布局与关键数值特性如下表所示：</span>
+<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> 格式名称 <span class="pp">|</span> 总位宽 <span class="pp">|</span> 符号位 <span class="pp">|</span> 指数位 ($e$) <span class="pp">|</span> 尾数位 ($m$) <span class="pp">|</span> 最大表示范围 ($V_{\max}$) <span class="pp">|</span> 最小正规格数 ($V_{\min}$) <span class="pp">|</span> 精度刻度（1.0 处的 ULP / $\epsilon$） <span class="pp">|</span></span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|---|---|---|---|</span></span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP32 (单精度)** <span class="pp">|</span> 32 位 (4B) <span class="pp">|</span> 1 <span class="pp">|</span> 8 位 <span class="pp">|</span> 23 位 <span class="pp">|</span> $\approx 3.4 \times 10^{38}$ <span class="pp">|</span> $\approx 1.18 \times 10^{-38}$ <span class="pp">|</span> $2^{-23} \approx 1.19 \times 10^{-7}$ <span class="pp">|</span></span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP16 (半精度)** <span class="pp">|</span> 16 位 (2B) <span class="pp">|</span> 1 <span class="pp">|</span> 5 位 <span class="pp">|</span> 10 位 <span class="pp">|</span> $\mathbf{65,504}$ <span class="pp">|</span> $\approx 6.10 \times 10^{-5}$ <span class="pp">|</span> $2^{-10} \approx 9.77 \times 10^{-4}$ <span class="pp">|</span></span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **BF16 (Brain Float)** <span class="pp">|</span> 16 位 (2B) <span class="pp">|</span> 1 <span class="pp">|</span> 8 位 <span class="pp">|</span> 7 位 <span class="pp">|</span> $\approx 3.39 \times 10^{38}$ <span class="pp">|</span> $\approx 1.18 \times 10^{-38}$ <span class="pp">|</span> $2^{-7} \approx 7.81 \times 10^{-3}$ <span class="pp">|</span></span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP8 E4M3** <span class="pp">|</span> 8 位 (1B) <span class="pp">|</span> 1 <span class="pp">|</span> 4 位 <span class="pp">|</span> 3 位 <span class="pp">|</span> $448$ (E4M3FN) <span class="pp">|</span> $\approx 1.95 \times 10^{-3}$ <span class="pp">|</span> $2^{-3} = 0.125$ <span class="pp">|</span></span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP8 E5M2** <span class="pp">|</span> 8 位 (1B) <span class="pp">|</span> 1 <span class="pp">|</span> 5 位 <span class="pp">|</span> 2 位 <span class="pp">|</span> $57,344$ <span class="pp">|</span> $\approx 6.10 \times 10^{-5}$ <span class="pp">|</span> $2^{-2} = 0.25$ <span class="pp">|</span></span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 深度工程洞见：为什么工业界全面拥抱 BF16 而淘汰原生 FP16？</span></span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**FP16 的致命下溢诅咒**：FP16 仅有 5 位指数，其最小正规化数仅为 $6.1 \times 10^{-5}$。但在百亿/千亿大模型反向传播中，深层参数的梯度方差通常在 $10^{-6} \sim 10^{-8}$ 之间。这导致梯度在链式法则回传时极易直接截断下溢为零（Underflow），导致网络前浅层梯度更新完全消失。</span>
+<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**BF16 的取舍哲学**：Google 提出的 BF16 牺牲了 3 位尾数精度，直接借用了 **FP32 完整的 8 位指数域**。这意味着 BF16 的动态范围与 FP32 丝毫不差（覆盖超过 80 个数量级）！</span>
+<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a>  在预训练中，梯度下溢和数值爆炸的概率骤降，工程师可以彻底丢弃繁琐的损失缩放（Loss Scaling）逻辑，模型收敛鲁棒性提升一个数量级。</span>
+<span id="cb5-65"><a href="#cb5-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-66"><a href="#cb5-66" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 混合精度训练的三大支柱与动态损失缩放</span></span>
+<span id="cb5-67"><a href="#cb5-67" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-68"><a href="#cb5-68" aria-hidden="true" tabindex="-1"></a>虽然低精度能带来巨大的速度加成，但直接在全网采用 16 位浮点更新必然导致训练发散崩溃。经典的 Mixed Precision 训练架构依靠三大支柱确保数值收敛与精度无损：</span>
 <span id="cb5-69"><a href="#cb5-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如**图 14-1** 所示）</span></span>
-<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a>在现代大模型软硬件协同体系中，数值精度的选择直接决定了矩阵乘法单元（Tensor Core）的计算吞吐量与显存占用上限。</span>
-<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a>IEEE 754 标准浮点数由三个字段定义：**符号位（Sign Bit $s$）**、**指数位（Exponent $e$）**与**尾数位（Mantissa / Fraction $m$）**：</span>
-<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a>$$v = (-1)^s \times 2^{e - \text{bias}} \times \left(1 + \sum_{i=1}^m b_i 2^{-i}\right)$$</span>
-<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a>各主流精度的位布局与关键数值特性如下表所示：</span>
-<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> 格式名称 <span class="pp">|</span> 总位宽 <span class="pp">|</span> 符号位 <span class="pp">|</span> 指数位 ($e$) <span class="pp">|</span> 尾数位 ($m$) <span class="pp">|</span> 最大表示范围 ($V_{\max}$) <span class="pp">|</span> 最小正规格数 ($V_{\min}$) <span class="pp">|</span> 精度刻度（1.0 处的 ULP / $\epsilon$） <span class="pp">|</span></span>
-<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|---|---|---|---|</span></span>
-<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP32 (单精度)** <span class="pp">|</span> 32 位 (4B) <span class="pp">|</span> 1 <span class="pp">|</span> 8 位 <span class="pp">|</span> 23 位 <span class="pp">|</span> $\approx 3.4 \times 10^{38}$ <span class="pp">|</span> $\approx 1.18 \times 10^{-38}$ <span class="pp">|</span> $2^{-23} \approx 1.19 \times 10^{-7}$ <span class="pp">|</span></span>
-<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP16 (半精度)** <span class="pp">|</span> 16 位 (2B) <span class="pp">|</span> 1 <span class="pp">|</span> 5 位 <span class="pp">|</span> 10 位 <span class="pp">|</span> $\mathbf{65,504}$ <span class="pp">|</span> $\approx 6.10 \times 10^{-5}$ <span class="pp">|</span> $2^{-10} \approx 9.77 \times 10^{-4}$ <span class="pp">|</span></span>
-<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **BF16 (Brain Float)** <span class="pp">|</span> 16 位 (2B) <span class="pp">|</span> 1 <span class="pp">|</span> 8 位 <span class="pp">|</span> 7 位 <span class="pp">|</span> $\approx 3.39 \times 10^{38}$ <span class="pp">|</span> $\approx 1.18 \times 10^{-38}$ <span class="pp">|</span> $2^{-7} \approx 7.81 \times 10^{-3}$ <span class="pp">|</span></span>
-<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP8 E4M3** <span class="pp">|</span> 8 位 (1B) <span class="pp">|</span> 1 <span class="pp">|</span> 4 位 <span class="pp">|</span> 3 位 <span class="pp">|</span> $448$ (E4M3FN) <span class="pp">|</span> $\approx 1.95 \times 10^{-3}$ <span class="pp">|</span> $2^{-3} = 0.125$ <span class="pp">|</span></span>
-<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **FP8 E5M2** <span class="pp">|</span> 8 位 (1B) <span class="pp">|</span> 1 <span class="pp">|</span> 5 位 <span class="pp">|</span> 2 位 <span class="pp">|</span> $57,344$ <span class="pp">|</span> $\approx 6.10 \times 10^{-5}$ <span class="pp">|</span> $2^{-2} = 0.25$ <span class="pp">|</span></span>
-<span id="cb5-85"><a href="#cb5-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-86"><a href="#cb5-86" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 深度工程洞见：为什么工业界全面拥抱 BF16 而淘汰原生 FP16？</span></span>
-<span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**FP16 的致命下溢诅咒**：FP16 仅有 5 位指数，其最小正规化数仅为 $6.1 \times 10^{-5}$。但在百亿/千亿大模型反向传播中，深层参数的梯度方差通常在 $10^{-6} \sim 10^{-8}$ 之间。这导致梯度在链式法则回传时极易直接截断下溢为零（Underflow），导致网络前浅层梯度更新完全消失。</span>
-<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**BF16 的取舍哲学**：Google 提出的 BF16 牺牲了 3 位尾数精度，直接借用了 **FP32 完整的 8 位指数域**。这意味着 BF16 的动态范围与 FP32 丝毫不差（覆盖超过 80 个数量级）！</span>
-<span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a>  在预训练中，梯度下溢和数值爆炸的概率骤降，工程师可以彻底丢弃繁琐的损失缩放（Loss Scaling）逻辑，模型收敛鲁棒性提升一个数量级。</span>
-<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 混合精度训练的三大支柱与动态损失缩放</span></span>
-<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a>虽然低精度能带来巨大的速度加成，但直接在全网采用 16 位浮点更新必然导致训练发散崩溃。经典的 Mixed Precision 训练架构依靠三大支柱确保数值收敛与精度无损：</span>
-<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 支柱一：FP32 主权重镜像（Master Weights）消灭更新吞噬（ULP Swallowing）</span></span>
-<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a>这是混合精度训练中最经典的物理现象：</span>
-<span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>设当前参数权重量级为 $w = 1.0$。在 BF16 格式下，1.0 处末位有效数字的单位精度（Unit in the Last Place, ULP）为 $\Delta_{\text{ULP}} = 2^{-7} \approx 7.81 \times 10^{-3}$。</span>
-<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>设当前学习率 $\eta = 10^{-4}$，优化器计算出的反向梯度为 $g = 0.5$。单步实际参数更新量应为：</span>
-<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a>  $$\Delta w = -\eta \cdot g = -5 \times 10^{-5}$$</span>
-<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>若直接在 BF16 上就地累加：</span>
-<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a>  $$w_{\text{new}} = 1.0 - 0.00005 \xrightarrow{\text{BF16 舍入}} 1.0$$</span>
-<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a>  因为更新量 $\Delta w$ 远远小于 BF16 当前精度的半个 ULP，**更新值在浮点舍入时被彻底“吞噬吸收”**！模型在整个训练过程中参数纹丝不动，损失函数完全无法下降。</span>
-<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**解决方案**：必须在优化器显存中常驻一份 **FP32 Master 权重**！前向与反向计算使用 BF16 算子跑高速 GEMM，但在 <span class="in">`optimizer.step()`</span> 时，将梯度累加到 FP32 Master 权重上。FP32 的 ULP 高达 $1.19 \times 10^{-7}$，足以精准记录微小的参数累积演化，步结时再截断投影回 BF16 供下一步使用。</span>
-<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 支柱二：动态损失缩放（Dynamic Loss Scaling，如**图 14-2** 所示）</span></span>
+<span id="cb5-70"><a href="#cb5-70" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 支柱一：FP32 主权重镜像（Master Weights）消灭更新吞噬（ULP Swallowing）</span></span>
+<span id="cb5-71"><a href="#cb5-71" aria-hidden="true" tabindex="-1"></a>这是混合精度训练中最经典的物理现象：</span>
+<span id="cb5-72"><a href="#cb5-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-73"><a href="#cb5-73" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>设当前参数权重量级为 $w = 1.0$。在 BF16 格式下，1.0 处末位有效数字的单位精度（Unit in the Last Place, ULP）为 $\Delta_{\text{ULP}} = 2^{-7} \approx 7.81 \times 10^{-3}$。</span>
+<span id="cb5-74"><a href="#cb5-74" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>设当前学习率 $\eta = 10^{-4}$，优化器计算出的反向梯度为 $g = 0.5$。单步实际参数更新量应为：</span>
+<span id="cb5-75"><a href="#cb5-75" aria-hidden="true" tabindex="-1"></a>  $$\Delta w = -\eta \cdot g = -5 \times 10^{-5}$$</span>
+<span id="cb5-76"><a href="#cb5-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-77"><a href="#cb5-77" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>若直接在 BF16 上就地累加：</span>
+<span id="cb5-78"><a href="#cb5-78" aria-hidden="true" tabindex="-1"></a>  $$w_{\text{new}} = 1.0 - 0.00005 \xrightarrow{\text{BF16 舍入}} 1.0$$</span>
+<span id="cb5-79"><a href="#cb5-79" aria-hidden="true" tabindex="-1"></a>  因为更新量 $\Delta w$ 远远小于 BF16 当前精度的半个 ULP，**更新值在浮点舍入时被彻底“吞噬吸收”**！模型在整个训练过程中参数纹丝不动，损失函数完全无法下降。</span>
+<span id="cb5-80"><a href="#cb5-80" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-81"><a href="#cb5-81" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**解决方案**：必须在优化器显存中常驻一份 **FP32 Master 权重**！前向与反向计算使用 BF16 算子跑高速 GEMM，但在 <span class="in">`optimizer.step()`</span> 时，将梯度累加到 FP32 Master 权重上。FP32 的 ULP 高达 $1.19 \times 10^{-7}$，足以精准记录微小的参数累积演化，步结时再截断投影回 BF16 供下一步使用。</span>
+<span id="cb5-82"><a href="#cb5-82" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-83"><a href="#cb5-83" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 支柱二：动态损失缩放（Dynamic Loss Scaling，如**图 14-2** 所示）</span></span>
+<span id="cb5-84"><a href="#cb5-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-87"><a href="#cb5-87" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb5-88"><a href="#cb5-88" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb5-89"><a href="#cb5-89" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb5-90"><a href="#cb5-90" aria-hidden="true" tabindex="-1"></a>    participant Loss as 计算 Loss</span>
+<span id="cb5-91"><a href="#cb5-91" aria-hidden="true" tabindex="-1"></a>    participant Scale as 损失缩放因子 (Scale S)</span>
+<span id="cb5-92"><a href="#cb5-92" aria-hidden="true" tabindex="-1"></a>    participant Bwd as 反向梯度计算 (BF16/FP16)</span>
+<span id="cb5-93"><a href="#cb5-93" aria-hidden="true" tabindex="-1"></a>    participant Check as 溢出检查 (Inf/NaN 检测)</span>
+<span id="cb5-94"><a href="#cb5-94" aria-hidden="true" tabindex="-1"></a>    participant Opt as 优化器更新 (FP32 主权重)</span>
+<span id="cb5-95"><a href="#cb5-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-96"><a href="#cb5-96" aria-hidden="true" tabindex="-1"></a>    Loss-&gt;&gt;Scale: 乘以 Scale (放大梯度)</span>
+<span id="cb5-97"><a href="#cb5-97" aria-hidden="true" tabindex="-1"></a>    Scale-&gt;&gt;Bwd: 反向传播计算放大后的梯度 g_scaled</span>
+<span id="cb5-98"><a href="#cb5-98" aria-hidden="true" tabindex="-1"></a>    Bwd-&gt;&gt;Check: 扫描梯度张量是否有 Inf/NaN</span>
+<span id="cb5-99"><a href="#cb5-99" aria-hidden="true" tabindex="-1"></a>    alt 存在溢出 (Overflow)</span>
+<span id="cb5-100"><a href="#cb5-100" aria-hidden="true" tabindex="-1"></a>        Check--&gt;&gt;Opt: 跳过本步优化器更新 (Skip Step)</span>
+<span id="cb5-101"><a href="#cb5-101" aria-hidden="true" tabindex="-1"></a>        Check-&gt;&gt;Scale: 动态减小 Scale (如 S = S / <span class="dv">2</span>)</span>
+<span id="cb5-102"><a href="#cb5-102" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span> 无溢出 (Finite)</span>
+<span id="cb5-103"><a href="#cb5-103" aria-hidden="true" tabindex="-1"></a>        Check-&gt;&gt;Opt: 反缩放 g = g_scaled / S ➔ 正常更新参数</span>
+<span id="cb5-104"><a href="#cb5-104" aria-hidden="true" tabindex="-1"></a>        Check-&gt;&gt;Scale: 连续 N 步正常 ➔ 放大 Scale (如 S = S <span class="ot">*</span> <span class="dv">2</span>)</span>
+<span id="cb5-105"><a href="#cb5-105" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb5-106"><a href="#cb5-106" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb5-107"><a href="#cb5-107" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb5-108"><a href="#cb5-108" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-109"><a href="#cb5-109" aria-hidden="true" tabindex="-1"></a>在不得不使用 FP16 的老旧硬件（如 V100）上，必须引入自适应损失缩放器（Loss Scaler）：</span>
 <span id="cb5-110"><a href="#cb5-110" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb5-111"><a href="#cb5-111" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**反向前放大**：在反向传播启动前，将标量损失乘以一个巨大的缩放系数 $S$（如 $S = 2^{15} = 32768$）：$\mathcal{L}_{\text{scaled}} = \mathcal{L} \times S$；</span>

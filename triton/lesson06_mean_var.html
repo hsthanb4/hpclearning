@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#前置关系" id="toc-前置关系" class="nav-link" data-scroll-target="#前置关系">前置关系</a></li>
   <li><a href="#核心心智模型" id="toc-核心心智模型" class="nav-link" data-scroll-target="#核心心智模型">核心心智模型</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#它是什么解决什么问题" id="toc-它是什么解决什么问题" class="nav-link" data-scroll-target="#它是什么解决什么问题">1. 它是什么，解决什么问题</a></li>
   <li><a href="#它如何工作" id="toc-它如何工作" class="nav-link" data-scroll-target="#它如何工作">2. 它如何工作</a></li>
   <li><a href="#正确性条件与常见误区" id="toc-正确性条件与常见误区" class="nav-link" data-scroll-target="#正确性条件与常见误区">3. 正确性条件与常见误区</a></li>
@@ -581,8 +580,13 @@ window.Quarto = {
 </section>
 <section id="核心心智模型" class="level2">
 <h2 class="anchored" data-anchor-id="核心心智模型">核心心智模型</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
+<section id="它是什么解决什么问题" class="level3">
+<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
+<p>在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 <span class="math inline">\(\mu\)</span> 与方差 <span class="math inline">\(\sigma^2\)</span> 是必经步骤。总体方差（Population Variance）的经典定义为： <span class="math display">\[ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 \]</span> 在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 <span class="math inline">\(2\)</span> 的幂次 <span class="math inline">\(\text{BLOCK}\)</span>。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 <span class="math inline">\(0.0\)</span>。 但本课揭示了一个极其隐蔽的致命陷阱：<strong>“单位元的代数污染”</strong>。 当执行中心化操作 <span class="math inline">\((x - \mu)\)</span> 时，原先填充了 <span class="math inline">\(0.0\)</span> 的 Padding lanes 会变为 <span class="math inline">\((0.0 - \mu) = -\mu\)</span>；其平方则变为 <span class="math inline">\((-\mu)^2 = \mu^2 \neq 0\)</span>。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 <span class="math inline">\((\text{BLOCK} - N) \times \mu^2\)</span> 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。 本课解决的核心工程问题是：<strong>理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染</strong>。</p>
+</section>
+<section id="它如何工作" class="level3">
+<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
+<p>两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：</p>
 <div class="cell" data-layout-align="default">
 <div class="cell-output-display">
 <div>
@@ -620,14 +624,6 @@ window.Quarto = {
 <p class="caption" align="center">
 <em>图 6-2：两阶段掩码二次传播计算时序流</em>
 </p>
-</section>
-<section id="它是什么解决什么问题" class="level3">
-<h3 class="anchored" data-anchor-id="它是什么解决什么问题">1. 它是什么，解决什么问题</h3>
-<p>在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 <span class="math inline">\(\mu\)</span> 与方差 <span class="math inline">\(\sigma^2\)</span> 是必经步骤。总体方差（Population Variance）的经典定义为： <span class="math display">\[ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 \]</span> 在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 <span class="math inline">\(2\)</span> 的幂次 <span class="math inline">\(\text{BLOCK}\)</span>。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 <span class="math inline">\(0.0\)</span>。 但本课揭示了一个极其隐蔽的致命陷阱：<strong>“单位元的代数污染”</strong>。 当执行中心化操作 <span class="math inline">\((x - \mu)\)</span> 时，原先填充了 <span class="math inline">\(0.0\)</span> 的 Padding lanes 会变为 <span class="math inline">\((0.0 - \mu) = -\mu\)</span>；其平方则变为 <span class="math inline">\((-\mu)^2 = \mu^2 \neq 0\)</span>。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 <span class="math inline">\((\text{BLOCK} - N) \times \mu^2\)</span> 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。 本课解决的核心工程问题是：<strong>理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染</strong>。</p>
-</section>
-<section id="它如何工作" class="level3">
-<h3 class="anchored" data-anchor-id="它如何工作">2. 它如何工作</h3>
-<p>两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：</p>
 <ol type="1">
 <li><strong>Pass 1（带掩码加载与均值规约）</strong>：
 <ul>
@@ -694,7 +690,7 @@ window.Quarto = {
 <h2 class="anchored" data-anchor-id="实践任务唯一代码填空题">实践任务：唯一代码填空题</h2>
 <p>补齐二次 mask。</p>
 <p>规则：只能修改 <code>TODO</code>/<code>______</code> 所在位置；不要删除断言或放宽误差。代码注释说明了每个边界条件。</p>
-<div id="724bb927" class="cell" data-course_role="exercise">
+<div id="a37c8a69" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -774,7 +770,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对。即使代码一致，也要能解释关键步骤，并尝试更换一个输入规模。</p>
-<div id="f159eb5f" class="cell" data-course_role="solution">
+<div id="86e71dba" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1346,37 +1342,37 @@ window.Quarto = {
 <span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心心智模型</span></span>
 <span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
 <span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    subgraph Stats[<span class="ot">"</span><span class="st">统计量计算两阶段</span><span class="ot">"</span>]</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>        Sum[<span class="ot">"</span><span class="st">第一次归约: sum(x) / valid_count ➔ 得到均值 mu</span><span class="ot">"</span>]</span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>        Var[<span class="ot">"</span><span class="st">第二次归约: sum((x - mu)^2) / valid_count ➔ 得到方差 var</span><span class="ot">"</span>]</span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>    end</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-1：均值与方差的两阶段掩码统计量结构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 $\mu$ 与方差 $\sigma^2$ 是必经步骤。总体方差（Population Variance）的经典定义为：</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>$$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 $$</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 $2$ 的幂次 $\text{BLOCK}$。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 $0.0$。</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>但本课揭示了一个极其隐蔽的致命陷阱：**“单位元的代数污染”**。</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>当执行中心化操作 $(x - \mu)$ 时，原先填充了 $0.0$ 的 Padding lanes 会变为 $(0.0 - \mu) = -\mu$；其平方则变为 $(-\mu)^2 = \mu^2 \neq 0$。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 $(\text{BLOCK} - N) \times \mu^2$ 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染**。</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：</span>
 <span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    In[<span class="ot">"</span><span class="st">输入块</span><span class="ot">"</span>] --&gt; Pass1[<span class="ot">"</span><span class="st">Pass 1: 计算均值并保留 valid_count</span><span class="ot">"</span>]</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    Pass1 --&gt; Pass2[<span class="ot">"</span><span class="st">Pass 2: 重新遍历差值平方并排除越界元素</span><span class="ot">"</span>]</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>    Pass2 --&gt; Out[<span class="ot">"</span><span class="st">同时输出均值与无偏方差</span><span class="ot">"</span>]</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-2：两阶段掩码二次传播计算时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 它是什么，解决什么问题</span></span>
-<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 $\mu$ 与方差 $\sigma^2$ 是必经步骤。总体方差（Population Variance）的经典定义为：</span>
-<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>$$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 $$</span>
-<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 $2$ 的幂次 $\text{BLOCK}$。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 $0.0$。</span>
-<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>但本课揭示了一个极其隐蔽的致命陷阱：**“单位元的代数污染”**。</span>
-<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>当执行中心化操作 $(x - \mu)$ 时，原先填充了 $0.0$ 的 Padding lanes 会变为 $(0.0 - \mu) = -\mu$；其平方则变为 $(-\mu)^2 = \mu^2 \neq 0$。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 $(\text{BLOCK} - N) \times \mu^2$ 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。</span>
-<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>本课解决的核心工程问题是：**理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染**。</span>
-<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 它如何工作</span></span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    subgraph Stats[<span class="ot">"</span><span class="st">统计量计算两阶段</span><span class="ot">"</span>]</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>        Sum[<span class="ot">"</span><span class="st">第一次归约: sum(x) / valid_count ➔ 得到均值 mu</span><span class="ot">"</span>]</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>        Var[<span class="ot">"</span><span class="st">第二次归约: sum((x - mu)^2) / valid_count ➔ 得到方差 var</span><span class="ot">"</span>]</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-1：均值与方差的两阶段掩码统计量结构<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>    In[<span class="ot">"</span><span class="st">输入块</span><span class="ot">"</span>] --&gt; Pass1[<span class="ot">"</span><span class="st">Pass 1: 计算均值并保留 valid_count</span><span class="ot">"</span>]</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>    Pass1 --&gt; Pass2[<span class="ot">"</span><span class="st">Pass 2: 重新遍历差值平方并排除越界元素</span><span class="ot">"</span>]</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    Pass2 --&gt; Out[<span class="ot">"</span><span class="st">同时输出均值与无偏方差</span><span class="ot">"</span>]</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-2：两阶段掩码二次传播计算时序流<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
 <span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**Pass 1（带掩码加载与均值规约）**：</span>
 <span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>使用 <span class="in">`cols = tl.arange(0, BLOCK)`</span> 与 <span class="in">`mask = cols &lt; N`</span>。</span>

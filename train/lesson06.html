@@ -510,7 +510,6 @@ window.Quarto = {
   <li><a href="#本课目标" id="toc-本课目标" class="nav-link active" data-scroll-target="#本课目标">本课目标</a></li>
   <li><a href="#核心概念" id="toc-核心概念" class="nav-link" data-scroll-target="#核心概念">核心概念</a>
   <ul class="collapse">
-  <li><a href="#核心操作与执行流程图解" id="toc-核心操作与执行流程图解" class="nav-link" data-scroll-target="#核心操作与执行流程图解">核心操作与执行流程图解</a></li>
   <li><a href="#矩阵乘法分块恒等式与张量并行的代数基础" id="toc-矩阵乘法分块恒等式与张量并行的代数基础" class="nav-link" data-scroll-target="#矩阵乘法分块恒等式与张量并行的代数基础">1. 矩阵乘法分块恒等式与张量并行的代数基础</a></li>
   <li><a href="#transformer-里的配对级联消除中间通信的精妙设计" id="toc-transformer-里的配对级联消除中间通信的精妙设计" class="nav-link" data-scroll-target="#transformer-里的配对级联消除中间通信的精妙设计">2. Transformer 里的配对级联：消除中间通信的精妙设计</a></li>
   <li><a href="#张量并行tp与-zero-的根本差异与关键路径瓶颈" id="toc-张量并行tp与-zero-的根本差异与关键路径瓶颈" class="nav-link" data-scroll-target="#张量并行tp与-zero-的根本差异与关键路径瓶颈">3. 张量并行（TP）与 ZeRO 的根本差异与关键路径瓶颈</a></li>
@@ -590,42 +589,6 @@ window.Quarto = {
 </section>
 <section id="核心概念" class="level2">
 <h2 class="anchored" data-anchor-id="核心概念">核心概念</h2>
-<section id="核心操作与执行流程图解" class="level3">
-<h3 class="anchored" data-anchor-id="核心操作与执行流程图解">核心操作与执行流程图解</h3>
-<p align="center">
-<img src="assets/figs/tp_mlp_math_equivalence.png" width="95%" alt="张量并行先列后行代数等价性与零中间通信推导">
-</p>
-<p class="caption" align="center">
-<em>图 6-1：Megatron-LM MLP 模块“先列后行”分块矩阵乘法代数等价性证明与零中间通信机制</em>
-</p>
-<div class="cell" data-layout-align="default">
-<div class="cell-output-display">
-<div>
-<p></p><figure class="figure"><p></p>
-<div>
-<pre class="mermaid mermaid-js">sequenceDiagram
-    autonumber
-    participant Input as 输入张量 X
-    participant Column as Column Linear (QKV Projection)
-    participant Core as Multi-Head Attention Compute
-    participant Row as Row Linear (Out Projection)
-    participant Comm as 通信原语 (AllReduce)
-
-    Input-&gt;&gt;Column: 无通信广播输入 X
-    Column-&gt;&gt;Core: 各卡计算本地注意力头 (Heads / TP)
-    Core-&gt;&gt;Row: 局部注意力上下文乘本地行分片
-    Row-&gt;&gt;Comm: 触发一次 AllReduce 同步各卡部分和
-    Comm--&gt;&gt;Input: 输出完整特征向量进入下层
-</pre>
-</div>
-<p></p></figure><p></p>
-</div>
-</div>
-</div>
-<p class="caption" align="center">
-<em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em>
-</p>
-</section>
 <section id="矩阵乘法分块恒等式与张量并行的代数基础" class="level3">
 <h3 class="anchored" data-anchor-id="矩阵乘法分块恒等式与张量并行的代数基础">1. 矩阵乘法分块恒等式与张量并行的代数基础</h3>
 <p>张量并行（Tensor Parallelism, TP）是由 Megatron-LM 提出的经典模型并行范式。不同于数据并行（DP/ZeRO）在样本 batch 维度切分，TP 的核心思路是将神经网络层内部的单个矩阵乘法（GEMM）物理拆分到多个不同的 GPU 上协同计算。</p>
@@ -658,6 +621,12 @@ window.Quarto = {
 <p>如果简单地对每个线性层孤立使用列并行或行并行，每次计算都会分别引入一次 All-Gather 或 AllReduce，带来昂贵的通信开销。Megatron-LM 最天才的架构设计在于：<strong>将网络模块设计为“列并行 <span class="math inline">\(\to\)</span> 行并行”的成对级联，使得中间层计算实现零通信跨越！</strong></p>
 <section id="a.-mlp-模块的列行级联与数学等价性证明如图-6-1-所示" class="level4">
 <h4 class="anchored" data-anchor-id="a.-mlp-模块的列行级联与数学等价性证明如图-6-1-所示">A. MLP 模块的列行级联与数学等价性证明（如<strong>图 6-1</strong> 所示）</h4>
+<p align="center">
+<img src="assets/figs/tp_mlp_math_equivalence.png" width="95%" alt="张量并行先列后行代数等价性与零中间通信推导">
+</p>
+<p class="caption" align="center">
+<em>图 6-1：Megatron-LM MLP 模块“先列后行”分块矩阵乘法代数等价性证明与零中间通信机制</em>
+</p>
 <p>在经典 Transformer MLP 模块中，单卡未切分的标准前向计算流程为： <span class="math display">\[Y = \sigma(X W_1) \cdot W_2\]</span> 其中输入矩阵 <span class="math inline">\(X \in \mathbb{R}^{B \times d}\)</span>，升维权重 <span class="math inline">\(W_1 \in \mathbb{R}^{d \times 4d}\)</span>，逐元素激活函数 <span class="math inline">\(\sigma\)</span>（如 GeLU、SiLU），降维权重 <span class="math inline">\(W_2 \in \mathbb{R}^{4d \times d}\)</span>，输出特征 <span class="math inline">\(Y \in \mathbb{R}^{B \times d}\)</span>。</p>
 <p>很多初学者容易困惑：<strong>为什么各卡各自计算一部分局部矩阵乘，中间完全不通信，最后仅在模块出口做一次 AllReduce 求和，结果就能与单卡全量计算分毫不差地严格等价？</strong></p>
 <p>其底层的严密代数推导依托于以下四个数学步骤：</p>
@@ -717,6 +686,33 @@ window.Quarto = {
 </section>
 <section id="b.-多头自注意力模块mha的列行级联如图-6-2-所示" class="level4">
 <h4 class="anchored" data-anchor-id="b.-多头自注意力模块mha的列行级联如图-6-2-所示">B. 多头自注意力模块（MHA）的列行级联（如<strong>图 6-2</strong> 所示）</h4>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant Input as 输入张量 X
+    participant Column as Column Linear (QKV Projection)
+    participant Core as Multi-Head Attention Compute
+    participant Row as Row Linear (Out Projection)
+    participant Comm as 通信原语 (AllReduce)
+
+    Input-&gt;&gt;Column: 无通信广播输入 X
+    Column-&gt;&gt;Core: 各卡计算本地注意力头 (Heads / TP)
+    Core-&gt;&gt;Row: 局部注意力上下文乘本地行分片
+    Row-&gt;&gt;Comm: 触发一次 AllReduce 同步各卡部分和
+    Comm--&gt;&gt;Input: 输出完整特征向量进入下层
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em>
+</p>
 <p>自注意力模块遵循完全相同的对称哲学：</p>
 <ol type="1">
 <li><strong>QKV 投影采用列并行</strong>：
@@ -782,7 +778,7 @@ window.Quarto = {
 <section id="代码填空题" class="level2">
 <h2 class="anchored" data-anchor-id="代码填空题">代码填空题</h2>
 <p>用 torch 模拟列并行与行并行，验证与完整 matmul 等价；再组合成 TP 版 MLP。</p>
-<div id="57fc534f" class="cell" data-course_role="exercise">
+<div id="340f161a" class="cell" data-course_role="exercise">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -903,7 +899,7 @@ window.Quarto = {
 <section id="参考答案仅-answer-分支" class="level2">
 <h2 class="anchored" data-anchor-id="参考答案仅-answer-分支">参考答案（仅 answer 分支）</h2>
 <p>先完成题目再核对；核对后必须解释关键公式，并改一个规模重新计算。</p>
-<div id="b93c7bee" class="cell" data-course_role="solution">
+<div id="b3a9b850" class="cell" data-course_role="solution">
 <details open="" class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
@@ -1551,146 +1547,146 @@ window.Quarto = {
 <span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">## 核心概念</span></span>
 <span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 核心操作与执行流程图解</span></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 矩阵乘法分块恒等式与张量并行的代数基础</span></span>
 <span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;</span></span>
-<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&lt;</span><span class="kw">img</span><span class="ot"> src</span><span class="op">=</span><span class="st">"assets/figs/tp_mlp_math_equivalence.png"</span><span class="ot"> width</span><span class="op">=</span><span class="st">"95%"</span><span class="ot"> alt</span><span class="op">=</span><span class="st">"张量并行先列后行代数等价性与零中间通信推导"</span><span class="ot"> </span><span class="dt">/&gt;</span></span>
-<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-1：Megatron-LM MLP 模块“先列后行”分块矩阵乘法代数等价性证明与零中间通信机制<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
-<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
-<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
-<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
-<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>    participant Input as 输入张量 X</span>
-<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>    participant Column as Column Linear (QKV Projection)</span>
-<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>    participant Core as Multi-Head Attention Compute</span>
-<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a>    participant Row as Row Linear (Out Projection)</span>
-<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>    participant Comm as 通信原语 (AllReduce)</span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a>张量并行（Tensor Parallelism, TP）是由 Megatron-LM 提出的经典模型并行范式。不同于数据并行（DP/ZeRO）在样本 batch 维度切分，TP 的核心思路是将神经网络层内部的单个矩阵乘法（GEMM）物理拆分到多个不同的 GPU 上协同计算。</span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a>在 PyTorch 线性层 $Y = X W^T$（或标准数学记号 $Y = X W$）中，设输入特征矩阵 $X \in \mathbb{R}^{B \times S \times H_{\text{in}}}$，权重矩阵 $W \in \mathbb{R}^{H_{\text{in}} \times H_{\text{out}}}$，利用矩阵分块乘法的基本恒等式，可以得到两种对称的并行切分方式：</span>
+<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 方案 A：列并行线性层（Column Parallel Linear）</span></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>将权重矩阵 $W$ 沿着输出特征维度（列维度）切分为 $k$ 块：$W = <span class="co">[</span><span class="ot">W_1, W_2, \dots, W_k</span><span class="co">]</span>$，其中每张卡分得切片 $W_i \in \mathbb{R}^{H_{\text{in}} \times \frac{H_{\text{out}}}{k}}$。</span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>输入张量 $X$ 在各卡间完整保留一份副本（无须切分）。各 GPU 本地独立执行矩阵乘：</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>$$Y_i = X \cdot W_i \quad (i = 1, \dots, k)$$</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>全局输出为各卡局部结果在列维度的拼接：</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>$$Y = <span class="co">[</span><span class="ot">Y_1, Y_2, \dots, Y_k</span><span class="co">]</span> = <span class="co">[</span><span class="ot">X W_1, X W_2, \dots, X W_k</span><span class="co">]</span> = X <span class="co">[</span><span class="ot">W_1, W_2, \dots, W_k</span><span class="co">]</span> = X W$$</span>
 <span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>    Input-&gt;&gt;Column: 无通信广播输入 X</span>
-<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>    Column-&gt;&gt;Core: 各卡计算本地注意力头 (Heads / TP)</span>
-<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>    Core-&gt;&gt;Row: 局部注意力上下文乘本地行分片</span>
-<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a>    Row-&gt;&gt;Comm: 触发一次 AllReduce 同步各卡部分和</span>
-<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>    Comm--&gt;&gt;Input: 输出完整特征向量进入下层</span>
-<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
-<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**通信语义**：若后续算子需要完整输出，需要发起一次 **All-Gather** 算子将 $<span class="co">[</span><span class="ot">Y_1, \dots, Y_k</span><span class="co">]</span>$ 跨卡拼接。</span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 方案 B：行并行线性层（Row Parallel Linear）</span></span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>将权重矩阵 $W$ 沿着输入特征维度（行维度）切分为 $k$ 块：$W = \begin{bmatrix} W_1 <span class="sc">\\</span> W_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> W_k \end{bmatrix}$，其中每张卡分得切片 $W_i \in \mathbb{R}^{\frac{H_{\text{in}}}{k} \times H_{\text{out}}}$。</span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>此时输入张量 $X$ 必须同步沿着最后一维切片为 $X = <span class="co">[</span><span class="ot">X_1, X_2, \dots, X_k</span><span class="co">]</span>$（通过 **Scatter** 分发到各卡）。各 GPU 本地计算部分和：</span>
 <span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 矩阵乘法分块恒等式与张量并行的代数基础</span></span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a>$$Z_i = X_i \cdot W_i \quad (i = 1, \dots, k)$$</span>
 <span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>张量并行（Tensor Parallelism, TP）是由 Megatron-LM 提出的经典模型并行范式。不同于数据并行（DP/ZeRO）在样本 batch 维度切分，TP 的核心思路是将神经网络层内部的单个矩阵乘法（GEMM）物理拆分到多个不同的 GPU 上协同计算。</span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>全局输出为各卡局部矩阵乘结果的直接数值相加：</span>
 <span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a>在 PyTorch 线性层 $Y = X W^T$（或标准数学记号 $Y = X W$）中，设输入特征矩阵 $X \in \mathbb{R}^{B \times S \times H_{\text{in}}}$，权重矩阵 $W \in \mathbb{R}^{H_{\text{in}} \times H_{\text{out}}}$，利用矩阵分块乘法的基本恒等式，可以得到两种对称的并行切分方式：</span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a>$$Y = \sum_{i=1}^k Z_i = \sum_{i=1}^k X_i W_i = <span class="co">[</span><span class="ot">X_1, X_2, \dots, X_k</span><span class="co">]</span> \begin{bmatrix} W_1 <span class="sc">\\</span> W_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> W_k \end{bmatrix} = X W$$</span>
 <span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 方案 A：列并行线性层（Column Parallel Linear）</span></span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**通信语义**：各卡计算出的 $Z_i$ 形状与全局输出完全一致，必须发起一次 **AllReduce (Sum)** 算子，各卡才能得到完整准确的特征向量 $Y$。</span>
 <span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a>将权重矩阵 $W$ 沿着输出特征维度（列维度）切分为 $k$ 块：$W = <span class="co">[</span><span class="ot">W_1, W_2, \dots, W_k</span><span class="co">]</span>$，其中每张卡分得切片 $W_i \in \mathbb{R}^{H_{\text{in}} \times \frac{H_{\text{out}}}{k}}$。</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Transformer 里的配对级联：消除中间通信的精妙设计</span></span>
 <span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a>输入张量 $X$ 在各卡间完整保留一份副本（无须切分）。各 GPU 本地独立执行矩阵乘：</span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a>如果简单地对每个线性层孤立使用列并行或行并行，每次计算都会分别引入一次 All-Gather 或 AllReduce，带来昂贵的通信开销。Megatron-LM 最天才的架构设计在于：**将网络模块设计为“列并行 $\to$ 行并行”的成对级联，使得中间层计算实现零通信跨越！**</span>
 <span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a>$$Y_i = X \cdot W_i \quad (i = 1, \dots, k)$$</span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. MLP 模块的列行级联与数学等价性证明（如**图 6-1** 所示）</span></span>
 <span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>全局输出为各卡局部结果在列维度的拼接：</span>
-<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a>$$Y = <span class="co">[</span><span class="ot">Y_1, Y_2, \dots, Y_k</span><span class="co">]</span> = <span class="co">[</span><span class="ot">X W_1, X W_2, \dots, X W_k</span><span class="co">]</span> = X <span class="co">[</span><span class="ot">W_1, W_2, \dots, W_k</span><span class="co">]</span> = X W$$</span>
-<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**通信语义**：若后续算子需要完整输出，需要发起一次 **All-Gather** 算子将 $<span class="co">[</span><span class="ot">Y_1, \dots, Y_k</span><span class="co">]</span>$ 跨卡拼接。</span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;</span></span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&lt;</span><span class="kw">img</span><span class="ot"> src</span><span class="op">=</span><span class="st">"assets/figs/tp_mlp_math_equivalence.png"</span><span class="ot"> width</span><span class="op">=</span><span class="st">"95%"</span><span class="ot"> alt</span><span class="op">=</span><span class="st">"张量并行先列后行代数等价性与零中间通信推导"</span><span class="ot"> </span><span class="dt">/&gt;</span></span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-1：Megatron-LM MLP 模块“先列后行”分块矩阵乘法代数等价性证明与零中间通信机制<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-74"><a href="#cb4-74" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-75"><a href="#cb4-75" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a><span class="fu">#### 方案 B：行并行线性层（Row Parallel Linear）</span></span>
-<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>将权重矩阵 $W$ 沿着输入特征维度（行维度）切分为 $k$ 块：$W = \begin{bmatrix} W_1 <span class="sc">\\</span> W_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> W_k \end{bmatrix}$，其中每张卡分得切片 $W_i \in \mathbb{R}^{\frac{H_{\text{in}}}{k} \times H_{\text{out}}}$。</span>
+<span id="cb4-76"><a href="#cb4-76" aria-hidden="true" tabindex="-1"></a>在经典 Transformer MLP 模块中，单卡未切分的标准前向计算流程为：</span>
+<span id="cb4-77"><a href="#cb4-77" aria-hidden="true" tabindex="-1"></a>$$Y = \sigma(X W_1) \cdot W_2$$</span>
+<span id="cb4-78"><a href="#cb4-78" aria-hidden="true" tabindex="-1"></a>其中输入矩阵 $X \in \mathbb{R}^{B \times d}$，升维权重 $W_1 \in \mathbb{R}^{d \times 4d}$，逐元素激活函数 $\sigma$（如 GeLU、SiLU），降维权重 $W_2 \in \mathbb{R}^{4d \times d}$，输出特征 $Y \in \mathbb{R}^{B \times d}$。</span>
 <span id="cb4-79"><a href="#cb4-79" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>此时输入张量 $X$ 必须同步沿着最后一维切片为 $X = <span class="co">[</span><span class="ot">X_1, X_2, \dots, X_k</span><span class="co">]</span>$（通过 **Scatter** 分发到各卡）。各 GPU 本地计算部分和：</span>
+<span id="cb4-80"><a href="#cb4-80" aria-hidden="true" tabindex="-1"></a>很多初学者容易困惑：**为什么各卡各自计算一部分局部矩阵乘，中间完全不通信，最后仅在模块出口做一次 AllReduce 求和，结果就能与单卡全量计算分毫不差地严格等价？**</span>
 <span id="cb4-81"><a href="#cb4-81" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>$$Z_i = X_i \cdot W_i \quad (i = 1, \dots, k)$$</span>
+<span id="cb4-82"><a href="#cb4-82" aria-hidden="true" tabindex="-1"></a>其底层的严密代数推导依托于以下四个数学步骤：</span>
 <span id="cb4-83"><a href="#cb4-83" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a>全局输出为各卡局部矩阵乘结果的直接数值相加：</span>
+<span id="cb4-84"><a href="#cb4-84" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 1. 代数基石：分块矩阵乘法恒等式（Block GEMM Identity）</span></span>
 <span id="cb4-85"><a href="#cb4-85" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a>$$Y = \sum_{i=1}^k Z_i = \sum_{i=1}^k X_i W_i = <span class="co">[</span><span class="ot">X_1, X_2, \dots, X_k</span><span class="co">]</span> \begin{bmatrix} W_1 <span class="sc">\\</span> W_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> W_k \end{bmatrix} = X W$$</span>
+<span id="cb4-86"><a href="#cb4-86" aria-hidden="true" tabindex="-1"></a>设行分块矩阵 $A = <span class="co">[</span><span class="ot">A_1, A_2, \dots, A_k</span><span class="co">]</span>$ 与列分块矩阵 $B = \begin{bmatrix} B_1 <span class="sc">\\</span> B_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> B_k \end{bmatrix}$，其中子块 $A_i$ 的列数与 $B_i$ 的行数在内部收缩维度严格相等。由线性代数分块内积展开定理，两者的全局矩阵乘积恒等于各子块对应积的累加和：</span>
 <span id="cb4-87"><a href="#cb4-87" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**通信语义**：各卡计算出的 $Z_i$ 形状与全局输出完全一致，必须发起一次 **AllReduce (Sum)** 算子，各卡才能得到完整准确的特征向量 $Y$。</span>
+<span id="cb4-88"><a href="#cb4-88" aria-hidden="true" tabindex="-1"></a>$$A B = <span class="co">[</span><span class="ot">A_1, A_2, \dots, A_k</span><span class="co">]</span> \begin{bmatrix} B_1 <span class="sc">\\</span> B_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> B_k \end{bmatrix} = \sum_{i=1}^k A_i B_i = A_1 B_1 + A_2 B_2 + \dots + A_k B_k$$</span>
 <span id="cb4-89"><a href="#cb4-89" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. Transformer 里的配对级联：消除中间通信的精妙设计</span></span>
+<span id="cb4-90"><a href="#cb4-90" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 2. 步骤一：第一层列并行（Column Parallel GEMM）</span></span>
 <span id="cb4-91"><a href="#cb4-91" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a>如果简单地对每个线性层孤立使用列并行或行并行，每次计算都会分别引入一次 All-Gather 或 AllReduce，带来昂贵的通信开销。Megatron-LM 最天才的架构设计在于：**将网络模块设计为“列并行 $\to$ 行并行”的成对级联，使得中间层计算实现零通信跨越！**</span>
-<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a><span class="fu">#### A. MLP 模块的列行级联与数学等价性证明（如**图 6-1** 所示）</span></span>
-<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a>在经典 Transformer MLP 模块中，单卡未切分的标准前向计算流程为：</span>
-<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a>$$Y = \sigma(X W_1) \cdot W_2$$</span>
-<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a>其中输入矩阵 $X \in \mathbb{R}^{B \times d}$，升维权重 $W_1 \in \mathbb{R}^{d \times 4d}$，逐元素激活函数 $\sigma$（如 GeLU、SiLU），降维权重 $W_2 \in \mathbb{R}^{4d \times d}$，输出特征 $Y \in \mathbb{R}^{B \times d}$。</span>
-<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a>很多初学者容易困惑：**为什么各卡各自计算一部分局部矩阵乘，中间完全不通信，最后仅在模块出口做一次 AllReduce 求和，结果就能与单卡全量计算分毫不差地严格等价？**</span>
-<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a>其底层的严密代数推导依托于以下四个数学步骤：</span>
-<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 1. 代数基石：分块矩阵乘法恒等式（Block GEMM Identity）</span></span>
-<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a>设行分块矩阵 $A = <span class="co">[</span><span class="ot">A_1, A_2, \dots, A_k</span><span class="co">]</span>$ 与列分块矩阵 $B = \begin{bmatrix} B_1 <span class="sc">\\</span> B_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> B_k \end{bmatrix}$，其中子块 $A_i$ 的列数与 $B_i$ 的行数在内部收缩维度严格相等。由线性代数分块内积展开定理，两者的全局矩阵乘积恒等于各子块对应积的累加和：</span>
-<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a>$$A B = <span class="co">[</span><span class="ot">A_1, A_2, \dots, A_k</span><span class="co">]</span> \begin{bmatrix} B_1 <span class="sc">\\</span> B_2 <span class="sc">\\</span> \vdots <span class="sc">\\</span> B_k \end{bmatrix} = \sum_{i=1}^k A_i B_i = A_1 B_1 + A_2 B_2 + \dots + A_k B_k$$</span>
-<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 2. 步骤一：第一层列并行（Column Parallel GEMM）</span></span>
-<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>将升维权重矩阵 $W_1$ 沿输出隐藏层维度（列维度）均分为 $k$ 块（$k = \text{TP}$）：</span>
-<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a>  $$W_1 = [W_{1, 1}, W_{1, 2}, \dots, W_{1, k}], \quad W_{1, i} \in \mathbb{R}^{d \times \frac{4d}{k}}$$</span>
-<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>输入张量 $X$ 完整广播至各卡（两卡均常驻完整副本）。</span>
-<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>各 GPU 独立执行本地矩阵乘法：</span>
-<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a>  $$H = X W_1 = X [W_{1, 1}, W_{1, 2}, \dots, W_{1, k}] = [X W_{1, 1}, X W_{1, 2}, \dots, X W_{1, k}] = <span class="co">[</span><span class="ot">H_1, H_2, \dots, H_k</span><span class="co">]</span>$$</span>
-<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每张卡计算出的本地特征为 $H_i = X W_{1, i} \in \mathbb{R}^{B \times \frac{4d}{k}}$。此时中间隐藏状态 $H$ 天然以**列分块**形式分布在各卡本地显存中。</span>
+<span id="cb4-92"><a href="#cb4-92" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>将升维权重矩阵 $W_1$ 沿输出隐藏层维度（列维度）均分为 $k$ 块（$k = \text{TP}$）：</span>
+<span id="cb4-93"><a href="#cb4-93" aria-hidden="true" tabindex="-1"></a>  $$W_1 = [W_{1, 1}, W_{1, 2}, \dots, W_{1, k}], \quad W_{1, i} \in \mathbb{R}^{d \times \frac{4d}{k}}$$</span>
+<span id="cb4-94"><a href="#cb4-94" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-95"><a href="#cb4-95" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>输入张量 $X$ 完整广播至各卡（两卡均常驻完整副本）。</span>
+<span id="cb4-96"><a href="#cb4-96" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>各 GPU 独立执行本地矩阵乘法：</span>
+<span id="cb4-97"><a href="#cb4-97" aria-hidden="true" tabindex="-1"></a>  $$H = X W_1 = X [W_{1, 1}, W_{1, 2}, \dots, W_{1, k}] = [X W_{1, 1}, X W_{1, 2}, \dots, X W_{1, k}] = <span class="co">[</span><span class="ot">H_1, H_2, \dots, H_k</span><span class="co">]</span>$$</span>
+<span id="cb4-98"><a href="#cb4-98" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-99"><a href="#cb4-99" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>每张卡计算出的本地特征为 $H_i = X W_{1, i} \in \mathbb{R}^{B \times \frac{4d}{k}}$。此时中间隐藏状态 $H$ 天然以**列分块**形式分布在各卡本地显存中。</span>
+<span id="cb4-100"><a href="#cb4-100" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-101"><a href="#cb4-101" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 3. 步骤二：逐元素非线性激活的穿透性（零通信的数学核心！）</span></span>
+<span id="cb4-102"><a href="#cb4-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-103"><a href="#cb4-103" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>激活函数 $\sigma$（如 GeLU、SiLU、ReLU）是**逐元素映射（Element-wise）**，每一个输出标量仅取决于当前位置的输入标量，**不发生任何通道间（跨列）的信息混叠与交叉求和**。</span>
+<span id="cb4-104"><a href="#cb4-104" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>因此，逐元素函数对按列分块拼接操作具有完全的穿透与可交换性：</span>
+<span id="cb4-105"><a href="#cb4-105" aria-hidden="true" tabindex="-1"></a>  $$\sigma(H) = \sigma(<span class="co">[</span><span class="ot">H_1, H_2, \dots, H_k</span><span class="co">]</span>) = <span class="co">[</span><span class="ot">\sigma(H_1), \sigma(H_2), \dots, \sigma(H_k)</span><span class="co">]</span> = <span class="co">[</span><span class="ot">\widetilde{H}_1, \widetilde{H}_2, \dots, \widetilde{H}_k</span><span class="co">]</span>$$</span>
+<span id="cb4-106"><a href="#cb4-106" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-107"><a href="#cb4-107" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**关键结论**：每张 GPU 仅需在本地对自己的 $H_i$ 执行 $\widetilde{H}_i = \sigma(H_i)$，中间**完全不需要跨卡交换任何数据，通信开销严格为 0**！</span>
+<span id="cb4-108"><a href="#cb4-108" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-109"><a href="#cb4-109" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 4. 步骤三：第二层行并行（Row Parallel GEMM）与分块内积匹配</span></span>
+<span id="cb4-110"><a href="#cb4-110" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-111"><a href="#cb4-111" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>将第二层降维权重 $W_2$ 沿输入行维度均匀切分：</span>
+<span id="cb4-112"><a href="#cb4-112" aria-hidden="true" tabindex="-1"></a>  $$W_2 = \begin{bmatrix} W_{2, 1} \\ W_{2, 2} \\ \vdots \\ W_{2, k} \end{bmatrix}, \quad W_{2, i} \in \mathbb{R}^{\frac{4d}{k} \times d}$$</span>
+<span id="cb4-113"><a href="#cb4-113" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-114"><a href="#cb4-114" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>此时，左侧激活矩阵 $\widetilde{H} = <span class="co">[</span><span class="ot">\widetilde{H}_1, \dots, \widetilde{H}_k</span><span class="co">]</span>$ 的列切片维度（$\frac{4d}{k}$）与右侧权重矩阵 $W_2$ 的行切片维度（$\frac{4d}{k}$）**严格完全对齐**！</span>
+<span id="cb4-115"><a href="#cb4-115" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>直接代入前面的分块矩阵乘法恒等式：</span>
+<span id="cb4-116"><a href="#cb4-116" aria-hidden="true" tabindex="-1"></a>  $$\widetilde{H} W_2 = [\widetilde{H}_1, \widetilde{H}_2, \dots, \widetilde{H}_k] \begin{bmatrix} W_{2, 1} \\ W_{2, 2} \\ \vdots \\ W_{2, k} \end{bmatrix} = \sum_{i=1}^k \widetilde{H}_i W_{2, i}$$</span>
+<span id="cb4-117"><a href="#cb4-117" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-118"><a href="#cb4-118" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>观察求和式中的每一项 $\widetilde{H}_i W_{2, i}$：GPU $i$ 本地持有 $\widetilde{H}_i$（来自步骤二本地激活）与 $W_{2, i}$（本地参数切片），因此各卡可以在本地独立完成局部矩阵乘法：</span>
+<span id="cb4-119"><a href="#cb4-119" aria-hidden="true" tabindex="-1"></a>  $$Z_i = \widetilde{H}_i W_{2, i} = \sigma(X W_{1, i}) \cdot W_{2, i} \in \mathbb{R}^{B \times d}$$</span>
 <span id="cb4-120"><a href="#cb4-120" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 3. 步骤二：逐元素非线性激活的穿透性（零通信的数学核心！）</span></span>
+<span id="cb4-121"><a href="#cb4-121" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>这一步局部 GEMM **同样完全在各卡本地完成，全程零通信**！</span>
 <span id="cb4-122"><a href="#cb4-122" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>激活函数 $\sigma$（如 GeLU、SiLU、ReLU）是**逐元素映射（Element-wise）**，每一个输出标量仅取决于当前位置的输入标量，**不发生任何通道间（跨列）的信息混叠与交叉求和**。</span>
-<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>因此，逐元素函数对按列分块拼接操作具有完全的穿透与可交换性：</span>
-<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a>  $$\sigma(H) = \sigma(<span class="co">[</span><span class="ot">H_1, H_2, \dots, H_k</span><span class="co">]</span>) = <span class="co">[</span><span class="ot">\sigma(H_1), \sigma(H_2), \dots, \sigma(H_k)</span><span class="co">]</span> = <span class="co">[</span><span class="ot">\widetilde{H}_1, \widetilde{H}_2, \dots, \widetilde{H}_k</span><span class="co">]</span>$$</span>
-<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**关键结论**：每张 GPU 仅需在本地对自己的 $H_i$ 执行 $\widetilde{H}_i = \sigma(H_i)$，中间**完全不需要跨卡交换任何数据，通信开销严格为 0**！</span>
-<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 4. 步骤三：第二层行并行（Row Parallel GEMM）与分块内积匹配</span></span>
-<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>将第二层降维权重 $W_2$ 沿输入行维度均匀切分：</span>
-<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a>  $$W_2 = \begin{bmatrix} W_{2, 1} \\ W_{2, 2} \\ \vdots \\ W_{2, k} \end{bmatrix}, \quad W_{2, i} \in \mathbb{R}^{\frac{4d}{k} \times d}$$</span>
+<span id="cb4-123"><a href="#cb4-123" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 5. 步骤四：末尾 AllReduce (Sum) 闭环实现严格等价</span></span>
+<span id="cb4-124"><a href="#cb4-124" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-125"><a href="#cb4-125" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>观察全局真实输出：</span>
+<span id="cb4-126"><a href="#cb4-126" aria-hidden="true" tabindex="-1"></a>  $$Y = \sum_{i=1}^k Z_i = Z_1 + Z_2 + \dots + Z_k$$</span>
+<span id="cb4-127"><a href="#cb4-127" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-128"><a href="#cb4-128" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>各卡本地算出的 $Z_i$ 形状完全一致，均为完整输出尺寸 $(B \times d)$。</span>
+<span id="cb4-129"><a href="#cb4-129" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>系统只需在 MLP 模块的出口调用**一次 `AllReduce(op=Sum)` 通信原语**：</span>
+<span id="cb4-130"><a href="#cb4-130" aria-hidden="true" tabindex="-1"></a>  $$\text{AllReduce}(<span class="sc">\{</span>Z_i\}_{i=1}^k) = \sum_{i=1}^k Z_i = \sum_{i=1}^k \sigma(X W_{1, i}) W_{2, i} \equiv \sigma(X W_1) \cdot W_2 = Y$$</span>
+<span id="cb4-131"><a href="#cb4-131" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-132"><a href="#cb4-132" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一次 AllReduce 即可将所有分块项累加，使每张 GPU 同时获得与单卡计算完全一致的数学真实解 $Y$！</span>
 <span id="cb4-133"><a href="#cb4-133" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>此时，左侧激活矩阵 $\widetilde{H} = <span class="co">[</span><span class="ot">\widetilde{H}_1, \dots, \widetilde{H}_k</span><span class="co">]</span>$ 的列切片维度（$\frac{4d}{k}$）与右侧权重矩阵 $W_2$ 的行切片维度（$\frac{4d}{k}$）**严格完全对齐**！</span>
-<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>直接代入前面的分块矩阵乘法恒等式：</span>
-<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a>  $$\widetilde{H} W_2 = [\widetilde{H}_1, \widetilde{H}_2, \dots, \widetilde{H}_k] \begin{bmatrix} W_{2, 1} \\ W_{2, 2} \\ \vdots \\ W_{2, k} \end{bmatrix} = \sum_{i=1}^k \widetilde{H}_i W_{2, i}$$</span>
+<span id="cb4-134"><a href="#cb4-134" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 6. 为什么颠倒为“先行后列”无法消除中间通信？（反证对比）</span></span>
+<span id="cb4-135"><a href="#cb4-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-136"><a href="#cb4-136" aria-hidden="true" tabindex="-1"></a>若将级联顺序颠倒为“第一层行并行 $\to$ 第二层列并行”：</span>
 <span id="cb4-137"><a href="#cb4-137" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>观察求和式中的每一项 $\widetilde{H}_i W_{2, i}$：GPU $i$ 本地持有 $\widetilde{H}_i$（来自步骤二本地激活）与 $W_{2, i}$（本地参数切片），因此各卡可以在本地独立完成局部矩阵乘法：</span>
-<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a>  $$Z_i = \widetilde{H}_i W_{2, i} = \sigma(X W_{1, i}) \cdot W_{2, i} \in \mathbb{R}^{B \times d}$$</span>
-<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>这一步局部 GEMM **同样完全在各卡本地完成，全程零通信**！</span>
-<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 5. 步骤四：末尾 AllReduce (Sum) 闭环实现严格等价</span></span>
+<span id="cb4-138"><a href="#cb4-138" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>第一层行切分：输入 $X = <span class="co">[</span><span class="ot">X_1, X_2</span><span class="co">]</span>$，权重 $W_1 = \begin{bmatrix} W_{1, 1} \\ W_{1, 2} \end{bmatrix}$。各卡计算局部积 $X_i W_{1, i}$。</span>
+<span id="cb4-139"><a href="#cb4-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-140"><a href="#cb4-140" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>此时中间隐藏状态为各卡局部积的加和：$H = X_1 W_{1, 1} + X_2 W_{1, 2}$。</span>
+<span id="cb4-141"><a href="#cb4-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-142"><a href="#cb4-142" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**致命障碍在于非线性激活函数对加法不满足分配律**：</span>
+<span id="cb4-143"><a href="#cb4-143" aria-hidden="true" tabindex="-1"></a>   $$\sigma(A + B) \neq \sigma(A) + \sigma(B) \quad (\text{例如 } \text{GeLU}(x_1 + x_2) \neq \text{GeLU}(x_1) + \text{GeLU}(x_2))$$</span>
 <span id="cb4-144"><a href="#cb4-144" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>观察全局真实输出：</span>
-<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a>  $$Y = \sum_{i=1}^k Z_i = Z_1 + Z_2 + \dots + Z_k$$</span>
-<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>各卡本地算出的 $Z_i$ 形状完全一致，均为完整输出尺寸 $(B \times d)$。</span>
-<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>系统只需在 MLP 模块的出口调用**一次 `AllReduce(op=Sum)` 通信原语**：</span>
-<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a>  $$\text{AllReduce}(<span class="sc">\{</span>Z_i\}_{i=1}^k) = \sum_{i=1}^k Z_i = \sum_{i=1}^k \sigma(X W_{1, i}) W_{2, i} \equiv \sigma(X W_1) \cdot W_2 = Y$$</span>
-<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>一次 AllReduce 即可将所有分块项累加，使每张 GPU 同时获得与单卡计算完全一致的数学真实解 $Y$！</span>
-<span id="cb4-153"><a href="#cb4-153" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-154"><a href="#cb4-154" aria-hidden="true" tabindex="-1"></a><span class="fu">##### 6. 为什么颠倒为“先行后列”无法消除中间通信？（反证对比）</span></span>
-<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a>若将级联顺序颠倒为“第一层行并行 $\to$ 第二层列并行”：</span>
-<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>第一层行切分：输入 $X = <span class="co">[</span><span class="ot">X_1, X_2</span><span class="co">]</span>$，权重 $W_1 = \begin{bmatrix} W_{1, 1} \\ W_{1, 2} \end{bmatrix}$。各卡计算局部积 $X_i W_{1, i}$。</span>
-<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>此时中间隐藏状态为各卡局部积的加和：$H = X_1 W_{1, 1} + X_2 W_{1, 2}$。</span>
-<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span>**致命障碍在于非线性激活函数对加法不满足分配律**：</span>
-<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a>   $$\sigma(A + B) \neq \sigma(A) + \sigma(B) \quad (\text{例如 } \text{GeLU}(x_1 + x_2) \neq \text{GeLU}(x_1) + \text{GeLU}(x_2))$$</span>
-<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>因此各卡**绝不能**在本地各自计算 $\sigma(X_i W_{1, i})$！必须在第一层之后**强行插入一次 AllReduce** 将 $H$ 累加出来，才能计算激活值 $\sigma(H)$。</span>
-<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a><span class="ss">5. </span>第二层紧接列并行时，后续又需要通信拼接，导致整个模块必须执行 **2 次集体通信**。</span>
-<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a><span class="ss">6. </span>结论：Megatron-LM 之所以能将通信压缩为仅 1 次 AllReduce，核心正在于**“先列切分使得非线性激活在本地解耦”与“后行切分使得矩阵分块内积展开刚好匹配加法规约”**的精妙数学对偶。</span>
-<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 多头自注意力模块（MHA）的列行级联（如**图 6-2** 所示）</span></span>
+<span id="cb4-145"><a href="#cb4-145" aria-hidden="true" tabindex="-1"></a><span class="ss">4. </span>因此各卡**绝不能**在本地各自计算 $\sigma(X_i W_{1, i})$！必须在第一层之后**强行插入一次 AllReduce** 将 $H$ 累加出来，才能计算激活值 $\sigma(H)$。</span>
+<span id="cb4-146"><a href="#cb4-146" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-147"><a href="#cb4-147" aria-hidden="true" tabindex="-1"></a><span class="ss">5. </span>第二层紧接列并行时，后续又需要通信拼接，导致整个模块必须执行 **2 次集体通信**。</span>
+<span id="cb4-148"><a href="#cb4-148" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-149"><a href="#cb4-149" aria-hidden="true" tabindex="-1"></a><span class="ss">6. </span>结论：Megatron-LM 之所以能将通信压缩为仅 1 次 AllReduce，核心正在于**“先列切分使得非线性激活在本地解耦”与“后行切分使得矩阵分块内积展开刚好匹配加法规约”**的精妙数学对偶。</span>
+<span id="cb4-150"><a href="#cb4-150" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-151"><a href="#cb4-151" aria-hidden="true" tabindex="-1"></a><span class="fu">#### B. 多头自注意力模块（MHA）的列行级联（如**图 6-2** 所示）</span></span>
+<span id="cb4-152"><a href="#cb4-152" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-155"><a href="#cb4-155" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb4-156"><a href="#cb4-156" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb4-157"><a href="#cb4-157" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb4-158"><a href="#cb4-158" aria-hidden="true" tabindex="-1"></a>    participant Input as 输入张量 X</span>
+<span id="cb4-159"><a href="#cb4-159" aria-hidden="true" tabindex="-1"></a>    participant Column as Column Linear (QKV Projection)</span>
+<span id="cb4-160"><a href="#cb4-160" aria-hidden="true" tabindex="-1"></a>    participant Core as Multi-Head Attention Compute</span>
+<span id="cb4-161"><a href="#cb4-161" aria-hidden="true" tabindex="-1"></a>    participant Row as Row Linear (Out Projection)</span>
+<span id="cb4-162"><a href="#cb4-162" aria-hidden="true" tabindex="-1"></a>    participant Comm as 通信原语 (AllReduce)</span>
+<span id="cb4-163"><a href="#cb4-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-164"><a href="#cb4-164" aria-hidden="true" tabindex="-1"></a>    Input-&gt;&gt;Column: 无通信广播输入 X</span>
+<span id="cb4-165"><a href="#cb4-165" aria-hidden="true" tabindex="-1"></a>    Column-&gt;&gt;Core: 各卡计算本地注意力头 (Heads / TP)</span>
+<span id="cb4-166"><a href="#cb4-166" aria-hidden="true" tabindex="-1"></a>    Core-&gt;&gt;Row: 局部注意力上下文乘本地行分片</span>
+<span id="cb4-167"><a href="#cb4-167" aria-hidden="true" tabindex="-1"></a>    Row-&gt;&gt;Comm: 触发一次 AllReduce 同步各卡部分和</span>
+<span id="cb4-168"><a href="#cb4-168" aria-hidden="true" tabindex="-1"></a>    Comm--&gt;&gt;Input: 输出完整特征向量进入下层</span>
+<span id="cb4-169"><a href="#cb4-169" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb4-170"><a href="#cb4-170" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb4-171"><a href="#cb4-171" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-172"><a href="#cb4-172" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-173"><a href="#cb4-173" aria-hidden="true" tabindex="-1"></a>自注意力模块遵循完全相同的对称哲学：</span>
 <span id="cb4-174"><a href="#cb4-174" aria-hidden="true" tabindex="-1"></a></span>
