@@ -25,11 +25,14 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
 
-::: {.img-card}
-![Tiled MMA API 图解](assets/figs/fig_08_make_tiled_mma_API_图解.png){width="90%"}
-<p class="caption">图 5-1：CUTLASS make_tiled_mma API 与硬件指令对应关系图解</p>
+**MMA Atom 与 Tiled MMA（三级分块计算流水线）** 是 CUTLASS 3.x 驾驭现代 GPU Tensor Core 矩阵乘法核心指令的顶层代数抽象。
+
+**从硬件微指令到工程算子的鸿沟（结合图 5-1 与图 5-2）**：
+- **微架构的物理现实**：现代 Tensor Core 硬件指令（如 Ampere 的 `mma.sync.aligned.m16n8k16`，Hopper 的 `wgmma.mma_async`）操作的矩阵尺寸极其微小（如 $16 \times 8 \times 16$）。单条指令只能由一个 Warp（32 线程）协同执行，且每个线程持有的寄存器槽位排布必须严格与硬件芯片布线相契合；
+- **三级 Tiling 架构（图 5-2）**：
+
 :::
 
 ```{mermaid}
@@ -42,14 +45,7 @@ flowchart TD
     end
 ```
 <p class="caption" align="center"><em>图 5-2：从硬件 Atom 到 Thread Block 的三级分层 GEMM 构建流</em></p>
-
-### 1. 它是什么，解决什么问题
-
-**MMA Atom 与 Tiled MMA（三级分块计算流水线）** 是 CUTLASS 3.x 驾驭现代 GPU Tensor Core 矩阵乘法核心指令的顶层代数抽象。
-
-**从硬件微指令到工程算子的鸿沟（结合图 5-1 与图 5-2）**：
-- **微架构的物理现实**：现代 Tensor Core 硬件指令（如 Ampere 的 `mma.sync.aligned.m16n8k16`，Hopper 的 `wgmma.mma_async`）操作的矩阵尺寸极其微小（如 $16 \times 8 \times 16$）。单条指令只能由一个 Warp（32 线程）协同执行，且每个线程持有的寄存器槽位排布必须严格与硬件芯片布线相契合；
-- **三级 Tiling 架构（图 5-2）**：如何将任意巨大的全局矩阵乘法无缝映射到该微小指令上？CUTLASS 构建了严密的三级代数投影：
+如何将任意巨大的全局矩阵乘法无缝映射到该微小指令上？CUTLASS 构建了严密的三级代数投影：
   1. **MMA Atom（指令级原子）**：封装单条硬件 PTX 指令的数学形状、数据类型与 Warp 线程映射契约；
   2. **Warp Tile（线程束级分块）**：在单个 Warp 内部沿 $M, N$ 维度平铺复制多个 Atom，扩大单 Warp 的寄存器工作域；
   3. **CTA Tile / Tiled MMA（线程块级分块）**：编排多个 Warp（如 $2 \times 2$ 或 $4 \times 1$）组成 ThreadBlock，协同从 Shared Memory 消费数据并累加至私有寄存器；
@@ -57,6 +53,11 @@ flowchart TD
 - **核心价值**：通过 `make_tiled_mma`，开发者无需手工编写汇编级寄存器重排，CuTe 会自动推导出每个线程在 $A$、$B$ 与累加器 $C$ 上的**强类型分片张量（Partitioned Fragment）**。
 
 ### 2. 它如何工作（结合图 5-1 与图 5-2）
+
+::: {.img-card}
+![Tiled MMA API 图解](assets/figs/fig_08_make_tiled_mma_API_图解.png){width="90%"}
+<p class="caption">图 5-1：CUTLASS make_tiled_mma API 与硬件指令对应关系图解</p>
+
 
 以 Ampere 架构标准半精度 FP16 为例，三级分块的具体构建与执行流程如下：
 

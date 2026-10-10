@@ -21,7 +21,16 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在深度学习系统开发中，工程师最常遭遇的两大“幽灵现象”莫过于：**“明明 GPU 显存还显示剩余很多，却突发抛出 `CUDA out of memory`（OOM）”**，以及**“代码里写的运算逻辑很紧凑，但 GPU 吞吐极低且利用率大幅波动”**。
+
+解决这两大系统难题依赖于底层的显存管理机制与全栈性能剖析工具链：
+
+1. **PyTorch Caching Allocator（显存缓存分配器）**：
+   - 解决的核心问题是**消除昂贵的 `cudaMalloc` 系统调用开销并控制显存外部碎片**。
+   - 直接调用 NVIDIA 驱动层的 `cudaMalloc` / `cudaFree` 极其昂贵，不仅涉及操作系统用户态到内核态的上下文切换，还会强制同步全 GPU 的所有计算流（耗时达数十至数百微秒）。对于每秒创建数万个临时张量的深度学习网络，直接调用驱动分配器将使性能崩溃；
+   - 如图 7-1 所示，PyTorch 在用户空间实现了高效的双池
 
 ```{mermaid}
 flowchart TD
@@ -37,6 +46,12 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 7-1：PyTorch 缓存分配器双池结构与显存切分碎片控制模型</em></p>
 
+（Large/Small Pool）内存池化管理，向操作系统批发大块显存段（Segments），并在应用层按需细分管理。
+
+2. **PyTorch Profiler 与 CUPTI 跨设备全景时间线（Timeline）**：
+   - 解决的核心问题是**穿透异步执行假象，精确关联 CPU 调用与 GPU 真实物理执行时序**。
+   - 如图 7-2 所示，通过集成底层 CUPTI
+
 ```{mermaid}
 flowchart LR
     StartTrace["启动 torch.profiler 采集"] --> CPUHook["CPU 端拦截 Python Op 分发并打标 Correlation ID"]
@@ -46,20 +61,7 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 7-2：端到端 Profiler 追踪捕获、跨设备事件关联与时间线呈现流程</em></p>
 
-### 1. 它是什么，解决什么问题
-
-在深度学习系统开发中，工程师最常遭遇的两大“幽灵现象”莫过于：**“明明 GPU 显存还显示剩余很多，却突发抛出 `CUDA out of memory`（OOM）”**，以及**“代码里写的运算逻辑很紧凑，但 GPU 吞吐极低且利用率大幅波动”**。
-
-解决这两大系统难题依赖于底层的显存管理机制与全栈性能剖析工具链：
-
-1. **PyTorch Caching Allocator（显存缓存分配器）**：
-   - 解决的核心问题是**消除昂贵的 `cudaMalloc` 系统调用开销并控制显存外部碎片**。
-   - 直接调用 NVIDIA 驱动层的 `cudaMalloc` / `cudaFree` 极其昂贵，不仅涉及操作系统用户态到内核态的上下文切换，还会强制同步全 GPU 的所有计算流（耗时达数十至数百微秒）。对于每秒创建数万个临时张量的深度学习网络，直接调用驱动分配器将使性能崩溃；
-   - 如图 7-1 所示，PyTorch 在用户空间实现了高效的双池（Large/Small Pool）内存池化管理，向操作系统批发大块显存段（Segments），并在应用层按需细分管理。
-
-2. **PyTorch Profiler 与 CUPTI 跨设备全景时间线（Timeline）**：
-   - 解决的核心问题是**穿透异步执行假象，精确关联 CPU 调用与 GPU 真实物理执行时序**。
-   - 如图 7-2 所示，通过集成底层 CUPTI（CUDA Profiling Tools Interface）事件，建立全局关联标识符（Correlation ID），精准测量算子在 GPU 硬件上的真实执行跨度与流间气泡。
+（CUDA Profiling Tools Interface）事件，建立全局关联标识符（Correlation ID），精准测量算子在 GPU 硬件上的真实执行跨度与流间气泡。
 
 ### 2. 它如何工作
 

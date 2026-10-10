@@ -25,35 +25,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart LR
-    subgraph StableSoftmax["安全防溢出 Softmax 技巧"]
-        direction TB
-        Raw["原始分数 x_i (可能极大)"] --> Max["求全局最大值 m = max(x_i)"]
-        Max --> Shift["平移指数: exp(x_i - m) (指数区间 <= 0，绝不溢出)"]
-        Shift --> Sum["累加和: d = sum(exp(x_i - m))"]
-        Sum --> Div["归一化输出: y_i = exp(x_i - m) / d"]
-    end
-```
-<p class="caption" align="center"><em>图 6-1：数值安全 Softmax 减最大值平移与归一化机制</em></p>
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant T as 线程集合
-    participant S as 共享内存 (SMem)
-    participant G as 全局内存 (GMEM)
-
-    T->>G: 第一次遍历: 读取 x[i]，归约求全局最大值 m
-    T->>S: 广播最大值 m
-    T->>G: 第二次遍历: 重新读取 x[i]，计算 exp(x[i]-m) 并累加总和 d
-    T->>S: 广播分母 d
-    T->>G: 第三次遍历: 计算最终概率值并写回全局内存
-```
-<p class="caption" align="center"><em>图 6-2：朴素 Softmax 三遍访存流水线与内存开销瓶颈</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **Softmax 算子** 是分类任务和自注意力机制（Self-Attention）的核心基础。它将未归一化的实数得分向量 $\mathbf{x} = [x_1, x_2, \dots, x_N]$ 映射为非负且归一化的概率分布向量 $\mathbf{y}$：
@@ -62,7 +33,20 @@ $$y_i = \frac{e^{x_i}}{\sum_{j=1}^N e^{x_j}}, \quad \text{其中 } y_i > 0, \ \s
 **面对的数值危险（溢出与下溢）**：
 - **上溢（Overflow）**：在 IEEE 754 单精度浮点数（FP32）中，最大可表示正数为 $\approx 3.4 \times 10^{38}$。由于指数函数的爆炸性增长，当输入分量 $x_i > \ln(3.4 \times 10^{38}) \approx 88.72$ 时，`expf(x_i)` 就会直接溢出为正无穷 `+inf`。若分母中包含 `+inf`，或者分子分母均为 `+inf`，浮点运算将直接生成不可逆的 `NaN`；
 - **下溢（Underflow）**：当输入分量极小（如 $x_i < -87.33$）时，`expf(x_i)` 下溢归零。若所有分量皆下溢，分母归零，触发除以零异常；
-- **解决方案（Safe Softmax，图 6-1）**：利用恒等式 $\frac{e^{x_i}}{\sum_j e^{x_j}} = \frac{e^{x_i - m}}{\sum_j e^{x_j - m}}$，其中 $m = \max_{1 \le k \le N} x_k$。平移后所有项的指数 $x_i - m \le 0$，保证了 $e^{x_i - m} \in (0, 1]$，彻底杜绝上溢；且至少有一项 $e^{m - m} = e^0 = 1$，分母恒满足 $\sum_j e^{x_j - m} \ge 1$，彻底杜绝除零。
+- **解决方案（Safe Softmax，图 6-1）**：
+
+```{mermaid}
+flowchart LR
+    subgraph SafeSoftmax["数值稳定 Softmax 平移"]
+        X["原始输入 x_i"] --> Max["找全局最大值 m = max(x)"]
+        Max --> Shift["安全平移: x_i - m <= 0"]
+        Shift --> Exp["指数计算: exp(x_i - m) ∈ (0, 1] (彻底杜绝浮点溢出)"]
+        Exp --> Sum["求和分母: sum(exp)"]
+        Sum --> Div["归一化输出: y_i = exp / sum"]
+    end
+```
+<p class="caption" align="center"><em>图 6-1：数值安全 Softmax 减最大值平移与归一化机制</em></p>
+利用恒等式 $\frac{e^{x_i}}{\sum_j e^{x_j}} = \frac{e^{x_i - m}}{\sum_j e^{x_j - m}}$，其中 $m = \max_{1 \le k \le N} x_k$。平移后所有项的指数 $x_i - m \le 0$，保证了 $e^{x_i - m} \in (0, 1]$，彻底杜绝上溢；且至少有一项 $e^{m - m} = e^0 = 1$，分母恒满足 $\sum_j e^{x_j - m} \ge 1$，彻底杜绝除零。
 
 ### 2. 它如何工作（结合图 6-1 与图 6-2）
 
@@ -73,6 +57,26 @@ $$y_i = \frac{e^{x_i}}{\sum_{j=1}^N e^{x_j}}, \quad \text{其中 } y_i > 0, \ \s
    - 只要索引有效（$row < M$ 且 $col < N$），该线程独立负责计算矩阵中 $(row, col)$ 位置的 Softmax 输出。
 
 2. **三步独立行扫描（图 6-2）**：
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant GM as 全局显存 (HBM)
+    participant Reg as 寄存器
+    participant W as Warp 归约
+
+    Note over GM,W: Pass 1: 扫描整行找全局最大值 m
+    GM->>Reg: 读入 x_i
+    Reg->>W: 折半找最大值 m
+    Note over GM,W: Pass 2: 重新读取整行，计算 exp(x_i - m) 并求和 sum
+    GM->>Reg: 重新读入 x_i
+    Reg->>W: 折半求和 sum
+    Note over GM,W: Pass 3: 第三次读取整行，除以 sum 并写回输出
+    GM->>Reg: 第三次读入 x_i
+    Reg->>GM: 写回 y_i = exp(x_i - m) / sum (3 次全行往返，带宽严重浪费)
+```
+<p class="caption" align="center"><em>图 6-2：朴素 Softmax 三遍访存流水线与内存开销瓶颈</em></p>
+
    - **第一遍扫描（找最大值）**：线程沿着自己的行，在 Global Memory 中串行遍历 $i = 0 \dots N-1$，求得该行的全局最大值 $m = \max_i x_i$；
    - **第二遍扫描（求和）**：线程再次沿自己的行串行遍历 $i = 0 \dots N-1$，在寄存器中累加 $d = \sum_i \exp(x_i - m)$；
    - **第三步（计算写回）**：线程计算自己专属列号 $col$ 的分子 $\exp(x_{col} - m)$，除以分母 $d$，并将概率值写回输出矩阵 `output[row, col]`。

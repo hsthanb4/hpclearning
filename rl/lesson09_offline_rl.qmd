@@ -25,33 +25,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart LR
-    subgraph DataDist["行为策略数据集 D (in-distribution)"]
-        D_Points["高频覆盖状态与动作流"]
-    end
-    subgraph OOD["分布外动作 (Out-of-Distribution)"]
-        OOD_Points["未探索动作 ➔ 标准 Q 学习高估虚假峰值"]
-    end
-    subgraph CQL["保守 Q 学习 (CQL) 正则化"]
-        Penalty["对所有动作压低 Q 值 ➔ 仅对数据集动作拉高 Q 值"]
-    end
-    D_Points & OOD_Points --> CQL
-```
-<p class="caption" align="center"><em>图 9-1：离线强化学习分布漂移 (Distribution Shift) 与保守 Q 约束原理</em></p>
-
-```{mermaid}
-flowchart TD
-    LoadData["静态数据集加载 (s, a, r, s') 无在线探索"] --> EstimateQ["Q 网络评估数据集动作价值"]
-    EstimateQ --> SampleOOD["在当前状态采样未知潜在动作 (OOD Actions)"]
-    SampleOOD --> CQLTerm["计算保守正则项: logsumexp(Q) - E_{D}[Q(s, a)]"]
-    CQLTerm --> JointLoss["总损失 = 标准 TD 误差 + α * CQL 惩罚项"]
-    JointLoss --> StepOpt["Adam 梯度更新，严格抑制外推误差 (Extrapolation Error)"]
-```
-<p class="caption" align="center"><em>图 9-2：保守离线 RL (CQL) 算法步进与外推误差控制流程</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **离线强化学习（Offline RL / Batch RL）**是一种在零在线交互（No Active Exploration）前提下、纯粹利用预先收集好的固定静态转移数据集 $\mathcal{D} = \{(s, a, r, s')\}$ 来训练策略的强化学习范式。
@@ -68,12 +41,39 @@ flowchart TD
 分布漂移与保守 Q 学习（CQL）约束流水线如图 9-1 与图 9-2 所示：
 
 1. **分布漂移与保守压制机理（图 9-1）**：
+
+```{mermaid}
+flowchart LR
+    subgraph DataDist["行为策略数据集 D (in-distribution)"]
+        D_Points["高频覆盖状态与动作流"]
+    end
+    subgraph OOD["分布外动作 (Out-of-Distribution)"]
+        OOD_Points["未探索动作 ➔ 标准 Q 学习高估虚假峰值"]
+    end
+    subgraph CQL["保守 Q 学习 (CQL) 正则化"]
+        Penalty["对所有动作压低 Q 值 ➔ 仅对数据集动作拉高 Q 值"]
+    end
+    D_Points & OOD_Points --> CQL
+```
+<p class="caption" align="center"><em>图 9-1：离线强化学习分布漂移 (Distribution Shift) 与保守 Q 约束原理</em></p>
+
    在静态数据集支持集（In-Distribution）内部，由于有真实样本覆盖，Q 估值高度精准；但在广袤的数据覆盖盲区（OOD），传统深度网络由于未受任何边界锚定约束，往往存在病态的虚假过估计波峰。
    **保守 Q 学习（Conservative Q-Learning, CQL, Kumar et al., 2020）**的核心思想是对动作价值面施加非对称正则化：
    - **压低未知（Push Down）**：对状态 $s$ 下所有可能动作的 Q 值实施整体抑制；
    - **拉高已知（Push Up）**：针对数据集中真实记录的行为动作 $(s, a \sim \mathcal{D})$ 进行 Q 值补偿。
 
 2. **CQL 联合损失函数数学展开（图 9-2）**：
+
+```{mermaid}
+flowchart TD
+    LoadData["静态数据集加载 (s, a, r, s') 无在线探索"] --> EstimateQ["Q 网络评估数据集动作价值"]
+    EstimateQ --> SampleOOD["在当前状态采样未知潜在动作 (OOD Actions)"]
+    SampleOOD --> CQLTerm["计算保守正则项: logsumexp(Q) - E_{D}[Q(s, a)]"]
+    CQLTerm --> JointLoss["总损失 = 标准 TD 误差 + α * CQL 惩罚项"]
+    JointLoss --> StepOpt["Adam 梯度更新，严格抑制外推误差 (Extrapolation Error)"]
+```
+<p class="caption" align="center"><em>图 9-2：保守离线 RL (CQL) 算法步进与外推误差控制流程</em></p>
+
    定义保守目标函数：
    $$ \min_Q \alpha \cdot \mathbb{E}_{s \sim \mathcal{D}} \left[ \log \sum_{a \in \mathcal{A}} \exp(Q(s, a)) - \mathbb{E}_{a \sim \pi_\beta(a \mid s)} [Q(s, a)] \right] + \frac{1}{2} \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left[ (Q(s, a) - \mathcal{B}^* Q(s, a))^2 \right] $$
    其中 $\log \sum \exp(Q)$ 是对动作空间的软最大化（LogSumExp），对所有动作施加惩罚；第二项则将数据集中行为策略 $\pi_\beta$ 的动作拉回。数学上严格保证：在适当的 $\alpha$ 下，CQL 估计的价值函数在策略期望下严格是真实最优价值的**保守下界（Pessimistic Lower Bound: $\hat{Q}^\pi(s, a) \le Q^\pi(s, a)$）**，彻底免疫外推爆炸。

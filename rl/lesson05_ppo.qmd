@@ -25,25 +25,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/ppo_surrogate_objective.png){width="85%"}
-<p class="caption">图 5-1：PPO 悲观裁剪目标函数曲线与截断边界（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-flowchart TD
-    ActorRollout["旧策略 π_old 采样收集轨迹缓冲 (Buffer)"] --> EvalGAE["计算价值标靶与 GAE 标准化优势"]
-    EvalGAE --> EpochLoop["多轮 Epoch 小批次 Mini-batch 迭代"]
-    EpochLoop --> ComputeLoss["计算 L_CLIP + c1*L_VF + c2*Entropy"]
-    ComputeLoss --> Optimizer["AdamW 更新网络权重 θ"]
-    Optimizer --> CheckKL{"KL(π_old || π_θ) > KL_阈值?"}
-    CheckKL -->|是| EarlyStop["提前终止当前 Epoch 防止策略崩溃"]
-    CheckKL -->|否| Continue["继续下一个 Mini-batch"]
-```
-<p class="caption" align="center"><em>图 5-2：PPO-Clip 训练内层循环与自适应早停保护时序流程</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **近端策略优化（Proximal Policy Optimization, PPO）**是现代强化学习与大模型对齐（RLHF）中使用最广泛的 On-Policy 策略优化算法。
@@ -65,6 +46,11 @@ PPO 目标函数结构与训练循环控制如图 5-1 与图 5-2 所示：
    在每次 Rollout 采样刚结束时，$r_t(\theta_{\text{old}}) = 1.0$。随着参数 $\theta$ 的迭代更新，比率偏离 1.0。
 
 2. **悲观裁剪下界（Pessimistic Clipped Surrogate，图 5-1）**：
+
+::: {.img-card}
+![](assets/figs/ppo_surrogate_objective.png){width="85%"}
+<p class="caption">图 5-1：PPO 悲观裁剪目标函数曲线与截断边界（基于 scientific-figure-making 绘制）</p>
+
    为了防止策略发生剧烈突变，PPO 将代理损失定义为两个项的极小值（下界保护）：
    $$ \mathcal{L}^{\text{CLIP}}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \, \text{clip}(r_t(\theta), 1 - \epsilon, 1 + \epsilon) \hat{A}_t \right) \right] $$
    如图 5-1 所示，根据优势符号分为两种非对称截断行为：
@@ -78,6 +64,21 @@ PPO 目标函数结构与训练循环控制如图 5-1 与图 5-2 所示：
    - $\pi_{\text{ref}}$（基线参考策略）：在 RLHF 对齐中通常冻结为 SFT 初始权重，用于施加全局 KL 散度约束惩罚 $D_{\text{KL}}(\pi_\theta \parallel \pi_{\text{ref}})$，防止大模型发生灾难性遗忘或 Reward Hacking。
 
 4. **自适应早停训练循环（图 5-2）**：
+
+:::
+
+```{mermaid}
+flowchart TD
+    ActorRollout["旧策略 π_old 采样收集轨迹缓冲 (Buffer)"] --> EvalGAE["计算价值标靶与 GAE 标准化优势"]
+    EvalGAE --> EpochLoop["多轮 Epoch 小批次 Mini-batch 迭代"]
+    EpochLoop --> ComputeLoss["计算 L_CLIP + c1*L_VF + c2*Entropy"]
+    ComputeLoss --> Optimizer["AdamW 更新网络权重 θ"]
+    Optimizer --> CheckKL{"KL(π_old || π_θ) > KL_阈值?"}
+    CheckKL -->|是| EarlyStop["提前终止当前 Epoch 防止策略崩溃"]
+    CheckKL -->|否| Continue["继续下一个 Mini-batch"]
+```
+<p class="caption" align="center"><em>图 5-2：PPO-Clip 训练内层循环与自适应早停保护时序流程</em></p>
+
    将轨迹拆分为 Mini-batch 后，在单批数据上迭代运行若干 Epoch（通常 3～5 轮）。每个 Mini-batch 评估 $\text{KL}(\pi_{\text{old}} \parallel \pi_\theta)$。一旦检测到新旧策略散度超出预设阈值（如 $1.5 \times \text{target\_KL}$），立即提前打断（Early Stop）当前 Epoch 循环，强制触发新一轮 Rollout 采样，确保训练始终处于 On-policy 信任域内。
 
 ### 3. 正确性条件与常见误区

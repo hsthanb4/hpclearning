@@ -31,38 +31,32 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题（如**图 14-1** 所示）
 
 ::: {.img-card}
 ![](assets/figs/cuda_deepep_moe_math.png){width="95%"}
 <p class="caption">图 14-1：DeepSeek DeepEP 专家并行（MoE）低延迟分级通信与非对称调度数学模型</p>
 :::
 
-```{mermaid}
-flowchart TD
-    subgraph DeepEPArch["DeepEP MoE 专家并行端到端通信与重叠架构"]
-        direction TB
-        subgraph Dispatch["1. Token 分发阶段 (Dispatch Phase)"]
-            TokenIn["输入隐藏状态 Tokens [Batch, Hidden]"] --> TopK["Gate 网络选出 Top-K 专家及权重"]
-            TopK --> SM_Part["SM 硬件分区: 分配 20~24 SMs 专职通信"]
-            SM_Part -->|节点内高速直写| NVLink["NVLink P2P (900 GB/s) 直接搬运"]
-            SM_Part -->|跨节点 RDMA| IB["InfiniBand / RoCE GPUDirect RDMA"]
-            NVLink & IB --> ExpertBuf["目标卡专家接收缓冲区 (对齐至 DeepGEMM 输入)"]
-        end
+**DeepEP** 是 DeepSeek 专门为超大规模混合专家模型（MoE，如 DeepSeek-V3 / R1 / V2）打造的**首个开源专用 EP（Expert Parallelism）通信库**。
 
-        subgraph Compute["2. 专家计算阶段 (Expert GEMM Phase)"]
-            ExpertBuf --> GroupedGEMM["DeepGEMM Grouped FP8 GEMM (占用剩余 100+ SMs)"]
-            GroupedGEMM --> ExpertOut["本地专家前向输出张量"]
-        end
+#### (1) 传统 MoE 分布式训练与推理的通信灾难
+DeepSeek-V3 拥有 671B 参数，采用了极度细粒度的路由机制：总共 **256 个路由专家 + 1 个共享专家**，每个 Token 动态激活 **Top-8 个专家**。当集群规模达到数百乃至数千张 GPU 时，专家被切分在不同物理节点上：
 
-        subgraph Combine["3. 结果合并阶段 (Combine Phase)"]
-            ExpertOut --> ScatterBack["沿反向链路回传至源卡 (NVLink / RDMA)"]
-            ScatterBack --> WeightedSum["按 Top-K 门控权重 (Gating Weights) 浮点加权求和"]
-            WeightedSum --> FinalOut["恢复原始序列顺序的输出张量 [Batch, Hidden]"]
-        end
-    end
-```
-<p class="caption" align="center"><em>图 14-2：DeepEP 在 MoE 专家并行中的 Dispatch、计算与 Combine 数据链路全景</em></p>
+1. **NCCL `all_to_allv` 的巨大延迟开销**：
+   - NCCL 作为通用通信原语，依赖 Host 端 CPU 发起，每次 Launch 开销高达 $10 \sim 20\,\mu\text{s}$；
+   - 在推理 Decoding 阶段（Batch 较小，每个 Token 仅几十微秒的 GEMM 计算），通信 Launch 开销甚至超过了计算本身，导致 GPU 发生大量同步空转。
+
+2. **动态 Token 数量破坏 CUDA Graph 捕获**：
+   - 每个 Expert 接收到的 Token 数因数据分布动态变化。传统做法需要 CPU 介入统计偏移行数并重新下发变长张量，**彻底摧毁了推理引擎的 CUDA Graph 静态执行图**。
+
+3. **节点内 NVLink 与跨机 RDMA 无法高效分层流水**：
+   - 扁平的 All-to-All 使得跨机网络带宽与卡间 NVLink 带宽发生拥塞短板效应，无法跑满硬件物理上限。
+
+#### (2) DeepEP 的革命性突破
+- **纯 GPU SM 驱动的低延迟内核（Low-Latency Kernel）**：完全绕过 CPU 与 NCCL。GPU 线程直接发起 NVLink 内存读写和 GPUDirect RDMA 网络事务，将通信延迟压至**微秒级（$< 10\,\mu\text{s}$）**！
+- **CUDA Graph 原生兼容（零 CPU 介入）**：在解码阶段通过预分配静态缓冲区与掩码标记，全流程由 GPU 硬件自主完成路由寻址与同步，完美与 CUDA Graph 融为一体；
+- **非对称 SM 分区与完全重叠流水线（如**图 14-3** 所示）**：精确固定占用 20 个左右的 SM 执行通信，其余 100+ 个 SM 持续全速计算，奠定了 DeepSeek-V3 惊艳业界的 **Mega-MoE 零通信开销掩盖**。
 
 ```{mermaid}
 flowchart LR
@@ -84,27 +78,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 14-3：DeepEP 专用通信 SM 与主计算流在时间轴上的无气泡重叠机理</em></p>
 
-### 1. 它是什么，解决什么问题
-
-**DeepEP** 是 DeepSeek 专门为超大规模混合专家模型（MoE，如 DeepSeek-V3 / R1 / V2）打造的**首个开源专用 EP（Expert Parallelism）通信库**。
-
-#### (1) 传统 MoE 分布式训练与推理的通信灾难
-DeepSeek-V3 拥有 671B 参数，采用了极度细粒度的路由机制：总共 **256 个路由专家 + 1 个共享专家**，每个 Token 动态激活 **Top-8 个专家**。当集群规模达到数百乃至数千张 GPU 时，专家被切分在不同物理节点上：
-
-1. **NCCL `all_to_allv` 的巨大延迟开销**：
-   - NCCL 作为通用通信原语，依赖 Host 端 CPU 发起，每次 Launch 开销高达 $10 \sim 20\,\mu\text{s}$；
-   - 在推理 Decoding 阶段（Batch 较小，每个 Token 仅几十微秒的 GEMM 计算），通信 Launch 开销甚至超过了计算本身，导致 GPU 发生大量同步空转。
-
-2. **动态 Token 数量破坏 CUDA Graph 捕获**：
-   - 每个 Expert 接收到的 Token 数因数据分布动态变化。传统做法需要 CPU 介入统计偏移行数并重新下发变长张量，**彻底摧毁了推理引擎的 CUDA Graph 静态执行图**。
-
-3. **节点内 NVLink 与跨机 RDMA 无法高效分层流水**：
-   - 扁平的 All-to-All 使得跨机网络带宽与卡间 NVLink 带宽发生拥塞短板效应，无法跑满硬件物理上限。
-
-#### (2) DeepEP 的革命性突破
-- **纯 GPU SM 驱动的低延迟内核（Low-Latency Kernel）**：完全绕过 CPU 与 NCCL。GPU 线程直接发起 NVLink 内存读写和 GPUDirect RDMA 网络事务，将通信延迟压至**微秒级（$< 10\,\mu\text{s}$）**！
-- **CUDA Graph 原生兼容（零 CPU 介入）**：在解码阶段通过预分配静态缓冲区与掩码标记，全流程由 GPU 硬件自主完成路由寻址与同步，完美与 CUDA Graph 融为一体；
-- **非对称 SM 分区（SM Partitioning）**：精确固定占用 20 个左右的 SM 执行通信，其余 100+ 个 SM 持续全速计算，奠定了 DeepSeek-V3 惊艳业界的 **Mega-MoE 零通信开销掩盖**。
 
 ---
 

@@ -25,11 +25,21 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在函数式张量计算图（如 PyTorch、JAX 或 MLIR 的 `tensor` 方言）中，张量拥有**纯值语义（Value Semantics）**：每个 SSA 变量代表不可变的纯数学实体。在值语义下，`%t2 = tensor.insert %x into %t1[...]` 表面上如同对 `%t1` 进行了深拷贝并修改产生全新的 `%t2`。
+然而，物理计算机硬件（CPU/GPU）没有无限的物理显存，实际执行必须依赖具备物理指针和可变内存状态的**引用语义（Buffer Reference Semantics）**，即 `memref` 方言。
+若将每一个高阶张量算子都朴素地分配一块全新的物理内存（`memref.alloc`），会导致恐怖的显存占用和毁灭性的内存带宽瓶颈（如 [图 6-1](file:///Users/wujie/hpclearning/mlir/lesson06_bufferization.qmd) 所示）。
+本课解决的核心工程问题是：**理解 MLIR 的核心降级设施——One-Shot Bufferize，掌握基于别名分析（Alias Analysis）与读后写/写后读（RAW/WAR）冲突判定的原地复用决策算法，以及利用目标传递风格（Destination-Passing Style, DPS）最大化削减物理内存开销**。
+
+### 2. 它如何工作
+
+One-Shot Bufferize 的内存决策流程与别名分析架构如图 6-1 与图 6-2 所示：
 
 ::: {.img-card}
 ![](assets/figs/mlir_bufferization_footprint.png){width="85%"}
 <p class="caption">图 6-1：One-Shot Bufferize 原地复用别名对峰值显存占用的削减（基于 scientific-figure-making 绘制）</p>
+
 :::
 
 ```{mermaid}
@@ -42,16 +52,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 6-2：One-Shot Bufferize 原地复用别名判定与内存分配下发流程</em></p>
 
-### 1. 它是什么，解决什么问题
-
-在函数式张量计算图（如 PyTorch、JAX 或 MLIR 的 `tensor` 方言）中，张量拥有**纯值语义（Value Semantics）**：每个 SSA 变量代表不可变的纯数学实体。在值语义下，`%t2 = tensor.insert %x into %t1[...]` 表面上如同对 `%t1` 进行了深拷贝并修改产生全新的 `%t2`。
-然而，物理计算机硬件（CPU/GPU）没有无限的物理显存，实际执行必须依赖具备物理指针和可变内存状态的**引用语义（Buffer Reference Semantics）**，即 `memref` 方言。
-若将每一个高阶张量算子都朴素地分配一块全新的物理内存（`memref.alloc`），会导致恐怖的显存占用和毁灭性的内存带宽瓶颈（如 [图 6-1](file:///Users/wujie/hpclearning/mlir/lesson06_bufferization.qmd) 所示）。
-本课解决的核心工程问题是：**理解 MLIR 的核心降级设施——One-Shot Bufferize，掌握基于别名分析（Alias Analysis）与读后写/写后读（RAW/WAR）冲突判定的原地复用决策算法，以及利用目标传递风格（Destination-Passing Style, DPS）最大化削减物理内存开销**。
-
-### 2. 它如何工作
-
-One-Shot Bufferize 的内存决策流程与别名分析架构如图 6-1 与图 6-2 所示：
 
 1. **全局可达性与别名图分析（Alias Analysis）**：
    与传统的局部逐算子 bufferize 不同，One-Shot Bufferize 首先对全图进行全局拓扑扫描，分析每一个 `OpOperand`（操作数）与 `OpResult`（返回值）之间的潜在别名集合（Alias Set），判断它们是否可能映射到同一个底层底层物理内存块。

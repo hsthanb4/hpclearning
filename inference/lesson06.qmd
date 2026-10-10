@@ -33,11 +33,28 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在当代超大规模语言模型（LLM）的工业化部署中，全精度（FP16/BF16）模型面临着严峻的物理制约：
+
+1. **显存容量瓶颈（VRAM Capacity Wall）**：一个 70B 参数的 BF16 模型仅权重就需要占据约 140 GB 显存，至少需要两张 80GB GPU 才能勉强加载，留给 KV Cache 和高并发并发批处理（Batch Size）的显存空间极其逼仄；
+
+2. **访存带宽瓶颈（Memory Bandwidth Wall）**：在自回归 Decode 阶段，计算强度（FLOPs/Byte）极低，GPU 绝大部分时间都在等待从 HBM 中读取庞大的模型权重与长序列 KV Cache。
+
+**模型量化（Model Quantization）**（如**图 6-1** 所示）通过将高精度浮点数映射到低比特离散数值空间
 
 ::: {.img-card}
 ![](assets/figs/quantization_tradeoff.png){width="85%"}
 <p class="caption">图 6-1：FP16 vs FP8 vs INT4 显存占用与推理吞吐权衡对比（基于 scientific-figure-making 绘制）</p>
+
+（如 INT8、INT4、FP8、NVFP4、MXFP4），实现显存占用大幅缩减与访存/计算吞吐的数倍跃升。如图 6-1 所示，从 FP16 到 FP8 再到 INT4，模型显存占用可降低 50%~75%，为 KV Cache 腾出巨大的并发容量，同时推动系统吞吐成倍增长。
+
+在现代高性能推理引擎（vLLM 与 SGLang）中，量化不仅仅是一套数学离散化算法，更是一套横跨 **权重存储打包（Packing）**、**运行时配置注册（Registry）**、**动态在线标定（Calibration）**与 **GPU 底层硬件算子分发（Kernel Dispatch）** 的完整系统工程。
+
+### 2. 它如何工作
+
+工业级推理引擎中的量化执行流水线具有严密的分层架构（如图 6-2 所示）：
+
 :::
 
 ```{mermaid}
@@ -50,21 +67,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 6-2：量化 GEMM 在线标定、Tensor Core 计算与反量化流水线</em></p>
 
-### 1. 它是什么，解决什么问题
-
-在当代超大规模语言模型（LLM）的工业化部署中，全精度（FP16/BF16）模型面临着严峻的物理制约：
-
-1. **显存容量瓶颈（VRAM Capacity Wall）**：一个 70B 参数的 BF16 模型仅权重就需要占据约 140 GB 显存，至少需要两张 80GB GPU 才能勉强加载，留给 KV Cache 和高并发并发批处理（Batch Size）的显存空间极其逼仄；
-
-2. **访存带宽瓶颈（Memory Bandwidth Wall）**：在自回归 Decode 阶段，计算强度（FLOPs/Byte）极低，GPU 绝大部分时间都在等待从 HBM 中读取庞大的模型权重与长序列 KV Cache。
-
-**模型量化（Model Quantization）**通过将高精度浮点数映射到低比特离散数值空间（如 INT8、INT4、FP8、NVFP4、MXFP4），实现显存占用大幅缩减与访存/计算吞吐的数倍跃升。如图 6-1 所示，从 FP16 到 FP8 再到 INT4，模型显存占用可降低 50%~75%，为 KV Cache 腾出巨大的并发容量，同时推动系统吞吐成倍增长。
-
-在现代高性能推理引擎（vLLM 与 SGLang）中，量化不仅仅是一套数学离散化算法，更是一套横跨 **权重存储打包（Packing）**、**运行时配置注册（Registry）**、**动态在线标定（Calibration）**与 **GPU 底层硬件算子分发（Kernel Dispatch）** 的完整系统工程。
-
-### 2. 它如何工作
-
-工业级推理引擎中的量化执行流水线具有严密的分层架构（如图 6-2 所示）：
 
 1. **量化范式与精度矩阵**：
    - **W4A16（权重量化，激活保持高精度）**：如 AWQ、GPTQ、Marlin。仅将静态权重压缩为 INT4 存放于 HBM，在 GEMM 算子内部流式反量化回 FP16/BF16 进行计算。核心收益是节省 75% 的权重显存带宽与容量，极度契合单请求或小 Batch 的 Decode 场景。

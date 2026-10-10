@@ -25,35 +25,34 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/cuda_smem_bank_conflict.png){width="85%"}
-<p class="caption">图 9-1：Shared Memory 跨步冲突对有效吞吐的影响及填充消除原理（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant GM_In as 全局内存输入 A
-    participant SM as 共享内存 tile[32][33]
-    participant GM_Out as 全局内存输出 B
-
-    GM_In->>SM: 线程合并读取 A[y, x] 并写入本地 tile[ty][tx]
-    Note over SM: __syncthreads() 保证整个 Tile 填满
-    SM->>GM_Out: 线程按转置坐标合并读取 tile[tx][ty]，并合并写入 B[x, y]
-    Note over GM_In,GM_Out: 读写双向全部达成合并访存且 SMem 无 Bank 冲突
-```
-<p class="caption" align="center"><em>图 9-2：基于共享内存中继的双向合并转置执行流</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **共享内存分块转置（Tiled Transpose with Shared Memory）** 是解决显存读写不对称性、达成“读端与写端双向 100% 合并访存”的经典架构范式。
 
 **上一课暴露的物理困境**：
 - 朴素转置在全局显存中直接跨步写入，导致显存总线事务被切碎为 32 个独立的散落写请求，写入带宽仅剩 12.5%；
-- **分块中继解决方案（图 9-2）**：将输入矩阵切分为 $32 \times 32$ 的数据瓦片（Tiles）。线程块先以连续地址将数据合并读入片上极高速的共享内存（Shared Memory，带宽达数十 TB/s）；在共享内存内部完成行列坐标调换；最后再次以连续地址将转置后的数据合并写回全局显存！
-- **随之而来的新瓶颈：Bank Conflict（图 9-1）**：共享内存被组织为 32 个交错的存储体（Banks）。当线程转置读取共享内存的一列数据时，各线程访问的地址刚好相差 32 个单字，导致 32 个线程同时争抢同一个 Bank（32 路 Bank Conflict），使原本单周期的片上访问被硬件强制串行化为 32 个连续周期！本课通过添加关键的 **`+1` 填充（Padding）** 彻底化解此冲突。
+- **分块中继解决方案（图 9-2）**：
+
+```{mermaid}
+flowchart TD
+    subgraph TiledTranspose["分块共享内存中继转置流程"]
+        direction TB
+        GM_In["全局内存输入矩阵 A (连续合并读入)"] -->|合并读| Tile["瓦片读取至寄存器"]
+        Tile -->|行序写入| SMEM["共享内存瓦片: tile[y][x]"]
+        SMEM --> Sync["__syncthreads() 保证瓦片数据可见"]
+        Sync --> Transpose["列序读出: 寄存器获取 tile[x][y] (Padding 消除冲突)"]
+        Transpose -->|合并写| GM_Out["全局内存输出矩阵 B (连续合并写回)"]
+    end
+```
+<p class="caption" align="center"><em>图 9-2：基于共享内存中继的双向合并转置执行流</em></p>
+将输入矩阵切分为 $32 \times 32$ 的数据瓦片（Tiles）。线程块先以连续地址将数据合并读入片上极高速的共享内存（Shared Memory，带宽达数十 TB/s）；在共享内存内部完成行列坐标调换；最后再次以连续地址将转置后的数据合并写回全局显存！
+- **随之而来的新瓶颈：Bank Conflict（图 9-1）**：
+
+::: {.img-card}
+![](assets/figs/cuda_smem_bank_conflict.png){width="85%"}
+<p class="caption">图 9-1：Shared Memory 跨步冲突对有效吞吐的影响及填充消除原理（基于 scientific-figure-making 绘制）</p>
+:::
+共享内存被组织为 32 个交错的存储体（Banks）。当线程转置读取共享内存的一列数据时，各线程访问的地址刚好相差 32 个单字，导致 32 个线程同时争抢同一个 Bank（32 路 Bank Conflict），使原本单周期的片上访问被硬件强制串行化为 32 个连续周期！本课通过添加关键的 **`+1` 填充（Padding）** 彻底化解此冲突。
 
 ### 2. 它如何工作（结合图 9-1 与图 9-2）
 

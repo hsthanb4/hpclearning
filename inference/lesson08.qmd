@@ -35,7 +35,18 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+尽管传统独立小模型投机采样（Standalone Speculative Decoding）在理论上证明了无偏加速的可行性，但在工业界落地中遭遇了三个难以逾越的系统瓶颈：
+
+1. **草稿质量上限（Draft Quality Ceiling）**：独立小模型参数量仅为主模型的 $1/10$ 甚至更小，表征能力存在天然断层，在复杂推理任务中的 Token 接受率往往难以突破 60%；
+
+2. **草稿串行生成瓶颈（Sequential Drafting Bottleneck）**：小模型本身依然是自回归生成，生成 $\gamma$ 个草稿 Token 依然需要串行触发 $\gamma$ 次 GPU Kernel 发射与显存加载，草稿阶段的时延开销侵蚀了验证阶段的加速红利；
+
+3. **线性链式验证的概率衰减（Exponential Decay of Linear Chains）**：若第 $i$ 个 Token 被拒绝，后续所有草稿全盘报废。单条线性链的期望接受长度受制于 $\prod \alpha_i$ 的指数级衰减。
+
+**现代投机系统（Modern Speculative Systems）**（以 EAGLE-3、DeepSeek MTP、DFlash 与 DSpark 为代表）重塑了投机推测的算法与系统协同设计：
+- **特征级外推与树状拓扑（Feature-level Extrapolation & Tree Drafting）**：如图 8-1 所示，
 
 ```{mermaid}
 flowchart TD
@@ -50,6 +61,15 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 8-1：现代投机加速体系 (EAGLE 隐层特征 vs MTP 多头直出) 拓扑结构</em></p>
 
+EAGLE-3 直接复用 Target 模型的高层隐层特征进行自回归外推，跨越了词表 Embedding 的信息鸿沟；同时将单一线性链扩展为分支候选树（Tree Drafting），极大提升了单轮验证的期望接受 Token 数；
+- **原生多 Token 预测（Multi-Token Prediction, MTP）**：以 DeepSeek-V3/R1 为代表，在主模型训练阶段原生集成多层 MTP 预测模块，无需外挂独立模型即可零通信完成多步投机；
+- **非自回归并行草稿生成（Block Diffusion / DFlash）**：彻底打破草稿阶段的串行自回归循环，利用扩散或非自回归架构单步直接迸发出一整块（Block）候选 Token；
+- **自适应置信度调度（Confidence-Adaptive Budget / DSpark）**：按请求难度与当前 Token 置信度动态调整投机深度，在收益不足时敏捷回退，兼顾吞吐与延迟。
+
+### 2. 它如何工作
+
+现代投机系统的工程实现涵盖了前向特征截取、树状注意力掩码组装、原子显存回滚与流水线重叠（流程如图 8-2 所示）：
+
 ```{mermaid}
 flowchart TD
     DraftTree["构建投机 Token 候选树 (Tree Mask)"] --> TargetForward["Target 模型执行一次 Tree Attention 并行验证"]
@@ -59,25 +79,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 8-2：基于树形拓扑的投机验证、KV 状态回滚与批量采纳流水线</em></p>
 
-### 1. 它是什么，解决什么问题
-
-尽管传统独立小模型投机采样（Standalone Speculative Decoding）在理论上证明了无偏加速的可行性，但在工业界落地中遭遇了三个难以逾越的系统瓶颈：
-
-1. **草稿质量上限（Draft Quality Ceiling）**：独立小模型参数量仅为主模型的 $1/10$ 甚至更小，表征能力存在天然断层，在复杂推理任务中的 Token 接受率往往难以突破 60%；
-
-2. **草稿串行生成瓶颈（Sequential Drafting Bottleneck）**：小模型本身依然是自回归生成，生成 $\gamma$ 个草稿 Token 依然需要串行触发 $\gamma$ 次 GPU Kernel 发射与显存加载，草稿阶段的时延开销侵蚀了验证阶段的加速红利；
-
-3. **线性链式验证的概率衰减（Exponential Decay of Linear Chains）**：若第 $i$ 个 Token 被拒绝，后续所有草稿全盘报废。单条线性链的期望接受长度受制于 $\prod \alpha_i$ 的指数级衰减。
-
-**现代投机系统（Modern Speculative Systems）**（以 EAGLE-3、DeepSeek MTP、DFlash 与 DSpark 为代表）重塑了投机推测的算法与系统协同设计：
-- **特征级外推与树状拓扑（Feature-level Extrapolation & Tree Drafting）**：如图 8-1 所示，EAGLE-3 直接复用 Target 模型的高层隐层特征进行自回归外推，跨越了词表 Embedding 的信息鸿沟；同时将单一线性链扩展为分支候选树（Tree Drafting），极大提升了单轮验证的期望接受 Token 数；
-- **原生多 Token 预测（Multi-Token Prediction, MTP）**：以 DeepSeek-V3/R1 为代表，在主模型训练阶段原生集成多层 MTP 预测模块，无需外挂独立模型即可零通信完成多步投机；
-- **非自回归并行草稿生成（Block Diffusion / DFlash）**：彻底打破草稿阶段的串行自回归循环，利用扩散或非自回归架构单步直接迸发出一整块（Block）候选 Token；
-- **自适应置信度调度（Confidence-Adaptive Budget / DSpark）**：按请求难度与当前 Token 置信度动态调整投机深度，在收益不足时敏捷回退，兼顾吞吐与延迟。
-
-### 2. 它如何工作
-
-现代投机系统的工程实现涵盖了前向特征截取、树状注意力掩码组装、原子显存回滚与流水线重叠（流程如图 8-2 所示）：
 
 1. **EAGLE-3 与特征外推机制**：
    - 传统小模型在离散 Token 空间自回归，而 EAGLE-3 截取 Target 模型顶层的连续隐藏状态（Hidden States）。

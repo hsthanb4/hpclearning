@@ -30,12 +30,58 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+**DeepGEMM** 是 DeepSeek 专为大语言模型（特别是 DeepSeek-V3 / V2.5 / R1 等超大规模 MoE 模型）研发的开源超高性能 Tensor Core GEMM 算子库。
+
+#### (1) 为什么现有开源库（CUTLASS 3.x / cuBLASLt）不够用？
+1. **CUTLASS 3.x 极其庞大的 C++ 模板膨胀与编译噩梦**：
+   - 传统 CUTLASS 依赖极深的模板嵌套与代数表达（Layout、Tile、Iterator、Collective Builder），仅编译一组 GEMM 内核通常需要数分钟乃至数十分钟；
+   - 工业级二次开发、定制特殊访存或微架构调优时，工程师深陷模板推导黑洞，调试门槛极高。
+
+2. **DeepSeek-V3 细粒度分块量化（$1 \times 128$ Block-wise FP8）缺乏原生极致优化（如**图 13-1** 所示）**：
 
 ::: {.img-card}
 ![](assets/figs/cuda_deepgemm_fp8_math.png){width="95%"}
 <p class="caption">图 13-1：DeepSeek DeepGEMM FP8 细粒度分组缩放与片上微架构数学模型</p>
 :::
+
+   - 常规 TensorRT-LLM 或 cuBLASLt 主要面向 **Tensor-wise（整张量单标量缩放）** 或 **Channel-wise（逐通道缩放）**；
+   - DeepSeek-V3 为了在 FP8 下保持与 BF16 无损的数学精度，提出了 **$1 \times 128$ 的 Block-wise Fine-grained Scaling**：矩阵在 $K$ 维度每 128 个元素划分为一个独立 Block，拥有专属的 FP32/UE8M0 缩放系数。这要求 GEMM 内核的 Epilogue 必须在极短时间内完成多维缩放反量化，cuBLASLt 无法原生内联融合。
+
+3. **MoE 解码（Decoding）与 CUDA Graph 的静态分配冲突**：
+   - 在推理 Decode 阶段，各 Expert 分配到的 Token 数量极小且每步动态变化；
+   - 若使用传统变长 Grouped GEMM，CPU 必须每步重新统计各专家 Token 偏移量并下发 Kernel 参数，**彻底打破 CUDA Graph 捕获机制**，带来沉重的 CPU Launch 延迟。
+
+#### (2) DeepGEMM 的破局设计
+- **Radical KISS 原则**：完全摒弃 CUTLASS 繁重的类层次结构，精炼出不到数千行的自包含代码，通过轻量级 C++ JIT（即时编译）模块在运行时极速加载，免去安装时的预编译开销；
+- **原生拥抱 Hopper 硬件原语**：深度利用 SM90 硬件级 TMA（张量内存加速器）与 WGMMA 指令，在 H800/H100 上跑出高达 **1550 TFLOPS（逼近硬件理论极限的 85%~90%）**；
+- **双模 MoE Grouped GEMM 支持（如**图 13-3** 所示）**：
+
+```{mermaid}
+flowchart LR
+    subgraph MoELayouts["DeepGEMM MoE 分组矩阵乘（Grouped GEMM）两类执行模式"]
+        direction TB
+        subgraph Contiguous["Contiguous Layout (训练 Forward/Backward & 推理 Prefill)"]
+            Tokens["动态 Token 按 Expert 拼接 (M 维不规则)"] --> Align["M 维按 Tile 对齐 (M-alignment)"]
+            Align --> KContig["K-Grouped TN / M-Grouped NT 算子执行"]
+        end
+
+        subgraph Masked["Masked Layout (推理 Decoding + CUDA Graph)"]
+            FixedBuf["固定最大容量静态显存缓冲 (Zero-Allocation)"] --> MaskTensor["掩码张量 (Valid Mask Tensor)"]
+            MaskTensor --> DeepEP_In["接收 DeepEP 低延迟通信产物"]
+            DeepEP_In --> MaskedKernel["m_grouped_fp8_gemm_nt_masked 仅计算有效 Token"]
+        end
+    end
+```
+<p class="caption" align="center"><em>图 13-3：DeepGEMM 面向 MoE 的 Contiguous 与 Masked 两大布局设计对比</em></p>
+
+   - `Contiguous`：用于训练前向/反向与推理 Prefill，连续内存拼接，算力利用率最大化；
+   - `Masked`：用于推理 Decode，配合 DeepEP 零 CPU 开销静态捕获，以 Mask 标记有效 Token，完全兼容 CUDA Graph。
+
+---
+
+### 2. Hopper (SM90) 硬件微架构机制剖析（如**图 13-2** 所示）
 
 ```{mermaid}
 flowchart TD
@@ -68,51 +114,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 13-2：DeepGEMM 在 Hopper 架构下的 TMA 硬件直连与 WGMMA 异步多级流水线架构</em></p>
 
-```{mermaid}
-flowchart LR
-    subgraph MoELayouts["DeepGEMM MoE 分组矩阵乘（Grouped GEMM）两类执行模式"]
-        direction TB
-        subgraph Contiguous["Contiguous Layout (训练 Forward/Backward & 推理 Prefill)"]
-            Tokens["动态 Token 按 Expert 拼接 (M 维不规则)"] --> Align["M 维按 Tile 对齐 (M-alignment)"]
-            Align --> KContig["K-Grouped TN / M-Grouped NT 算子执行"]
-        end
-
-        subgraph Masked["Masked Layout (推理 Decoding + CUDA Graph)"]
-            FixedBuf["固定最大容量静态显存缓冲 (Zero-Allocation)"] --> MaskTensor["掩码张量 (Valid Mask Tensor)"]
-            MaskTensor --> DeepEP_In["接收 DeepEP 低延迟通信产物"]
-            DeepEP_In --> MaskedKernel["m_grouped_fp8_gemm_nt_masked 仅计算有效 Token"]
-        end
-    end
-```
-<p class="caption" align="center"><em>图 13-3：DeepGEMM 面向 MoE 的 Contiguous 与 Masked 两大布局设计对比</em></p>
-
-### 1. 它是什么，解决什么问题
-
-**DeepGEMM** 是 DeepSeek 专为大语言模型（特别是 DeepSeek-V3 / V2.5 / R1 等超大规模 MoE 模型）研发的开源超高性能 Tensor Core GEMM 算子库。
-
-#### (1) 为什么现有开源库（CUTLASS 3.x / cuBLASLt）不够用？
-1. **CUTLASS 3.x 极其庞大的 C++ 模板膨胀与编译噩梦**：
-   - 传统 CUTLASS 依赖极深的模板嵌套与代数表达（Layout、Tile、Iterator、Collective Builder），仅编译一组 GEMM 内核通常需要数分钟乃至数十分钟；
-   - 工业级二次开发、定制特殊访存或微架构调优时，工程师深陷模板推导黑洞，调试门槛极高。
-
-2. **DeepSeek-V3 细粒度分块量化（$1 \times 128$ Block-wise FP8）缺乏原生极致优化**：
-   - 常规 TensorRT-LLM 或 cuBLASLt 主要面向 **Tensor-wise（整张量单标量缩放）** 或 **Channel-wise（逐通道缩放）**；
-   - DeepSeek-V3 为了在 FP8 下保持与 BF16 无损的数学精度，提出了 **$1 \times 128$ 的 Block-wise Fine-grained Scaling**：矩阵在 $K$ 维度每 128 个元素划分为一个独立 Block，拥有专属的 FP32/UE8M0 缩放系数。这要求 GEMM 内核的 Epilogue 必须在极短时间内完成多维缩放反量化，cuBLASLt 无法原生内联融合。
-
-3. **MoE 解码（Decoding）与 CUDA Graph 的静态分配冲突**：
-   - 在推理 Decode 阶段，各 Expert 分配到的 Token 数量极小且每步动态变化；
-   - 若使用传统变长 Grouped GEMM，CPU 必须每步重新统计各专家 Token 偏移量并下发 Kernel 参数，**彻底打破 CUDA Graph 捕获机制**，带来沉重的 CPU Launch 延迟。
-
-#### (2) DeepGEMM 的破局设计
-- **Radical KISS 原则**：完全摒弃 CUTLASS 繁重的类层次结构，精炼出不到数千行的自包含代码，通过轻量级 C++ JIT（即时编译）模块在运行时极速加载，免去安装时的预编译开销；
-- **原生拥抱 Hopper 硬件原语**：深度利用 SM90 硬件级 TMA（张量内存加速器）与 WGMMA 指令，在 H800/H100 上跑出高达 **1550 TFLOPS（逼近硬件理论极限的 85%~90%）**；
-- **双模 MoE Grouped GEMM 支持**：
-   - `Contiguous`：用于训练前向/反向与推理 Prefill，连续内存拼接，算力利用率最大化；
-   - `Masked`：用于推理 Decode，配合 DeepEP 零 CPU 开销静态捕获，以 Mask 标记有效 Token，完全兼容 CUDA Graph。
-
----
-
-### 2. Hopper (SM90) 硬件微架构机制剖析
 
 要真正看懂 DeepGEMM 的源码，必须理解 Hopper 架构相对于 Ampere 架构发生的三大革命性跃迁：
 

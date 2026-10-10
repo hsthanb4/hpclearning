@@ -35,29 +35,6 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart TD
-    subgraph SparsityTech["大模型推理稀疏化四维矩阵"]
-        Weight["2:4 结构化稀疏 / 细粒度权重剪枝"]
-        MoE["混合专家稀疏激活 (如 8 选 2 专家路由)"]
-        Attn["块稀疏 Attention (Block-Sparse / Top-K)"]
-        HiSparse["分层动态稀疏 (HiSparse KV/FFN 联合压缩)"]
-    end
-```
-<p class="caption" align="center"><em>图 5-1：现代大模型端到端稀疏推理优化维度概念架构</em></p>
-
-```{mermaid}
-flowchart LR
-    TokenIn["Token 激活向量"] --> Router["门控路由网络 Top-K 评分"]
-    Router --> Scatter["Token 重排与专家分组 (Permute/Scatter)"]
-    Scatter --> GroupGEMM["分专家并行 Grouped GEMM 计算"]
-    GroupGEMM --> Gather["加权聚合与逆重排 (Unpermute/Gather)"]
-    Gather --> Output["输出融合后激活向量"]
-```
-<p class="caption" align="center"><em>图 5-2：MoE 动态路由、专家分组计算与跨卡打散聚合流程</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 随着大模型参数量向千亿甚至万亿规模迈进、以及上下文窗口扩展至 128K~1M Tokens，传统“全密集（Dense）”计算范式面临两大约束构成的物理天花板：
@@ -78,6 +55,18 @@ flowchart LR
 
 1. **MoE 动态路由与跨卡打散聚合（Router, Dispatch & Combine）**：
    - 如图 5-2 所示，每个 Token 的隐藏向量 $x$ 经过门控网络计算专家得分：
+
+```{mermaid}
+flowchart LR
+    TokenIn["Token 激活向量"] --> Router["门控路由网络 Top-K 评分"]
+    Router --> Scatter["Token 重排与专家分组 (Permute/Scatter)"]
+    Scatter --> GroupGEMM["分专家并行 Grouped GEMM 计算"]
+    GroupGEMM --> Gather["加权聚合与逆重排 (Unpermute/Gather)"]
+    Gather --> Output["输出融合后激活向量"]
+```
+<p class="caption" align="center"><em>图 5-2：MoE 动态路由、专家分组计算与跨卡打散聚合流程</em></p>
+
+
      $$g(x) = \text{Softmax}(\text{TopK}(x \cdot W_{\text{gate}}, K))$$
    - 随后通过 `Scatter/Permute` 算子按目标专家对 Token 进行排序并分组打包；在专家并行（Expert Parallelism, EP）拓扑下，跨节点/跨 GPU 通过高带宽 All-to-All 通信（如 DeepEP）将 Token 分发给宿主专家卡；
    - 各卡调用优化的 Grouped GEMM 或 Batched GEMM 算子并行执行专家 FFN 计算；

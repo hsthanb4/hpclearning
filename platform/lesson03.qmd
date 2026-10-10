@@ -21,26 +21,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart TD
-    L1["GPU 显存 (HBM3e: 3~8 TB/s)"] --> L2["Host 内存 (DDR5: 200~400 GB/s)"]
-    L2 --> L3["节点本地 NVMe SSD (PCIe Gen5: 10~50 GB/s)"]
-    L3 --> L4["共享并行分布式存储 (Lustre / GPFS / JuiceFS: 1~10 GB/s)"]
-    L4 --> L5["冷数据归档对象存储 (S3 / OSS: 0.1~1 GB/s)"]
-```
-<p class="caption" align="center"><em>图 3-1：大模型集群五级存储金字塔层次与带宽特性</em></p>
-
-```{mermaid}
-flowchart LR
-    Trigger["触发 Checkpoint 存档"] --> DumpMem["步骤 1: 内存级快照 (GPU -> CPU RAM, ~1秒)"]
-    DumpMem --> ResumeTrain["立即恢复训练正反向计算，训练零气泡阻塞"]
-    DumpMem --> AsyncDisk["步骤 2: 后台后台线程异步将 RAM 刷写至本地 NVMe"]
-    AsyncDisk --> AsyncRemote["步骤 3: 异步流式上传至中央共享对象存储"]
-```
-<p class="caption" align="center"><em>图 3-2：非阻塞异步多级 Checkpoint 保存流水线与持久化工作流</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 在万卡级大模型分布式训练（如 405B 参数量级）与海量多模态数据处理集群中，存储与 IO 子系统面临两大极其苛刻的性能与稳定性挑战：
@@ -59,6 +39,16 @@ flowchart LR
 
 如图 3-1 所示，现代超算存储架构呈现出严密的五级金字塔分层：
 
+```{mermaid}
+flowchart TD
+    L1["GPU 显存 (HBM3e: 3~8 TB/s)"] --> L2["Host 内存 (DDR5: 200~400 GB/s)"]
+    L2 --> L3["节点本地 NVMe SSD (PCIe Gen5: 10~50 GB/s)"]
+    L3 --> L4["共享并行分布式存储 (Lustre / GPFS / JuiceFS: 1~10 GB/s)"]
+    L4 --> L5["冷数据归档对象存储 (S3 / OSS: 0.1~1 GB/s)"]
+```
+<p class="caption" align="center"><em>图 3-1：大模型集群五级存储金字塔层次与带宽特性</em></p>
+
+
 - **L1：GPU 显存（HBM3e）**：单卡带宽高达 $3\sim 8\text{ TB/s}$，但容量昂贵且受限（80～144 GB），专供 SM 计算核心以纳秒级延迟高频访存；
 - **L2：Host 主内存（DDR5 RAM）**：单节点带宽 $200\sim 400\text{ GB/s}$，容量达数 TB，作为 CPU 与 GPU 之间的高速弹性缓冲垫（Bounce Buffer）；
 - **L3：节点本地 NVMe SSD**：单节点通过 PCIe Gen5 x4 / NVMe 阵列提供 $10\sim 50\text{ GB/s}$ 的本地顺序写带宽与超高 IOPS，容量达数十 TB，具备低时延并发暂存能力；
@@ -68,6 +58,16 @@ flowchart LR
 #### (2) 多级非阻塞异步 Checkpoint 保存流水线
 
 如图 3-2 所示，为消除显卡保存 Checkpoint 时的阻塞停顿，工业界采用多级流水线解耦计算与存储持久化：
+
+```{mermaid}
+flowchart LR
+    Trigger["触发 Checkpoint 存档"] --> DumpMem["步骤 1: 内存级快照 (GPU -> CPU RAM, ~1秒)"]
+    DumpMem --> ResumeTrain["立即恢复训练正反向计算，训练零气泡阻塞"]
+    DumpMem --> AsyncDisk["步骤 2: 后台后台线程异步将 RAM 刷写至本地 NVMe"]
+    AsyncDisk --> AsyncRemote["步骤 3: 异步流式上传至中央共享对象存储"]
+```
+<p class="caption" align="center"><em>图 3-2：非阻塞异步多级 Checkpoint 保存流水线与持久化工作流</em></p>
+
 
 1. **步骤 1：显存快照同步转储（In-Memory Snapshot，耗时 $\sim 1$ 秒）**  
    当到达 Checkpoint 保存步数时，主计算流暂停，利用高带宽 PCIe Gen5 D2H 通道（单机聚合可达数代总线带宽），将当前迭代步的权重与优化器状态以只读内存快照形式瞬间拷贝至 Host DDR5 内存中。

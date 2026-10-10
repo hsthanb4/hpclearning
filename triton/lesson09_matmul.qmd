@@ -25,11 +25,21 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+通用矩阵乘法（GEMM: $C = A \times B$，$A \in \mathbb{R}^{M \times K}, B \in \mathbb{R}^{K \times N}$）是现代人工智能模型（Transformer、CNN、MoE）中计算量占比超过 95% 的绝对算力支柱。
+在 GPU 体系结构中，朴素的三重循环算法算术强度极低，会导致致命的显存带宽瓶颈。因此，高性能 GEMM 必须采用**二维输出分块（Blocked Tiling）**：
+网格划分为 $M \times N$ 的宏观瓦片，每个 Program 块负责计算并写回输出矩阵的一小块 $C[\text{BM}, \text{BN}]$；在内层沿 $K$ 维以跨步 $BK$ 循环切片，并在片上高速寄存器中不断执行外积累加。
+本课解决的核心工程问题是：**在 Triton 中如何使用 `tl.dot` 驱动硬件底层 Tensor Core 核心，如何通过 FP32 累加器维持混合精度数值稳定性，以及如何为 $M, N, K$ 三维独立施加谓词掩码，优雅处理任意非对齐的尾块尺寸**。
+
+### 2. 它如何工作
+
+分块矩阵乘瓦片流水线如图 9-1 至图 9-3 所示：
 
 ::: {.img-card}
 ![](assets/figs/triton_matmul_pid_swizzle_math.png){width="95%"}
 <p class="caption">图 9-1：Triton 分块矩阵乘法（2D Matmul）分块指针代数与 Program ID 超分组 Swizzling 局部性数学模型</p>
+
 :::
 
 ```{mermaid}
@@ -53,16 +63,7 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 9-3：Blocked Matmul K 维分块遍历累加流水线</em></p>
 
-### 1. 它是什么，解决什么问题
 
-通用矩阵乘法（GEMM: $C = A \times B$，$A \in \mathbb{R}^{M \times K}, B \in \mathbb{R}^{K \times N}$）是现代人工智能模型（Transformer、CNN、MoE）中计算量占比超过 95% 的绝对算力支柱。
-在 GPU 体系结构中，朴素的三重循环算法算术强度极低，会导致致命的显存带宽瓶颈。因此，高性能 GEMM 必须采用**二维输出分块（Blocked Tiling）**：
-网格划分为 $M \times N$ 的宏观瓦片，每个 Program 块负责计算并写回输出矩阵的一小块 $C[\text{BM}, \text{BN}]$；在内层沿 $K$ 维以跨步 $BK$ 循环切片，并在片上高速寄存器中不断执行外积累加。
-本课解决的核心工程问题是：**在 Triton 中如何使用 `tl.dot` 驱动硬件底层 Tensor Core 核心，如何通过 FP32 累加器维持混合精度数值稳定性，以及如何为 $M, N, K$ 三维独立施加谓词掩码，优雅处理任意非对齐的尾块尺寸**。
-
-### 2. 它如何工作
-
-分块矩阵乘瓦片流水线如图 9-1 至图 9-3 所示：
 
 1. **累加器初始化**：
    每个 Program 处理输出的一个 $(BM, BN)$ 子矩阵。在寄存器中初始化 FP32 全零矩阵：

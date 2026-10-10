@@ -25,11 +25,25 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+**CuTe Tiled Copy（分块数据搬运与向量化掩码）** 是 CUTLASS 3.x 中管理片上与全局数据流转的高阶抽象。
+
+**数据搬运的硬件瓶颈与抽象突破（结合图 4-1 与图 4-2）**：
+- **低效标量加载 vs. 硬件向量指令**：若每个线程逐个读取 2 字节（FP16）或 4 字节（FP32），GPU 显存总线将被海量的小事务指令挤爆，指令发射器严重过载。现代 GPU 提供了 128-bit（16 字节）宽向量指令（如 `LDG.E.128`、Ampere 异步显存拷贝 `cp.async`，以及 Hopper 硬件级张量内存加速器 TMA）；
+- **Tiled Copy 的统一建模（图 4-1）**：
 
 ::: {.img-card}
 ![Tiled Copy API 图](assets/figs/fig_05_make_tiled_copy_API.png){width="90%"}
 <p class="caption">图 4-1：CUTLASS Tiled Copy 构造与数据搬运抽象</p>
+
+  $$\text{TiledCopy} = \text{Copy\_Atom (硬件拷贝微指令)} + \text{ThreadLayout (线程拓扑)} + \text{ValLayout (向量值排布)}$$
+  它以声明式的方式精确描述了：“Block 内哪些线程以何种向量粒度、按何种空间步长协作搬运哪一块 Tile”；
+
+- **非对齐尾块的数据越界防护（Predication）**：在实际业务中，矩阵维度极少恰好是分块尺寸（如 128 或 256）的整数倍。Tiled Copy 通过自动生成谓词掩码（Predication Tensor），在硬件层面安全遮蔽越界访问，杜绝显存段错误。
+
+### 2. 它如何工作（结合图 4-1 与图 4-2）
+
 :::
 
 ```{mermaid}
@@ -50,19 +64,6 @@ sequenceDiagram
 ```
 <p class="caption" align="center"><em>图 4-2：Tiled Copy 向量化加载与掩码谓词保护执行时序</em></p>
 
-### 1. 它是什么，解决什么问题
-
-**CuTe Tiled Copy（分块数据搬运与向量化掩码）** 是 CUTLASS 3.x 中管理片上与全局数据流转的高阶抽象。
-
-**数据搬运的硬件瓶颈与抽象突破（结合图 4-1 与图 4-2）**：
-- **低效标量加载 vs. 硬件向量指令**：若每个线程逐个读取 2 字节（FP16）或 4 字节（FP32），GPU 显存总线将被海量的小事务指令挤爆，指令发射器严重过载。现代 GPU 提供了 128-bit（16 字节）宽向量指令（如 `LDG.E.128`、Ampere 异步显存拷贝 `cp.async`，以及 Hopper 硬件级张量内存加速器 TMA）；
-- **Tiled Copy 的统一建模（图 4-1）**：
-  $$\text{TiledCopy} = \text{Copy\_Atom (硬件拷贝微指令)} + \text{ThreadLayout (线程拓扑)} + \text{ValLayout (向量值排布)}$$
-  它以声明式的方式精确描述了：“Block 内哪些线程以何种向量粒度、按何种空间步长协作搬运哪一块 Tile”；
-
-- **非对齐尾块的数据越界防护（Predication）**：在实际业务中，矩阵维度极少恰好是分块尺寸（如 128 或 256）的整数倍。Tiled Copy 通过自动生成谓词掩码（Predication Tensor），在硬件层面安全遮蔽越界访问，杜绝显存段错误。
-
-### 2. 它如何工作（结合图 4-1 与图 4-2）
 
 以 Ampere 架构下的异步搬运 `cp.async` 为例，Tiled Copy 的执行流水线如下：
 

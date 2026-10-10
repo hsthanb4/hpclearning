@@ -25,11 +25,16 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
 
-::: {.img-card}
-![Nsight Compute 概览](assets/figs/fig_08_Nsight_Compute_概览界面.png){width="90%"}
-<p class="caption">图 8-1：Nsight Compute (NCU) 算子性能分析概览界面</p>
+**Kernel 组合、自适应分发与性能剖析（Kernel Specialization, Dispatch & Profiling）** 是将 CUTLASS 高性能模板库工程化落地到生产级推理引擎（如 TensorRT-LLM、vLLM）中的“最后一公里”。
+
+**“不存在放之四海皆准的单一最优 Tile”（结合图 8-1 与图 8-2）**：
+- **形状多样性带来的性能撕裂**：
+   - 在大模型训练与 Prefill 阶段，$M, N, K$ 均为数千的大矩阵，大分块（如 $256 \times 128 \times 64$）配合 4 阶段流水能打满全部 SM；
+   - 但在 LLM 生成解码阶段（Decode GEMV），Token 数 $M = 1$！若依然沿用 $M_{\text{tile}} = 256$ 的大配置，整个矩阵在 $M$ 维度切分后**全局仅产生 1 个 ThreadBlock**，导致 H100 上的其余 131 个 SM 全部闲置看戏，硬件利用率不足 1%！
+- **分发中枢（Dispatch Engine，图 8-2）**：
+
 :::
 
 ```{mermaid}
@@ -40,17 +45,13 @@ flowchart TD
     Dispatch --> Run["GPU 高性能并发执行"]
 ```
 <p class="caption" align="center"><em>图 8-2：CUTLASS Kernel 动态配置选型与分发调度流程</em></p>
+必须根据运行时动态传入的张量尺寸 $(M, N, K)$、数据类型（FP16/BF16/FP8）与硬件架构（SM80/SM90），通过预先调优的启发式分桶表格（Shape Bucketing），动态路由（Dispatch）到最匹配的模板特化实例；
+- **NCU 深度剖析（图 8-1）**：
 
-### 1. 它是什么，解决什么问题
-
-**Kernel 组合、自适应分发与性能剖析（Kernel Specialization, Dispatch & Profiling）** 是将 CUTLASS 高性能模板库工程化落地到生产级推理引擎（如 TensorRT-LLM、vLLM）中的“最后一公里”。
-
-**“不存在放之四海皆准的单一最优 Tile”（结合图 8-1 与图 8-2）**：
-- **形状多样性带来的性能撕裂**：
-   - 在大模型训练与 Prefill 阶段，$M, N, K$ 均为数千的大矩阵，大分块（如 $256 \times 128 \times 64$）配合 4 阶段流水能打满全部 SM；
-   - 但在 LLM 生成解码阶段（Decode GEMV），Token 数 $M = 1$！若依然沿用 $M_{\text{tile}} = 256$ 的大配置，整个矩阵在 $M$ 维度切分后**全局仅产生 1 个 ThreadBlock**，导致 H100 上的其余 131 个 SM 全部闲置看戏，硬件利用率不足 1%！
-- **分发中枢（Dispatch Engine，图 8-2）**：必须根据运行时动态传入的张量尺寸 $(M, N, K)$、数据类型（FP16/BF16/FP8）与硬件架构（SM80/SM90），通过预先调优的启发式分桶表格（Shape Bucketing），动态路由（Dispatch）到最匹配的模板特化实例；
-- **NCU 深度剖析（图 8-1）**：利用 Nsight Compute 的硬件性能计数器，精准定位算子是处于 Memory-Bound、Compute-Bound 还是被发射延迟阻塞，建立科学的调优基线。
+::: {.img-card}
+![Nsight Compute 概览](assets/figs/fig_08_Nsight_Compute_概览界面.png){width="90%"}
+<p class="caption">图 8-1：Nsight Compute (NCU) 算子性能分析概览界面</p>
+利用 Nsight Compute 的硬件性能计数器，精准定位算子是处于 Memory-Bound、Compute-Bound 还是被发射延迟阻塞，建立科学的调优基线。
 
 ### 2. 它如何工作（结合图 8-1 与图 8-2）
 

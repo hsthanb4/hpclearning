@@ -25,30 +25,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/cuda_warp_shuffle_latency.png){width="80%"}
-<p class="caption">图 2-1：Warp Shuffle 与 Shared Memory 两阶段规约时延对比（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant T as Block 内各 Warp 线程
-    participant S as 共享内存 (Shared Memory)
-    participant W0 as Warp 0 (主归约 Warp)
-    participant G as 全局内存 (GMEM Output)
-
-    T->>T: 各 Warp 独立执行 __shfl_down_sync 归约
-    T->>S: 各 Warp 的 Lane 0 将局部和存入 SMem[warp_id]
-    Note over T,S: __syncthreads() 保证写完成
-    S->>W0: Warp 0 读出各 Warp 局部和
-    W0->>W0: Warp 0 再次执行 Shuffle 归约
-    W0->>G: Block 内 Lane 0 原子累加或直接写出最终标量
-```
-<p class="caption" align="center"><em>图 2-2：Block 级两阶段求和（Warp 内洗牌 + 跨 Warp 归约）执行时序流</em></p>
-
 ### 1. 并行规约（Parallel Reduction）的树状折叠哲学与层次架构
 
 规约操作（Reduction，如求和、求最大值、求范数）是将输入数组中的 $N$ 个元素通过结合二元算子（如加法、乘法）聚合成单一标量结果的经典算法：
@@ -67,6 +43,12 @@ sequenceDiagram
 
 如**图 2-1** 所示，Warp 内线程洗牌指令（Warp Shuffle）相比传统的 Shared Memory 具备压倒性的性能优势：
 
+::: {.img-card}
+![](assets/figs/cuda_warp_shuffle_latency.png){width="80%"}
+<p class="caption">图 2-1：Warp Shuffle 与 Shared Memory 两阶段规约执行延迟对比（基于 scientific-figure-making 绘制）</p>
+:::
+
+
 - **硬件数据通路（Register-to-Register Crossbar）**：
   在没有 Shuffle 之前，线程间交换数据必须通过 `smem[tid] = val; __syncthreads(); val2 = smem[tid+1];`。这不仅消耗宝贵的共享内存带宽，还受到 Bank 冲突与同步障栅（Barrier）的约束。
   `__shfl_down_sync` 直接复用 SM 内部的寄存器交换网络，延迟低至 1 个时钟周期，且无需任何 Block 级同步显式屏障！
@@ -84,6 +66,24 @@ sequenceDiagram
    - 经 5 次循环（$16 \to 8 \to 4 \to 2 \to 1$），仅需 5 条指令，Warp 内 32 个数的总和便精确汇聚在 **Lane 0** 的寄存器中。
 
 ### 3. Block 级规约的两阶段时序流转（如**图 2-2** 所示）
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant T as Warp 内 32 线程
+    participant S as Shared Memory (32 槽位)
+    participant W0 as Warp 0 主线程
+
+    Note over T: 阶段 1: Warp 内寄存器洗牌折半求和 (__shfl_down_sync)
+    T->>T: 32 -> 16 -> 8 -> 4 -> 2 -> 1 (5 步洗牌)
+    T->>S: 每个 Warp 的 Lane 0 将局部和写入 smem[warpId]
+    Note over S: __syncthreads() 块内同步
+    Note over W0,S: 阶段 2: Warp 0 读入 smem 规约各 Warp 局部和
+    S->>W0: Warp 0 读取 smem 并再次执行 5 步洗牌
+    W0-->>T: 最终标量结果原子累加写回全局内存
+```
+<p class="caption" align="center"><em>图 2-2：Block 级两阶段求和（Warp 内洗牌 + 跨 Warp 共享内存汇聚）时序流</em></p>
+
 
 当单个 Block 包含多个 Warp 时（例如 `BLOCK_SIZE = 256` 对应 8 个 Warp）：
 

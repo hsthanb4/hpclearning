@@ -25,41 +25,24 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart LR
-    subgraph RMSNormMath["RMSNorm 核心计算链路"]
-        direction TB
-        X["输入向量 x"] --> Square["平方累加: sum(x_i^2)"]
-        Square --> Mean["均方根: RMS = sqrt(mean(x^2) + eps)"]
-        Mean --> Scale["归一化并仿射: y_i = (x_i / RMS) * weight_i"]
-    end
-```
-<p class="caption" align="center"><em>图 4-1：RMSNorm 均方根归一化与缩放系数计算图</em></p>
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant T as 线程束 (Threads)
-    participant S as 共享内存 (SMem)
-    participant GM as 全局内存 (HBM)
-
-    Note over T,GM: 第一遍遍历 (Pass 1: 计算平方和)
-    T->>GM: 读取 x 并累加本地局部平方和
-    T->>S: 块内归约得出整行平方均值，计算 1 / RMS
-    Note over T,S: 同步屏障 __syncthreads()
-    Note over T,GM: 第二遍遍历 (Pass 2: 归一化与写回)
-    T->>GM: 重新加载 x[i]，乘以 1/RMS 与 weight[i]
-    T->>GM: 将归一化结果写回全局内存 y[i]
-```
-<p class="caption" align="center"><em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em></p>
-
 ### 1. RMSNorm 的数学定义与相比 LayerNorm 的架构优势
 
 均方根层归一化（Root Mean Square Layer Normalization, RMSNorm）是现代大语言模型（如 LLaMA 系列、Mistral、Qwen、DeepSeek）中近乎通用的归一化层标准，全面替代了经典的 LayerNorm。
 
 #### A. 核心数学公式推导（如**图 4-1** 所示）
+
+```{mermaid}
+flowchart LR
+    subgraph RMSNorm_Math["RMSNorm 均方根计算图"]
+        X["输入向量 x_i (Hidden 维度)"] --> Sq["平方: x_i^2"]
+        Sq --> Mean["均值: 1/d * sum(x_i^2)"]
+        Mean --> Rsqrt["倒数平方根: rsqrt(mean + eps)"]
+        Rsqrt --> Mul["尺度重标定: x_i * rsqrt * gamma_i"]
+        Mul --> Y["输出 y_i"]
+    end
+```
+<p class="caption" align="center"><em>图 4-1：RMSNorm 均方根归一化与缩放系数计算图</em></p>
+
 对于输入特征向量 $x \in \mathbb{R}^N$（通常为 Transformer 隐藏层维度 $h$），其均方根（RMS）定义为：
 $$\text{RMS}(x) = \sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2 + \epsilon}$$
 归一化并施加可学习仿射缩放系数 $w \in \mathbb{R}^N$（Weight / Gamma）：
@@ -77,6 +60,26 @@ $$\mu = \frac{1}{N} \sum_{i=1}^N x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=1}^N 
   3. 算子执行耗时直接下降 10%~20%，显著提升了小 Batch 推理场景的执行速度。
 
 ### 2. 两阶段扫描（Two-Pass Scanning）与片上同步时序（如**图 4-2** 所示）
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant GM as 全局显存 (HBM)
+    participant Reg as 寄存器 / SRAM
+    participant W as Warp 归约 (__shfl_down_sync)
+    participant SM as Shared Memory (广播均方根)
+
+    Note over GM,Reg: Pass 1: 扫描并累加均方值
+    GM->>Reg: 向量化加载输入 x 并平方累加
+    Reg->>W: Warp 内树状折半求和
+    W->>SM: 保存各 Warp 局部均值并最终广播 rsqrt_val
+    Note over Reg,GM: Pass 2: 重新读取并写回输出
+    SM->>Reg: 线程获取全局 rsqrt 标量
+    GM->>Reg: 重新读取 x 并结合 weight 缩放
+    Reg->>GM: 向量化写回输出 y (完全融合，零多余 HBM 往返)
+```
+<p class="caption" align="center"><em>图 4-2：RMSNorm 两阶段访存扫描与片上归约时序流程</em></p>
+
 
 在大模型中，每一行（Row）通常代表一个 Token 的隐藏维度（如 $N = 4096 \sim 8192$）。单个 Block 绑定处理一行：
 

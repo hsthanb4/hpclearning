@@ -31,51 +31,18 @@ jupyter: python3
 
 源码快照：vLLM `8e958902eee5`。
 
-## 核心对象
-
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/kvcache_memory_growth.png){width="85%"}
-<p class="caption">图 2-1：Llama-3 8B 不同并发度与上下文长度下 KV Cache 显存暴涨曲线（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-flowchart TD
-    ScheduleStart["进入 step() 调度周期"] --> CheckWaiting["检查等待队列 (Waiting Queue)"]
-    CheckWaiting --> MatchPrefix["查询 Prefix Cache 命中已有块"]
-    MatchPrefix --> Budget{"Token 预算与物理 Block 是否充足以容纳新请求?"}
-    Budget -->|充足| Promote["晋升至运行队列 (Running Queue) 触发 Prefill"]
-    Budget -->|不足| PreemptCheck{"Running 队列能否满足 Decode 扩张?"}
-    PreemptCheck -->|受阻| Preempt["抢占低优先级请求 (Preempt / Recompute)"]
-    PreemptCheck -->|充足| Exec["构造当前批次元数据并下发 GPU"]
-```
-<p class="caption" align="center"><em>图 2-2：vLLM V1 统一调度器动态分发与抢占决策流程</em></p>
-
 ## 核心心智模型
-
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/kvcache_memory_growth.png){width="85%"}
-<p class="caption">图 2-1：Llama-3 8B 不同并发度与上下文长度下 KV Cache 显存暴涨曲线（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-flowchart TD
-    ScheduleStart["进入 step() 调度周期"] --> CheckWaiting["检查等待队列 (Waiting Queue)"]
-    CheckWaiting --> MatchPrefix["查询 Prefix Cache 命中已有块"]
-    MatchPrefix --> Budget{"Token 预算与物理 Block 是否充足以容纳新请求?"}
-    Budget -->|充足| Promote["晋升至运行队列 (Running Queue) 触发 Prefill"]
-    Budget -->|不足| PreemptCheck{"Running 队列能否满足 Decode 扩张?"}
-    PreemptCheck -->|受阻| Preempt["抢占低优先级请求 (Preempt / Recompute)"]
-    PreemptCheck -->|充足| Exec["构造当前批次元数据并下发 GPU"]
-```
-<p class="caption" align="center"><em>图 2-2：vLLM V1 统一调度器动态分发与抢占决策流程</em></p>
 
 ### 1. 它是什么，解决什么问题
 
-在 LLM 推理服务中，KV Cache 是最昂贵、最具爆发性的显存开销源头（图 2-1）。随着并发请求数与序列长度的增长，显存消耗呈陡峭的超线性爆发。传统推理系统将调度粗暴划分为“Prefill 批次”与“Decode 批次”两个互斥世界，由此引发了恶劣的**调度气泡与延迟剧烈抖动**：长 Prompt 的 Prefill 计算会把正在流水线生成的 Decode 请求完全阻断数十秒，导致首字延迟（TTFT）与字间生成延迟（ITL / TPOT）的双重崩溃。
+在 LLM 推理服务中，KV Cache 是最昂贵、最具爆发性的显存开销源头（如**图 2-1** 所示）：
+
+::: {.img-card}
+![](assets/figs/kvcache_memory_growth.png){width="85%"}
+<p class="caption">图 2-1：Llama-3 8B 不同并发度与上下文长度下 KV Cache 显存暴涨曲线（基于 scientific-figure-making 绘制）</p>
+:::
+
+随着并发请求数与序列长度的增长，显存消耗呈陡峭的超线性爆发。传统推理系统将调度粗暴划分为“Prefill 批次”与“Decode 批次”两个互斥世界，由此引发了恶劣的**调度气泡与延迟剧烈抖动**：长 Prompt 的 Prefill 计算会把正在流水线生成的 Decode 请求完全阻断数十秒，导致首字延迟（TTFT）与字间生成延迟（ITL / TPOT）的双重崩溃。
 
 vLLM V1 统一调度器（Unified Scheduler）与 `KVCacheManager` 彻底颠覆了这种二元割裂：
 
@@ -88,6 +55,20 @@ vLLM V1 统一调度器（Unified Scheduler）与 `KVCacheManager` 彻底颠覆�
 ### 2. 它如何工作
 
 统一调度器动态分发与抢占决策时序如图 2-2 所示：
+
+```{mermaid}
+flowchart TD
+    ScheduleStart["进入 step() 调度周期"] --> CheckWaiting["检查等待队列 (Waiting Queue)"]
+    CheckWaiting --> MatchPrefix["查询 Prefix Cache 命中已有块"]
+    MatchPrefix --> Budget{"Token 预算与物理 Block 是否充足以容纳新请求?"}
+    Budget -->|充足| Promote["晋升至运行队列 (Running Queue) 触发 Prefill"]
+    Budget -->|不足| PreemptCheck{"Running 队列能否满足 Decode 扩张?"}
+    PreemptCheck -->|受阻| Preempt["抢占低优先级请求 (Preempt / Recompute)"]
+    PreemptCheck -->|充足| Exec["构造当前批次元数据并下发 GPU"]
+```
+<p class="caption" align="center"><em>图 2-2：vLLM V1 统一调度器动态分发与抢占决策流程</em></p>
+
+
 
 1. **RUNNING 队列绝对优先准则**：
    在每个 `step()` 循环开始时，调度器**首先且严格优先保障正在运行的 RUNNING 队列**。因为正在生成的请求已经持有了大量的物理 KV Cache，若其中断会导致昂贵的显存被闲置占用。调度器优先为 RUNNING 请求分配本轮继续生成所需的 Token 预算与后继 Block。

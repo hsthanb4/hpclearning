@@ -25,7 +25,15 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在深度学习的前向与反向计算中，线性层（Linear Layer）的输出通常需要加上偏置向量：$Y = X + B$，其中 $X \in \mathbb{R}^{M \times N}$，$B \in \mathbb{R}^{N}$。
+根据 NumPy/PyTorch 广播语义，长度为 $N$ 的偏置向量 $B$ 需要沿行维度（$M$ 维度）复制并与每一行相加。如果显式将 $B$ 复制成 $M \times N$ 的稠密矩阵，将浪费大量全局显存并引入无谓的内存搬运。
+本课解决的核心工程问题是：如何在 Triton 中通过将 Program 映射到二维逻辑网格（或一维 Program 处理一整行），结合张量的物理跨步（Stride）代数，实现**零内存开销的隐式广播（Implicit In-Register Broadcasting）**，并深刻辨析“逻辑维度边界（Logical Shape）”与“物理内存步长（Physical Stride）”的本质解耦。
+
+### 2. 它如何工作
+
+二维 Stride 寻址与广播的数据通路如图 4-1 与图 4-2 所示：
 
 ```{mermaid}
 flowchart TD
@@ -43,15 +51,7 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 4-2：Triton 广播机制（Broadcasting）执行流</em></p>
 
-### 1. 它是什么，解决什么问题
 
-在深度学习的前向与反向计算中，线性层（Linear Layer）的输出通常需要加上偏置向量：$Y = X + B$，其中 $X \in \mathbb{R}^{M \times N}$，$B \in \mathbb{R}^{N}$。
-根据 NumPy/PyTorch 广播语义，长度为 $N$ 的偏置向量 $B$ 需要沿行维度（$M$ 维度）复制并与每一行相加。如果显式将 $B$ 复制成 $M \times N$ 的稠密矩阵，将浪费大量全局显存并引入无谓的内存搬运。
-本课解决的核心工程问题是：如何在 Triton 中通过将 Program 映射到二维逻辑网格（或一维 Program 处理一整行），结合张量的物理跨步（Stride）代数，实现**零内存开销的隐式广播（Implicit In-Register Broadcasting）**，并深刻辨析“逻辑维度边界（Logical Shape）”与“物理内存步长（Physical Stride）”的本质解耦。
-
-### 2. 它如何工作
-
-二维 Stride 寻址与广播的数据通路如图 4-1 与图 4-2 所示：
 
 1. **网格与行映射**：主机端发射 $M$ 个 Program 块：`grid = (M,)`。每个 Program 的 `row = tl.program_id(0)` 精准负责矩阵的一整行。
 

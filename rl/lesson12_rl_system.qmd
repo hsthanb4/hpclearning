@@ -25,7 +25,21 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个**分布式异构流式流水线（Heterogeneous Streaming Pipeline）**。
+在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：
+
+- **算力瓶颈转移（生成延迟主导）**：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。**超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段**；
+- **推理与训练的物理资源冲突**：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。
+
+大规模 RL 系统解决的核心工程问题是：**通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化**。
+
+### 2. 它如何工作
+
+工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：
+
+1. **Rollout 与 Learner 物理双集群解耦架构（图 12-1）**：
 
 ```{mermaid}
 flowchart TD
@@ -46,6 +60,13 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 12-1：工业级大模型强化学习系统 Rollout 与 Learner 解耦架构</em></p>
 
+   - **Rollout 生成集群（Inference Workers）**：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；
+   - **解耦中转缓冲层（Buffer Queue）**：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；
+   - **训练优化集群（Learner Workers）**：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；
+   - **权重热加载同步环（Weight Sync Ring）**：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。
+
+2. **策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）**：
+
 ```{mermaid}
 flowchart LR
     Gen["Rollout 引擎并发生成轨迹"] --> Put["压入异步 FIFO 轨迹队列"]
@@ -56,27 +77,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 12-2：异步 RL 系统经验管道吞吐与策略落后度 (Staleness) 控制流程</em></p>
 
-### 1. 它是什么，解决什么问题
-
-在工业级大语言模型后训练（如 DeepSeek-R1、ChatGPT、Claude 对齐）中，单机单卡或单纯的数据并行已完全无法承载万卡规模的强化学习。现代大规模 RL 系统（如 Ray-vLLM、verl、OpenRLHF）本质上是一个**分布式异构流式流水线（Heterogeneous Streaming Pipeline）**。
-在大模型 RL 训练中，系统面临与传统分布式深度学习截然不同的核心瓶颈：
-
-- **算力瓶颈转移（生成延迟主导）**：在预训练中，瓶颈是 GPU 的反向传播矩阵乘吞吐；而在长思维链推理强化学习（Long CoT RL）中，生成一条 8k～16k Token 的推理轨迹可能需要数十秒的自回归串行解码（Memory-bound），而 Learner 进行单步反向梯度计算（Compute-bound）只需几百毫秒。**超过 80%～90% 的集群总耗时与算力消耗在推理解码（Rollout）阶段**；
-- **推理与训练的物理资源冲突**：高效生成需要大显存 KV Cache、Continuous Batching 与 PagedAttention；而高效反向传播需要 3D 并行（TP+PP+DP）、重计算（Activation Checkpointing）与 ZeRO-3 优化器状态分片。若在同一组 GPU 进程上串行交替运行两种负载，会导致频繁的权重重切分与显存碎片。
-
-大规模 RL 系统解决的核心工程问题是：**通过推理引擎（vLLM / SGLang）与训练引擎（Megatron / FSDP）的进程级与集群级物理分离解耦，在异步并行流转海量经验样本的同时，建立严格的策略陈旧度（Staleness Control）与分布校准约束，实现集群 GPU 资源利用率（MFU）与样本有效性的最大化**。
-
-### 2. 它如何工作
-
-工业级 RL 解耦架构与版本落后度控制如图 12-1 与图 12-2 所示：
-
-1. **Rollout 与 Learner 物理双集群解耦架构（图 12-1）**：
-   - **Rollout 生成集群（Inference Workers）**：部署于专属推理卡或利用高性能推理框架（vLLM / SGLang）。专注海量 Prompt 的高并发自回归解码，利用 PagedAttention 管理超长上下文 KV Cache；
-   - **解耦中转缓冲层（Buffer Queue）**：利用 Ray Object Store、共享内存或分布式内存队列，将生成的 Token 序列、原始行为对数概率、有效掩码与规则打分异步推送入队；
-   - **训练优化集群（Learner Workers）**：部署 Megatron-LM 或 ZeRO-3，成批从队列拉取经验执行微批次前向反向，AdamW 更新模型参数；
-   - **权重热加载同步环（Weight Sync Ring）**：Learner 优化产生新参数后，通过跨集群的高速 NCCL Broadcast 或内存直接挂载，毫秒级将权重热更新至 Rollout 引擎中。
-
-2. **策略陈旧度（Policy Staleness）与管道丢弃（图 12-2）**：
    在完全异步或流水线并行的架构中，当 Worker 依据权重版本 $v_{\text{sample}}$ 采样出一条长达 8192 Token 的轨迹推入队列时，Learner 可能已经完成了 $k$ 步梯度更新，当前最新模型版本已演化至 $v_{\text{current}}$。
    定义策略版本陈旧度：
    $$ \text{Staleness} = v_{\text{current}} - v_{\text{sample}} $$

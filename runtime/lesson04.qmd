@@ -21,11 +21,24 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在分布式深度学习（如 DDP 梯度规约、TP 张量并行与 FSDP 全切片）中，集合通信（Collective Communication，尤以 AllReduce 为代表）的耗时直接决定了系统的线性加速比。然而，在大规模 GPU 集群中，通信时延并不是一个静态常数，而是受到**报文尺寸（Message Size $S$）**、**通信拓扑（Topology）**与**底层通信算法（Ring vs. Tree vs. CollNet）**共同支配的动态物理过程。
+
+为了在万卡集群中科学规划并行切分与算子重叠，AI Infra 工程师必须建立严格量化的**集合通信成本模型（Communication Cost Model）**：
+
+1. **$\alpha$-$\beta$ 经典时延模型**：将每次跨卡数据交换解构为两个正交维度——链路建立与网络握手的**固有启动延迟 $\alpha$（Latency）**，以及受物理信道吞吐制约的**传输每字节反向带宽 $\beta = 1/B$（Inverse Bandwidth）**；
+
+2. **解决算法选型黑盒问题**：如图 4-1 所示，
 
 ::: {.img-card}
 ![](assets/figs/ring_vs_tree_latency.png){width="85%"}
 <p class="caption">图 4-1：Ring 与 Tree 集合通信算法理论时延模型与报文尺度分界（基于 scientific-figure-making 绘制）</p>
+
+没有一种集合通信算法在所有场景下均占统治地位。Tree 算法以 $\mathcal{O}(\log p)$ 的步数极大压缩了小报文的同步时延，而 Ring 算法以近乎 $100\%$ 的链路带宽利用率支配了大张量规约；
+
+3. **分层异构路由决策**：如图 4-2 所示，
+
 :::
 
 ```{mermaid}
@@ -38,17 +51,7 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 4-2：通信报文尺度判定与层次化集合通信算法路由决策流</em></p>
 
-### 1. 它是什么，解决什么问题
-
-在分布式深度学习（如 DDP 梯度规约、TP 张量并行与 FSDP 全切片）中，集合通信（Collective Communication，尤以 AllReduce 为代表）的耗时直接决定了系统的线性加速比。然而，在大规模 GPU 集群中，通信时延并不是一个静态常数，而是受到**报文尺寸（Message Size $S$）**、**通信拓扑（Topology）**与**底层通信算法（Ring vs. Tree vs. CollNet）**共同支配的动态物理过程。
-
-为了在万卡集群中科学规划并行切分与算子重叠，AI Infra 工程师必须建立严格量化的**集合通信成本模型（Communication Cost Model）**：
-
-1. **$\alpha$-$\beta$ 经典时延模型**：将每次跨卡数据交换解构为两个正交维度——链路建立与网络握手的**固有启动延迟 $\alpha$（Latency）**，以及受物理信道吞吐制约的**传输每字节反向带宽 $\beta = 1/B$（Inverse Bandwidth）**；
-
-2. **解决算法选型黑盒问题**：如图 4-1 所示，没有一种集合通信算法在所有场景下均占统治地位。Tree 算法以 $\mathcal{O}(\log p)$ 的步数极大压缩了小报文的同步时延，而 Ring 算法以近乎 $100\%$ 的链路带宽利用率支配了大张量规约；
-
-3. **分层异构路由决策**：如图 4-2 所示，指导 NCCL 在节点内高带宽 NVLink 与节点间跨机网络（InfiniBand / RoCE）之间自适应选择最优的层次化通信拓扑。
+指导 NCCL 在节点内高带宽 NVLink 与节点间跨机网络（InfiniBand / RoCE）之间自适应选择最优的层次化通信拓扑。
 
 ### 2. 它如何工作
 

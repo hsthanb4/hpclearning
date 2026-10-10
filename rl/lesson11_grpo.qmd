@@ -25,23 +25,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/grpo_reward_distribution.png){width="85%"}
-<p class="caption">图 11-1：GRPO 无 Critic 组内相对优势打分分布与标准化（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-flowchart LR
-    BatchQ["获取一批查询 Questions"] --> Rollout["每个 Query 采样 G 份完整回答"]
-    Rollout --> Eval["答案规则匹配 / 单元测试打分 (0/1 或浮点)"]
-    Eval --> Norm["计算各 Prompt 组内部的 Z-score 优势"]
-    Norm --> Loss["组装 GRPO 截断损失与参考模型 KL 约束"]
-    Loss --> Grad["跨卡通信与模型参数更新"]
-```
-<p class="caption" align="center"><em>图 11-2：GRPO 高吞吐后训练执行与组间优势分配流程</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **组相对策略优化（Group Relative Policy Optimization, GRPO）**由 DeepSeek 团队于 2024 年提出（发表于 DeepSeekMath 并作为 DeepSeek-R1 / R1-Zero 推理大模型的核心强化学习引擎）。
@@ -58,6 +41,11 @@ GRPO 解决的核心工程问题是：**彻底摒弃单独的 Critic 价值网�
 GRPO 奖励分布标准化与端到端高吞吐流水线如图 11-1 与图 11-2 所示：
 
 1. **组内采样与相对优势归一化（Group Normalization，图 11-1）**：
+
+::: {.img-card}
+![](assets/figs/grpo_reward_distribution.png){width="85%"}
+<p class="caption">图 11-1：GRPO 无 Critic 组内相对优势打分分布与标准化（基于 scientific-figure-making 绘制）</p>
+
    对于给定的一个输入 Prompt $q$，Actor 策略 $\pi_{\theta_{\text{old}}}$ 独立并行采样生成 $G$ 个完整候选回答 $\{o_1, o_2, \dots, o_G\}$（在 DeepSeek 实践中通常取 $G = 8 \sim 64$）。
    外部奖励系统（如编译器沙箱测试 RLVR 或规则判题器）对这 $G$ 个回答分别评定标量结果奖励 $\{r_1, r_2, \dots, r_G\}$。
    第 $i$ 个回答的优势值不再依赖 Critic，而是直接通过**组内 Z-score 居中与缩放**计算：
@@ -65,6 +53,19 @@ GRPO 奖励分布标准化与端到端高吞吐流水线如图 11-1 与图 11-2 
    得到的标量优势 $\hat{A}_i$ 随后被**广播（Broadcast）**给该回答包含的所有有效 Completion Token。
 
 2. **GRPO 策略更新目标函数（图 11-2）**：
+
+:::
+
+```{mermaid}
+flowchart LR
+    BatchQ["获取一批查询 Questions"] --> Rollout["每个 Query 采样 G 份完整回答"]
+    Rollout --> Eval["答案规则匹配 / 单元测试打分 (0/1 或浮点)"]
+    Eval --> Norm["计算各 Prompt 组内部的 Z-score 优势"]
+    Norm --> Loss["组装 GRPO 截断损失与参考模型 KL 约束"]
+    Loss --> Grad["跨卡通信与模型参数更新"]
+```
+<p class="caption" align="center"><em>图 11-2：GRPO 高吞吐后训练执行与组间优势分配流程</em></p>
+
    在每个 Token 位置上，沿用 PPO 的悲观比率截断机制（Clipped Surrogate），并将参考模型 KL 散度作为显式正则项：
    $$ \mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}_{q \sim P(Q), \{o_i\}_{i=1}^G \sim \pi_{\theta_{\text{old}}}(q)} \left[ \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \left\{ \min \left( \frac{\pi_\theta(o_{i,t})}{\pi_{\theta_{\text{old}}}(o_{i,t})} \hat{A}_i, \, \text{clip}\left(\frac{\pi_\theta(o_{i,t})}{\pi_{\theta_{\text{old}}}(o_{i,t})}, 1-\epsilon, 1+\epsilon\right) \hat{A}_i \right) - \beta D_{\text{KL}}(\pi_\theta \parallel \pi_{\text{ref}}) \right\} \right] $$
    其中 $D_{\text{KL}}(\pi_\theta \parallel \pi_{\text{ref}}) = \frac{\pi_{\text{ref}}(o_{i,t})}{\pi_\theta(o_{i,t})} - \log \frac{\pi_{\text{ref}}(o_{i,t})}{\pi_\theta(o_{i,t})} - 1$（即点态非负的 $k_3$ 估计量）。

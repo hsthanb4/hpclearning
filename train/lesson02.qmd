@@ -27,25 +27,6 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/activation_recompute.jpg){width="95%"}
-<p class="caption">图 2-1：激活重计算（Activation Checkpointing）机制、显存曲线对比与计算/显存权衡</p>
-:::
-
-```{mermaid}
-flowchart LR
-    subgraph MicroBatches["梯度累积 Micro-Batch 调度时序"]
-        direction TB
-        MB1["Micro-Batch 1 (前向+反向)"] -->|累加梯度| G["梯度缓冲区 (Grad Buffer)"]
-        MB2["Micro-Batch 2 (前向+反向)"] -->|累加梯度| G
-        MBN["Micro-Batch N (前向+反向)"] -->|累加梯度| G
-        G --> Step["除以 N 归一化均值 ➔ Optimizer Step"]
-    end
-```
-<p class="caption" align="center"><em>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流</em></p>
-
 ### 1. 动态激活值的本质与二次方爆炸
 
 在前向传播过程中，神经网络中的非线性算子、LayerNorm 与多头自注意力机制需要保存中间输入，供反向传播根据微积分链式法则求导（例如求 $\frac{\partial L}{\partial W}$ 需要用到输入 $X$：$\frac{\partial L}{\partial W} = X^T \cdot \frac{\partial L}{\partial Y}$）。
@@ -61,7 +42,13 @@ $$m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \fra
 
 ### 2. 激活重计算（Activation Checkpointing / Rematerialization）
 
-激活重计算的核心思想是**以算力换显存**：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如上图 2-1 所示）。
+激活重计算的核心思想是**以算力换显存**：在前向传播中主动丢弃部分或全部中间激活，反向传播到达该层时，再从最近保存的检查点（Checkpoint）重新计算前向（如图 2-1 所示）：
+
+::: {.img-card}
+![](assets/activation_recompute.jpg){width="95%"}
+<p class="caption">图 2-1：激活重计算（Activation Checkpointing）机制、显存曲线对比与计算/显存权衡</p>
+:::
+
 
 - **全量重计算（Full Recomputation）**：仅在每个 Transformer 层的输入边界保存 Checkpoint，层内部的所有中间激活全部丢弃。在反向传播时，每层都需要重新执行一遍完整前向。  
    - *收益*：激活显存开销直接压减为原来的约 $1/L$（几乎只剩单层激活）。  
@@ -72,7 +59,20 @@ $$m_{\text{act}} \approx L \cdot s \cdot b \cdot h \cdot \left(34 + 5 \cdot \fra
 
 ### 3. 梯度累积（Gradient Accumulation）的工作机制
 
-在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 $N_{\text{acc}}$ 个微批次（Micro-Batch），如上图 2-2 所示：
+在单卡显存受限、无法容纳目标全局 Batch Size 时，梯度累积将大批次划分为 $N_{\text{acc}}$ 个微批次（Micro-Batch），如图 2-2 所示：
+
+```{mermaid}
+flowchart LR
+    subgraph MicroBatches["梯度累积 Micro-Batch 调度时序"]
+        direction TB
+        MB1["Micro-Batch 1 (前向+反向)"] -->|累加梯度| G["梯度缓冲区 (Grad Buffer)"]
+        MB2["Micro-Batch 2 (前向+反向)"] -->|累加梯度| G
+        MBN["Micro-Batch N (前向+反向)"] -->|累加梯度| G
+        G --> Step["除以 N 归一化均值 ➔ Optimizer Step"]
+    end
+```
+<p class="caption" align="center"><em>图 2-2：梯度累积跨微批次累加与优化器单步平均执行流</em></p>
+
 
 $$\text{全局批大小 (GBS)} = \text{微批大小 (MBS)} \times \text{累积步数 (grad\_acc)} \times \text{数据并行度 (DP)}$$
 

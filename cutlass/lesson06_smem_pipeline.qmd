@@ -25,11 +25,20 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+**多阶段共享内存异步流水线（Multi-Stage Shared Memory Asynchronous Pipeline）** 是现代 GPU（Ampere、Ada、Hopper）彻底打破“冯·诺依曼访存墙”、实现 Tensor Core 极限算力满载的核心生命线。
+
+**传统同步 GEMM 的停滞危机 vs. 异步环形流水（结合图 6-1 与图 6-2）**：
+- **串行等待的算力暴跌**：在早期 GPU 编程中，循环遵循“读取 Tile $\to$ 同步等待 $\to$ MMA 矩阵乘 $\to$ 同步等待”的串行模式。由于全局显存（HBM）的访问延迟高达 200~400 个时钟周期，计算单元在等待显存数据的漫长周期内完全处于冻结饥饿状态，硬件算力利用率极低；
+- **异步拷贝引擎（`cp.async`，图 6-1）**：
 
 ::: {.img-card}
 ![异步拷贝流水图](assets/figs/fig_06_cp_async_拷贝原理_图源自_NVIDIA_Ampere_白皮书_.png){width="90%"}
 <p class="caption">图 6-1：cp.async 异步拷贝原理（图源自 NVIDIA Ampere 白皮书）</p>
+Ampere 引入了硬件级异步拷贝引擎。它允许线程仅发射拷贝指令，由显存控制器后台直接将 HBM 数据写入片上 Shared Memory，**全程彻底绕过通用寄存器（Zero Register Overhead）**；
+- **环形流水线（Circular Buffer Pipeline，图 6-2）**：
+
 :::
 
 ```{mermaid}
@@ -47,15 +56,7 @@ sequenceDiagram
     Stage1->>MMA: 立即计算第 k+1 步，计算完全隐藏数据传输
 ```
 <p class="caption" align="center"><em>图 6-2：Ampere/Hopper 多级异步环形流水线（Circular Pipeline）执行流</em></p>
-
-### 1. 它是什么，解决什么问题
-
-**多阶段共享内存异步流水线（Multi-Stage Shared Memory Asynchronous Pipeline）** 是现代 GPU（Ampere、Ada、Hopper）彻底打破“冯·诺依曼访存墙”、实现 Tensor Core 极限算力满载的核心生命线。
-
-**传统同步 GEMM 的停滞危机 vs. 异步环形流水（结合图 6-1 与图 6-2）**：
-- **串行等待的算力暴跌**：在早期 GPU 编程中，循环遵循“读取 Tile $\to$ 同步等待 $\to$ MMA 矩阵乘 $\to$ 同步等待”的串行模式。由于全局显存（HBM）的访问延迟高达 200~400 个时钟周期，计算单元在等待显存数据的漫长周期内完全处于冻结饥饿状态，硬件算力利用率极低；
-- **异步拷贝引擎（`cp.async`，图 6-1）**：Ampere 引入了硬件级异步拷贝引擎。它允许线程仅发射拷贝指令，由显存控制器后台直接将 HBM 数据写入片上 Shared Memory，**全程彻底绕过通用寄存器（Zero Register Overhead）**；
-- **环形流水线（Circular Buffer Pipeline，图 6-2）**：将共享内存划分为 $S$ 个环形阶段（Stages）。在当前时钟周期计算 Stage $k$ 的同时，硬件已在后台并行预取 Stage $k+1, \dots, k+S-1$ 的数据，使显存传输延迟被计算时间完全掩盖。
+将共享内存划分为 $S$ 个环形阶段（Stages）。在当前时钟周期计算 Stage $k$ 的同时，硬件已在后台并行预取 Stage $k+1, \dots, k+S-1$ 的数据，使显存传输延迟被计算时间完全掩盖。
 
 ### 2. 它如何工作（结合图 6-1 与图 6-2）
 

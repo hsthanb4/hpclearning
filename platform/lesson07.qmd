@@ -21,29 +21,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart LR
-    subgraph Telemetry["集群可观测性三支柱"]
-        M["Metrics (GPU 利用率, 温度, ECC, NCCL 吞吐)"]
-        L["Logs (内核 dmesg, PyTorch 栈日志, K8s 事件)"]
-        T["Traces (分布式跨节点 RPC 与 NCCL 通信耗时)"]
-    end
-    Telemetry --> BurnRate["SLO 错误预算消耗率 (Burn Rate = 当前故障率 / 允许故障率)"]
-```
-<p class="caption" align="center"><em>图 7-1：集群立体化监控度量与 SLO 错误预算 (Burn Rate) 监控模型</em></p>
-
-```{mermaid}
-flowchart TD
-    MetricStream["时序指标持续采集 (Prometheus + DCGM-Exporter)"] --> EvalWindow["多窗口联合评估: 1小时消耗率 > 14.4x 或 6小时 > 6x"]
-    EvalWindow --> Spike{"是否发生急剧突发严重故障?"}
-    Spike -->|"是 (高 Burn Rate)"| P1Alert["触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离"]
-    Spike -->|"否 (慢速漂移)"| P3Ticket["创建 P3 低优先级工单排查慢掉队节点"]
-    P1Alert --> HotMigration["触发作业热迁移与断点恢复自愈"]
-```
-<p class="caption" align="center"><em>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 在由成百上千张高端加速卡构建的大规模 AI 生产基础设施中（包含在线高吞吐大模型推理 Serving 与长周期万卡预训练 Training），平台运营与 SRE 工程师面临着严峻的可观测性与告警困境：
@@ -62,6 +39,18 @@ flowchart TD
 ### 2. 它如何工作
 
 #### (1) AI 基础设施可观测性三支柱（如图 7-1 所示）
+
+```{mermaid}
+flowchart LR
+    subgraph Telemetry["集群可观测性三支柱"]
+        M["Metrics (GPU 利用率, 温度, ECC, NCCL 吞吐)"]
+        L["Logs (内核 dmesg, PyTorch 栈日志, K8s 事件)"]
+        T["Traces (分布式跨节点 RPC 与 NCCL 通信耗时)"]
+    end
+    Telemetry --> BurnRate["SLO 错误预算消耗率 (Burn Rate = 当前故障率 / 允许故障率)"]
+```
+<p class="caption" align="center"><em>图 7-1：集群立体化监控度量与 SLO 错误预算 (Burn Rate) 监控模型</em></p>
+
 
 - **Metrics（指标层，秒级聚合）**：  
   依托 Prometheus 与 NVIDIA DCGM-Exporter 导出立体化时序指标。不仅监测宏观的 `DCGM_FI_DEV_GPU_UTIL`，更深度透视：
@@ -96,6 +85,17 @@ $$\text{Burn Rate} = \frac{\text{Observed Bad Rate}}{\text{Error Budget}} = \fra
 #### (3) 多窗口多消耗率联合告警策略
 
 如图 7-2 所示，为彻底杜绝毛刺误报并极速捕获真正严重的事故，工业界执行多窗口联合校验：
+
+```{mermaid}
+flowchart TD
+    MetricStream["时序指标持续采集 (Prometheus + DCGM-Exporter)"] --> EvalWindow["多窗口联合评估: 1小时消耗率 > 14.4x 或 6小时 > 6x"]
+    EvalWindow --> Spike{"是否发生急剧突发严重故障?"}
+    Spike -->|"是 (高 Burn Rate)"| P1Alert["触发 P1 紧急告警，直接呼叫值班并启动自动下线隔离"]
+    Spike -->|"否 (慢速漂移)"| P3Ticket["创建 P3 低优先级工单排查慢掉队节点"]
+    P1Alert --> HotMigration["触发作业热迁移与断点恢复自愈"]
+```
+<p class="caption" align="center"><em>图 7-2：多窗口 SLO 消耗率告警分级判定与自动化应急响应流程</em></p>
+
 
 - **P1 紧急电话呼叫（Page On-call）**：  
   要求 1 小时窗口的 Burn Rate $> 14.4$ **且** 最近 5 分钟窗口的 Burn Rate $> 14.4$。长窗口确认已经造成了实质性的预算大出血，短窗口确认故障仍在持续发生，触发紧急呼叫并启动作业热迁移与硬件隔离自愈；

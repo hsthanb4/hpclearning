@@ -25,38 +25,26 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart LR
-    subgraph Pair["键值对元组结构"]
-        Val["val: 浮点极值 (float)"]
-        Idx["idx: 整数全局下标 (int)"]
-    end
-    Pair --> Logic{"比较条件: val_b > val_a 或 (val_b == val_a 且 idx_b < idx_a)"}
-    Logic --> Winner["胜者晋级 ➔ 保证 Tie-breaking 严格确定性"]
-```
-<p class="caption" align="center"><em>图 12-1：ArgMax 键值对元组结构与确定性仲裁规则</em></p>
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant L as Warp 各线程 (Lane 0~31)
-    participant R as __shfl_down_sync 归约
-    participant Winner as 最终极值与最小下标
-
-    L->>R: 各 Lane 打包 (val, idx) 参与两两比较
-    R->>R: 16 -> 8 -> 4 -> 2 -> 1 步进折半比较
-    R->>Winner: Lane 0 获得该 Warp 内最大数值及最小下标
-```
-<p class="caption" align="center"><em>图 12-2：Warp 级确定性 ArgMax 归约时序流</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **ArgMax 算子（最大值索引定位）** 是模型解码贪婪采样（Greedy Decoding）、Top-1 类别预测以及强化学习离散动作选择的核心基础。不同于普通的 ReduceMax 只关心最大数值本身，ArgMax 要求输出取得最大值的**物理全局下标（Index）**：
 $$\text{ArgMax}(\mathbf{x}) = \arg\max_{0 \le i < N} x_i = \{i \mid \forall j, \ x_i \ge x_j\}$$
 
 **并行归约中的确定性挑战（Tie-Breaking 不变量，图 12-1）**：
+
+```{mermaid}
+flowchart TD
+    subgraph TupleReduction["ArgMax 二元元组仲裁"]
+        P1["元组 1: (val_1, idx_1)"] --> Cmp{"val_1 > val_2 ?"}
+        P2["元组 2: (val_2, idx_2)"] --> Cmp
+        Cmp -->|是| Win1["胜出: (val_1, idx_1)"]
+        Cmp -->|否: val_2 > val_1| Win2["胜出: (val_2, idx_2)"]
+        Cmp -->|等值: val_1 == val_2| Tie{"min(idx_1, idx_2)"}
+        Tie --> Deterministic["严格保留最小索引 (确定性 Tie-Breaking)"]
+    end
+```
+<p class="caption" align="center"><em>图 12-1：ArgMax 键值对元组结构与确定性仲裁规则</em></p>
+
 - 在串行 CPU 代码中，通常用 `if (x[i] > max_val) { max_val = x[i]; best_idx = i; }`，天然具有“遇到相等最大值保留最左侧（最小下标）”的确定性；
 - 但在 GPU 上，成千上万个线程以树状结构并行对偶比较。当输入数组中存在多个相等的最大值（例如分词 Logits 中有多个未见过的 Padding Token 得分相同）时，由于 Warp 调度和 Block 树状归约的无序性，若仅仅通过 `val_b > val_a` 进行筛选，谁会胜出完全取决于线程树的配对顺序；
 - **确定性仲裁规则（Tie-breaking Policy）**：必须将数据结构扩充为双元组 `ValIdx { float val; int idx; }`，并在比较逻辑中严格引入字典序比较：数值大者胜出；若数值相等，则**全局下标更小者胜出**。这从数学底层锁定了跨架构、跨 Grid 配置的 100% 确定性。
@@ -68,7 +56,23 @@ $$\text{ArgMax}(\mathbf{x}) = \arg\max_{0 \le i < N} x_i = \{i \mid \forall j, \
 1. **阶段一：网格局部归约（Pass 1: Block-level ArgMax）**
    - 启动包含 `num_blocks` 个 Block 的网格，各线程以 Grid-Stride 方式遍历整个长数组；
    - 每个线程在本地寄存器中维护当前的局部最佳二元状态 `ValIdx local = {-FLT_MAX, -1}`；
-   - **Warp 级元组洗牌（图 12-2）**：利用 `__shfl_down_sync` 同时在寄存器间交换 `val` 与 `idx`（或打包传输），在 5 步折半归约中通过确定性仲裁逻辑选出当前 Warp 的胜者；
+   - **Warp 级元组洗牌（图 12-2）**：
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Lane as Warp 内部 32 线程
+    participant Shfl as __shfl_down_sync 洗牌
+    participant Arb as 严格仲裁算子
+
+    Note over Lane: 步进 16 -> 8 -> 4 -> 2 -> 1 折半归约
+    Lane->>Shfl: 同时洗牌传输 val 与 idx (或 64 位整型打包)
+    Shfl->>Arb: 比较 pair 与 other_pair
+    Arb->>Lane: 更新局部胜出元组
+    Note over Lane: Lane 0 获得全局极值与准确最小全局索引
+```
+<p class="caption" align="center"><em>图 12-2：Warp 级确定性 ArgMax 归约时序流</em></p>
+利用 `__shfl_down_sync` 同时在寄存器间交换 `val` 与 `idx`（或打包传输），在 5 步折半归约中通过确定性仲裁逻辑选出当前 Warp 的胜者；
    - **Block 级发布**：各 Warp 的 Lane 0 将局部的 `ValIdx` 写入共享内存 `smem`，由 Warp 0 再次归约出当前 Block 的最佳结果，最终由 Thread 0 将该 Block 的局部极值写入全局临时数组 `partial_val[blockIdx.x]` 与 `partial_idx[blockIdx.x]`。
 
 2. **阶段二：单块全局终局归约（Pass 2: Single-Block Final Reduce）**

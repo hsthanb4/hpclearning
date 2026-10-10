@@ -25,11 +25,24 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+**混合精度累加与 Epilogue 算子融合（Mixed Precision, Accumulator & Epilogue）** 是现代大语言模型（如 DeepSeek-V3、LLaMA-3）兼顾吞吐峰值与数值稳定性的黄金范式。
+
+**低精度计算的数值危机与解题架构（结合图 7-1 与图 7-2）**：
+- **混合精度的必然性（图 7-1）**：
 
 ::: {.img-card}
 ![FP8 精度计算图](assets/figs/fig_02_DeepSeek_V3_中的_FP8_精度计算.png){width="90%"}
 <p class="caption">图 7-1：DeepSeek-V3 / 现代大模型中的 FP8 精度计算与分块缩放机制</p>
+大模型训练与推理广泛采用低精度数据类型（如 FP16、BF16，乃至 DeepSeek-V3 采用的 FP8 E4M3/E5M2，图 7-1）。低精度能够将 HBM 显存带宽与片上缓存容量利用率翻倍甚至提升 4 倍，极大释放 Tensor Core 的峰值硬件算力；
+- **累加器下溢与精度坍塌**：在收缩维度 $K$ 达到数千上万的矩阵乘法中，若在低精度下直接累加（如 FP16 累加），由于尾数位极短（FP16 仅 10 位有效尾数，BF16 仅 7 位），在累加过程中极易出现“大数吃小数”的下溢现象，导致误差呈几何级数累积扩散；
+- **CUTLASS 两段式解耦架构**：
+  $$\text{GEMM 架构} = \text{Mainloop (低精度输入 + FP32 高精度累加)} + \text{Epilogue (仿射变换 + 算子融合 + 量化写回)}$$
+  主循环纯粹负责在 FP32 寄存器中无损吸收所有乘加误差；计算完成后，由独立的 Epilogue 流水线完成偏差添加（Bias）、残差相加（Residual）、非线性激活（SiLU/GELU）与最终的截断量化输出（图 7-2）。
+
+### 2. 它如何工作（结合图 7-1 与图 7-2）
+
 :::
 
 ```{mermaid}
@@ -41,18 +54,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 7-2：CUTLASS 混合精度累加与 Epilogue 融合输出流水线</em></p>
 
-### 1. 它是什么，解决什么问题
-
-**混合精度累加与 Epilogue 算子融合（Mixed Precision, Accumulator & Epilogue）** 是现代大语言模型（如 DeepSeek-V3、LLaMA-3）兼顾吞吐峰值与数值稳定性的黄金范式。
-
-**低精度计算的数值危机与解题架构（结合图 7-1 与图 7-2）**：
-- **混合精度的必然性**：大模型训练与推理广泛采用低精度数据类型（如 FP16、BF16，乃至 DeepSeek-V3 采用的 FP8 E4M3/E5M2，图 7-1）。低精度能够将 HBM 显存带宽与片上缓存容量利用率翻倍甚至提升 4 倍，极大释放 Tensor Core 的峰值硬件算力；
-- **累加器下溢与精度坍塌**：在收缩维度 $K$ 达到数千上万的矩阵乘法中，若在低精度下直接累加（如 FP16 累加），由于尾数位极短（FP16 仅 10 位有效尾数，BF16 仅 7 位），在累加过程中极易出现“大数吃小数”的下溢现象，导致误差呈几何级数累积扩散；
-- **CUTLASS 两段式解耦架构**：
-  $$\text{GEMM 架构} = \text{Mainloop (低精度输入 + FP32 高精度累加)} + \text{Epilogue (仿射变换 + 算子融合 + 量化写回)}$$
-  主循环纯粹负责在 FP32 寄存器中无损吸收所有乘加误差；计算完成后，由独立的 Epilogue 流水线完成偏差添加（Bias）、残差相加（Residual）、非线性激活（SiLU/GELU）与最终的截断量化输出（图 7-2）。
-
-### 2. 它如何工作（结合图 7-1 与图 7-2）
 
 CUTLASS 的 Epilogue 阶段遵循通用的仿射与非线性变换公式：
 $$D = \text{Activation}\left(\alpha \cdot \text{Accum} + \beta \cdot C\right)$$

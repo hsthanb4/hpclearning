@@ -27,39 +27,6 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/train_cp_ring_attention_math.png){width="95%"}
-<p class="caption">图 8-1：上下文并行（Context Parallelism / Ring Attention）环形流水线与因果掩码平衡数学模型</p>
-:::
-
-```{mermaid}
-flowchart TD
-    subgraph CPArchitecture["Context Parallelism (Ring Attention) 数据切分"]
-        Seq["超长序列 (如 128k ~ 1M Tokens)"] --> B0["Card 0: Q0, K0, V0 (0~32k)"]
-        Seq --> B1["Card 1: Q1, K1, V1 (32~64k)"]
-        Seq --> B2["Card 2: Q2, K2, V2 (64~96k)"]
-        Seq --> B3["Card 3: Q3, K3, V3 (96~128k)"]
-    end
-```
-<p class="caption" align="center"><em>图 8-2：上下文并行按序列切块并分配至独立 GPU 拓扑</em></p>
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant Q as Local Query Block (常驻本地)
-    participant KV as Local Key/Value Block
-    participant P2P as 异步 P2P 环形发送 (Ring Send/Recv)
-    participant Acc as FlashAttention Online Accumulator
-
-    Q->>Acc: 与本地 KV0 计算局部注意力
-    KV->>P2P: 异步把 KV 发送给下邻居，接收上邻居 KV
-    P2P-->>Acc: 用接收到的 KV1 计算注意力，并通过 Online Softmax 配平更新
-    Note over Q,Acc: 轮转 N-1 次后完成全序列因果注意力且显存恒定
-```
-<p class="caption" align="center"><em>图 8-3：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程</em></p>
-
 ### 1. 上下文并行（CP）的提出背景与第一性原理
 
 随着大语言模型应用从短文本对话演进到长文档分析、代码库解析、超长推理（如 128k、256k 乃至 1M 上下文），系统显存面临着**序列长度 $s$ 引发的非线性膨胀危机**：
@@ -68,6 +35,23 @@ sequenceDiagram
 - **TP 扩展性的物理壁障**：第 6 课已指出，张量并行（TP）受限于机内 NVLink 超高带宽，通常最大只能取 $\text{TP}=8$。仅靠机内 TP 无法跨机扩展以消化百万级别的超长序列。
 
 **上下文并行（Context Parallelism, CP）**应运而生。如**图 8-1 与图 8-2** 所示，CP 是一种**全局序列分块并行架构**：
+
+::: {.img-card}
+![](assets/figs/train_cp_ring_attention_math.png){width="95%"}
+<p class="caption">图 8-1：上下文并行（Context Parallelism / Ring Attention）环形流水线与因果掩码平衡数学模型</p>
+:::
+
+```{mermaid}
+flowchart LR
+    subgraph ContextPartition["上下文并行长序列切分"]
+        Seq["超长序列 S (如 128k Tokens)"] --> C0["分块 Chunk 0 ➔ GPU 0"]
+        Seq --> C1["分块 Chunk 1 ➔ GPU 1"]
+        Seq --> C2["分块 Chunk 2 ➔ GPU 2"]
+        Seq --> C3["分块 Chunk 3 ➔ GPU 3"]
+    end
+```
+<p class="caption" align="center"><em>图 8-2：上下文并行按序列切块并分配至独立 GPU 拓扑</em></p>
+
 - 它将长达 $s$ 的输入序列在最外层直接沿序列维度均匀切分为 $N_{\text{cp}}$ 个子序列片段，分配给集群中的 $N_{\text{cp}}$ 张 GPU（通常跨物理节点，结合 RDMA 网络）。
 - 每张 GPU 分配到的局部序列长度仅为 $s_{\text{local}} = \frac{s}{N_{\text{cp}}}$。
 - **与逐 Token 算子的天然正交性**：Transformer 中的 MLP（Feed-Forward）、LayerNorm/RMSNorm、Embedding 以及各类残差连接完全是**逐 Token 独立计算（Token-wise）**的。在 CP 模式下，这些模块在各卡上进行完全本地的张量运算，**全程产生 0 跨卡通信开销**！
@@ -78,6 +62,22 @@ sequenceDiagram
 为了解决注意力跨卡计算的问题，UC Berkeley 提出了经典的 **Ring Attention（环形注意力）** 算法。其核心思想是：**让局部 Query 始终固定在本地显存，而让 Key/Value 块沿着逻辑通信环异步流转轮巡**。
 
 如**图 8-3** 所示，整个通信与计算流水线由双缓冲（Double Buffering）机制驱动：
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant GPU0 as GPU 0 (Q_0 固定)
+    participant GPU1 as GPU 1 (Q_1 固定)
+    participant P2P as 环形 P2P 异步通信 (KV 轮转)
+
+    Note over GPU0,GPU1: Step 0: 计算本地 Q_i 与 K_i, V_i 的注意力
+    GPU0->>P2P: 发送 K_0, V_0 ➔ GPU 1，接收来自前驱的 KV
+    GPU1->>P2P: 发送 K_1, V_1 ➔ GPU 2，接收来自前驱的 KV
+    Note over GPU0,GPU1: Step 1: 异步接收下一块 KV，同时计算当前重叠块注意力
+    Note over GPU0,GPU1: 利用 Online Softmax 动态更新分母与局部输出，无需中间显存
+```
+<p class="caption" align="center"><em>图 8-3：Ring-Attention 环形 KV 轮转与双缓冲通信计算重叠流程</em></p>
+
 
 1. **初始状态**：每个 Rank $r \in [0, N_{\text{cp}}-1]$ 均持有本地的子序列块 $Q_r, K_r, V_r$，形状均为 $(b, s_{\text{local}}, h)$。
 

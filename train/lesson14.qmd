@@ -27,43 +27,20 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
+### 1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如**图 14-1** 所示）
 
 ```{mermaid}
-flowchart LR
-    subgraph Formats["数值精度格式位数对比"]
-        FP32["FP32: 1 符号位 + 8 指数位 + 23 尾数位 (4 Bytes)"]
-        FP16["FP16: 1 符号位 + 5 指数位 + 10 尾数位 (动态范围小，易下溢)"]
-        BF16["BF16: 1 符号位 + 8 指数位 + 7 尾数位 (动态范围与 FP32 一致)"]
-        FP8["FP8 E4M3 / E5M2: 8 位精度标准 (针对推理与训练前向加速)"]
+flowchart TD
+    subgraph FloatFormats["主流深度学习浮点格式位宽构成"]
+        direction TB
+        FP32["FP32 (单精度): 1 符号位 + 8 指数位 + 23 尾数位 (动态范围 10^-38 ~ 10^38)"]
+        FP16["FP16 (半精度): 1 符号位 + 5 指数位 + 10 尾数位 (动态范围仅 65504, 易溢出)"]
+        BF16["BF16 (Brain Float): 1 符号位 + 8 指数位 + 7 尾数位 (动态范围与 FP32 完全相同)"]
+        FP8["FP8 (E4M3 / E5M2): 8 位极窄位宽 (Hopper/Blackwell 前向计算新宠)"]
     end
 ```
 <p class="caption" align="center"><em>图 14-1：现代深度学习主流浮点数值格式位宽与动态范围对比</em></p>
 
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant Net as 网络前向计算 (BF16)
-    participant Loss as 损失计算 (FP32)
-    participant Scaler as Loss Scaler (损失缩放器)
-    participant Back as 反向求导 (BF16)
-    participant Optimizer as 优化器更新 (FP32 Master Weights)
-
-    Net->>Loss: 输出预测并计算标量 Loss
-    Loss->>Scaler: 放大 Loss (乘以 scale_factor)
-    Scaler->>Back: 反向链式求导，梯度放大避免下溢
-    Back->>Scaler: 检查梯度是否出现 Inf / NaN
-    alt 无溢出
-        Scaler->>Optimizer: 梯度除以 scale_factor 恢复真实量级，更新参数
-        Scaler-->>Scaler: 连续 N 步无溢出则增大 scale_factor
-    else 发生溢出
-        Scaler->>Optimizer: 丢弃当前步更新 (Skip Step)
-        Scaler-->>Scaler: 减小 scale_factor (除以 2)
-    end
-```
-<p class="caption" align="center"><em>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流</em></p>
-
-### 1. 现代浮点格式拓扑与动态范围 vs 精度权衡（如**图 14-1** 所示）
 
 在现代大模型软硬件协同体系中，数值精度的选择直接决定了矩阵乘法单元（Tensor Core）的计算吞吐量与显存占用上限。
 IEEE 754 标准浮点数由三个字段定义：**符号位（Sign Bit $s$）**、**指数位（Exponent $e$）**与**尾数位（Mantissa / Fraction $m$）**：
@@ -102,6 +79,29 @@ $$v = (-1)^s \times 2^{e - \text{bias}} \times \left(1 + \sum_{i=1}^m b_i 2^{-i}
 - **解决方案**：必须在优化器显存中常驻一份 **FP32 Master 权重**！前向与反向计算使用 BF16 算子跑高速 GEMM，但在 `optimizer.step()` 时，将梯度累加到 FP32 Master 权重上。FP32 的 ULP 高达 $1.19 \times 10^{-7}$，足以精准记录微小的参数累积演化，步结时再截断投影回 BF16 供下一步使用。
 
 #### 支柱二：动态损失缩放（Dynamic Loss Scaling，如**图 14-2** 所示）
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Loss as 计算 Loss
+    participant Scale as 损失缩放因子 (Scale S)
+    participant Bwd as 反向梯度计算 (BF16/FP16)
+    participant Check as 溢出检查 (Inf/NaN 检测)
+    participant Opt as 优化器更新 (FP32 主权重)
+
+    Loss->>Scale: 乘以 Scale (放大梯度)
+    Scale->>Bwd: 反向传播计算放大后的梯度 g_scaled
+    Bwd->>Check: 扫描梯度张量是否有 Inf/NaN
+    alt 存在溢出 (Overflow)
+        Check-->>Opt: 跳过本步优化器更新 (Skip Step)
+        Check->>Scale: 动态减小 Scale (如 S = S / 2)
+    else 无溢出 (Finite)
+        Check->>Opt: 反缩放 g = g_scaled / S ➔ 正常更新参数
+        Check->>Scale: 连续 N 步正常 ➔ 放大 Scale (如 S = S * 2)
+    end
+```
+<p class="caption" align="center"><em>图 14-2：动态损失缩放（Dynamic Loss Scaling）溢出检测与自适应更新时序流</em></p>
+
 在不得不使用 FP16 的老旧硬件（如 V100）上，必须引入自适应损失缩放器（Loss Scaler）：
 
 1. **反向前放大**：在反向传播启动前，将标量损失乘以一个巨大的缩放系数 $S$（如 $S = 2^{15} = 32768$）：$\mathcal{L}_{\text{scaled}} = \mathcal{L} \times S$；

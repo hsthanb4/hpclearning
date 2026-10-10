@@ -33,7 +33,13 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在多轮对话、Few-Shot 提示工程、智能体（Agent）多步推理以及结构化 JSON/代码生成等高频场景中，大量请求天然共享极其庞大的公共 Prompt 前缀（如系统提示词 System Prompt、历史上下文或 Few-Shot 示例）。传统推理架构在每次接收到新请求时，若不进行跨请求前缀缓存，就会无谓地重复计算这些长前缀的 Key-Value 张量，导致计算资源极大浪费、首字时延（TTFT, Time To First Token）显著激增，且多份完全相同的 KV Cache 会迅速耗尽宝贵的 GPU 显存。
+
+**SGLang RadixAttention** 彻底颠覆了静态预设前缀缓存的局限，创造性地将计算机经典数据结构——基数树（Radix Tree / 压缩前缀树）直接引入大模型推理引擎的 KV Cache 管理层：
+- **动态自动前缀共享**：无需开发者显式声明前缀边界，系统自动将所有历史与进行中请求的 Token 序列组织成一棵按 Token 压缩的基数树。只要新请求包含已有路径的前缀，即可实现零计算开销的 KV 复用。
+- **与底层物理内存池解耦**：如图 4-1 所示，
 
 ```{mermaid}
 flowchart LR
@@ -47,26 +53,7 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 4-1：SGLang RadixAttention 基数树与 LRU 引用淘汰拓扑机制</em></p>
 
-```{mermaid}
-flowchart TD
-    subgraph CPU["CPU 调度线程 (Thread 1)"]
-        Prep["Batch N+1: Radix 匹配与显存块分配"] --> Prepare["准备输入张量与元数据"]
-    end
-    subgraph GPU["GPU 计算流 (Stream 1)"]
-        ExecN["Batch N: 模型前向计算与 Attention 计算"]
-    end
-    Prep -->|"重叠并行 (Overlap)"| ExecN
-    Prepare -->|流水衔接| ExecNext["Batch N+1: 立即进入 GPU 计算"]
-```
-<p class="caption" align="center"><em>图 4-2：SGLang CPU 调度准备与 GPU 执行重叠掩盖 (Overlap) 工作流</em></p>
-
-### 1. 它是什么，解决什么问题
-
-在多轮对话、Few-Shot 提示工程、智能体（Agent）多步推理以及结构化 JSON/代码生成等高频场景中，大量请求天然共享极其庞大的公共 Prompt 前缀（如系统提示词 System Prompt、历史上下文或 Few-Shot 示例）。传统推理架构在每次接收到新请求时，若不进行跨请求前缀缓存，就会无谓地重复计算这些长前缀的 Key-Value 张量，导致计算资源极大浪费、首字时延（TTFT, Time To First Token）显著激增，且多份完全相同的 KV Cache 会迅速耗尽宝贵的 GPU 显存。
-
-**SGLang RadixAttention** 彻底颠覆了静态预设前缀缓存的局限，创造性地将计算机经典数据结构——基数树（Radix Tree / 压缩前缀树）直接引入大模型推理引擎的 KV Cache 管理层：
-- **动态自动前缀共享**：无需开发者显式声明前缀边界，系统自动将所有历史与进行中请求的 Token 序列组织成一棵按 Token 压缩的基数树。只要新请求包含已有路径的前缀，即可实现零计算开销的 KV 复用。
-- **与底层物理内存池解耦**：如图 4-1 所示，Radix 树节点本身并不存储海量的 KV 权重张量，而是持有指向底层分页内存池（Memory Pool / Paged KV Blocks）的引用指针与引用计数。
+Radix 树节点本身并不存储海量的 KV 权重张量，而是持有指向底层分页内存池（Memory Pool / Paged KV Blocks）的引用指针与引用计数。
 - **动态生命周期与自动驱逐**：结合 LRU（Least Recently Used）淘汰队列，当显存告急时，系统自动识别并驱逐未被活跃请求锁定的叶子节点，将物理块归还内存池，实现了逻辑前缀索引与物理显存容量的完美自适应。
 
 ### 2. 它如何工作
@@ -83,7 +70,22 @@ RadixAttention 与其调度子系统的高性能运转依赖于严密的数据�
    - 当系统需要分配新物理 Block 但可用配额耗尽时，调度器从 LRU 链表头部（最久未访问节点）反向修剪叶子节点，解引用并归还其绑定的物理 KV 显存块。
 
 3. **CPU 调度与 GPU 前向的重叠掩盖（Overlap Scheduling）**：
-   - 如图 4-2 所示，在 SGLang SRT 的 overlap 事件循环中，CPU 侧的 Python 调度器与 GPU 侧的模型前向计算被解耦为两条异步流水线。
+   - 如图 4-2 所示，在 SGLang SRT 的 overlap 事件循环中，
+
+```{mermaid}
+flowchart TD
+    subgraph CPU["CPU 调度线程 (Thread 1)"]
+        Prep["Batch N+1: Radix 匹配与显存块分配"] --> Prepare["准备输入张量与元数据"]
+    end
+    subgraph GPU["GPU 计算流 (Stream 1)"]
+        ExecN["Batch N: 模型前向计算与 Attention 计算"]
+    end
+    Prep -->|"重叠并行 (Overlap)"| ExecN
+    Prepare -->|流水衔接| ExecNext["Batch N+1: 立即进入 GPU 计算"]
+```
+<p class="caption" align="center"><em>图 4-2：SGLang CPU 调度准备与 GPU 执行重叠掩盖 (Overlap) 工作流</em></p>
+
+CPU 侧的 Python 调度器与 GPU 侧的模型前向计算被解耦为两条异步流水线。
    - 当 GPU 正在 CUDA Stream 1 上全速执行 Batch $N$ 的矩阵乘法与 Attention 算子时，CPU 调度线程已经在 Stream 0 侧提前进行 Batch $N+1$ 的 Radix Tree 前缀查找、物理 Block 索引分配、张量组装（Tensorization）与元数据打包。
    - 这一流水线彻底消除了传统同步架构下每个 Step 之间高达数百微秒的 CPU 调度气泡，实现了极高的 GPU 计算占空比。
 

@@ -25,28 +25,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart TD
-    subgraph Welford["Welford 在线单遍递推算法"]
-        Old["上一状态: (count, mean, M2)"] --> In["新样本 x"]
-        In --> Delta["delta = x - mean"]
-        Delta --> UpdateMean["mean_new = mean + delta / (count + 1)"]
-        UpdateMean --> UpdateM2["M2_new = M2 + delta * (x - mean_new)"]
-        UpdateM2 --> Var["方差 var = M2 / N"]
-    end
-```
-<p class="caption" align="center"><em>图 5-1：Welford 在线数值稳定递推均值与方差架构</em></p>
-
-```{mermaid}
-flowchart LR
-    Read["读入输入 x"] --> WelfordReduce["Warp & Block 级 Welford 结合律树状归约"]
-    WelfordReduce --> Broadcast["广播均值 mu 与标准差 1/sqrt(var + eps)"]
-    Broadcast --> Normalize["执行 (x - mu) * rstd * gamma + beta 写回"]
-```
-<p class="caption" align="center"><em>图 5-2：LayerNorm 线程级统计量归约与输出写回流程</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 **LayerNorm (层归一化)** 是 Transformer 架构中最核心的归一化算子之一。与 BatchNorm 跨样本（Batch 维度）归约不同，LayerNorm 在单个样本的单个 Token 内部，沿隐藏特征维度（Hidden Dimension $N$）独立计算均值与方差，并进行仿射重缩放：
@@ -66,6 +44,23 @@ $$y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot \gamma_i + \beta_i$$
    - 每个线程在寄存器中维护局部累加标量 `local_sum += x` 与 `local_sq_sum += x * x`。
 
 2. **第二阶段：双层层次化归约与广播（图 5-2）**
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant T as Block 线程组
+    participant S as Shared Memory (32 槽双标量)
+    participant GM as 全局显存 (HBM)
+
+    Note over T: 线程先在局部寄存器流式更新 (mean, M2, count)
+    T->>T: Warp 内树状 Combine (__shfl_down_sync)
+    T->>S: 各 Warp Lane 0 写入局部 (mean, M2, count)
+    Note over S: __syncthreads() 块内同步
+    S->>T: Warp 0 聚合最终全局 (mean, var) 并广播给所有线程
+    T->>GM: 二次遍历写回归一化值 y = (x - mean) / sqrt(var + eps) * gamma + beta
+```
+<p class="caption" align="center"><em>图 5-2：LayerNorm 线程级统计量归约与输出写回流程</em></p>
+
    - **Warp 级归约**：利用 `__shfl_down_sync` 寄存器洗牌指令，每个 32 线程 Warp 在 5 个周期内完成树状归约，无任何 Shared Memory 开销；
    - **Block 级归约**：各 Warp 的 Lane 0 将局部结果存入 Shared Memory，再由 Warp 0 进行二次归约，得到整行全局 $\sum x_i$ 和 $\sum x_i^2$；
    - **统计量发布**：Thread 0 计算标量 $\mu = \frac{\text{sum}}{N}$ 与 $\text{var} = \frac{\text{sq\_sum}}{N} - \mu^2$，计算倒数标准差 $\text{rstd} = \frac{1}{\sqrt{\max(\text{var}, 0) + \epsilon}}$，并写回 Shared Memory。调用 `__syncthreads()` 同步栅障，确保全 Block 线程均可读到最新统计量。
@@ -86,6 +81,19 @@ $$y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot \gamma_i + \beta_i$$
 ### 4. 性能与工程取舍
 
 1. **朴素两矩法 vs. Welford 在线归约（图 5-1）**：
+
+```{mermaid}
+flowchart LR
+    subgraph Welford_Flow["Welford 在线单遍递推"]
+        direction TB
+        X["新样本 x_n"] --> Delta["delta = x_n - mean_{n-1}"]
+        Delta --> Mean["mean_n = mean_{n-1} + delta / n"]
+        Mean --> M2["M2_n = M2_{n-1} + delta * (x_n - mean_n)"]
+        M2 --> Var["var = M2_n / n (零灾难性数值抵消)"]
+    end
+```
+<p class="caption" align="center"><em>图 5-1：Welford 在线数值稳定递推均值与方差架构</em></p>
+
    - **朴素法**：只需维护两个浮点累加器，Warp 洗牌只需 2 次 `float` 传递，指令吞吐极高，但数值稳定性脆弱；
    - **Welford 算法**：维护三元组 $(\text{count}, \mu, M_2)$，通过 Chan 结合律算法（$\delta = \mu_B - \mu_A, \dots$）在 Warp 间传递合并。计算增量差，彻底避免了相近大数相减，极其适合 FP16/BF16 混合精度；但每次归约需要传递 3 个标量并执行多次乘除法，寄存器压力和指令数增加约 2~3 倍。
 

@@ -21,7 +21,23 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在单机多卡与大规模分布式集群中，模型并行（TP/PP）、数据并行（DDP/FSDP）以及专家并行（EP）的实现依赖于多进程间高带宽、确定性的协同通信。然而，裸套接字（Raw Sockets）或简单点对点通信无法支撑复杂的多机拓扑协同。
+
+**分布式运行时（Distributed Runtime / ProcessGroup）**构建了跨进程、跨机器的分布式契约与拓扑抽象：
+
+1. **Rendezvous（会合发现服务）**：解决**“动态节点如何发现彼此外界网络地址并构建统一拓扑视图”**的问题。在集群启动阶段，各 Rank 进程通过中心化的键值存储（如 PyTorch 原生 `TCPStore` 或 `etcd`），向主节点（Master Rank 0）注册本节点 IP 与端口，协同交换 `ncclUniqueId`，完成全局 `World Size`、`Rank ID` 与物理机节点的拓扑锚定；
+
+2. **ProcessGroup（进程组管理）**：在底层构建通信上下文（如 NVIDIA NCCL 的 `ncclComm_t`），管理 Ring-AllReduce / Tree-AllReduce 的双向物理连接；
+
+3. **Collective Contract（集合通信契约）**：集合通信并非单向消息传递，而是一组严格要求组内所有 Rank **全员参与、顺序对齐、参数同态**的分布式强约束协议。
+
+### 2. 它如何工作
+
+集合通信从初始化握手到底层异步执行历经严密的控制面与数据面解耦（如图 3-1 与 图 3-2 所示）：
+
+1. **Rendezvous 握手与 Communicator 实例化（图 3-1）**：
 
 ```{mermaid}
 flowchart TD
@@ -40,6 +56,12 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 3-1：分布式训练集合通信初始化与 ProcessGroup 物理拓扑映射</em></p>
 
+   - 当调用 `dist.init_process_group(backend="nccl", ...)` 时，Rank 0 调用 NCCL 底层 API `ncclGetUniqueId` 生成一个全局唯一的 128 字节通信握手标识符；
+   - Rank 0 将该 ID 写入 `TCPStore`，其余所有 Rank 从 `TCPStore` 阻塞式拉取该 ID；
+   - 各 Rank 依据此 ID 在各卡调用 `ncclCommInitRank`，完成跨卡 NVLink 拓扑探测、跨节点 InfiniBand/RoCE 队列对（QP）交换与 Ring/Tree 通信环拓扑构筑，生成本 Rank 绑定的 `ncclComm_t` 句柄。
+
+2. **非阻塞异步发射与流同步契约（图 3-2）**：
+
 ```{mermaid}
 flowchart LR
     Host["Python 发起 dist.all_reduce(tensor)"] --> Enqueue["向底层 CUDA 通信 Stream 压入 NCCL 内核"]
@@ -51,28 +73,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 3-2：异步集合通信下发、流同步契约与句柄等待流程</em></p>
 
-### 1. 它是什么，解决什么问题
-
-在单机多卡与大规模分布式集群中，模型并行（TP/PP）、数据并行（DDP/FSDP）以及专家并行（EP）的实现依赖于多进程间高带宽、确定性的协同通信。然而，裸套接字（Raw Sockets）或简单点对点通信无法支撑复杂的多机拓扑协同。
-
-**分布式运行时（Distributed Runtime / ProcessGroup）**构建了跨进程、跨机器的分布式契约与拓扑抽象：
-
-1. **Rendezvous（会合发现服务）**：解决**“动态节点如何发现彼此外界网络地址并构建统一拓扑视图”**的问题。在集群启动阶段，各 Rank 进程通过中心化的键值存储（如 PyTorch 原生 `TCPStore` 或 `etcd`），向主节点（Master Rank 0）注册本节点 IP 与端口，协同交换 `ncclUniqueId`，完成全局 `World Size`、`Rank ID` 与物理机节点的拓扑锚定；
-
-2. **ProcessGroup（进程组管理）**：在底层构建通信上下文（如 NVIDIA NCCL 的 `ncclComm_t`），管理 Ring-AllReduce / Tree-AllReduce 的双向物理连接；
-
-3. **Collective Contract（集合通信契约）**：集合通信并非单向消息传递，而是一组严格要求组内所有 Rank **全员参与、顺序对齐、参数同态**的分布式强约束协议。
-
-### 2. 它如何工作
-
-集合通信从初始化握手到底层异步执行历经严密的控制面与数据面解耦（如图 3-1 与 图 3-2 所示）：
-
-1. **Rendezvous 握手与 Communicator 实例化（图 3-1）**：
-   - 当调用 `dist.init_process_group(backend="nccl", ...)` 时，Rank 0 调用 NCCL 底层 API `ncclGetUniqueId` 生成一个全局唯一的 128 字节通信握手标识符；
-   - Rank 0 将该 ID 写入 `TCPStore`，其余所有 Rank 从 `TCPStore` 阻塞式拉取该 ID；
-   - 各 Rank 依据此 ID 在各卡调用 `ncclCommInitRank`，完成跨卡 NVLink 拓扑探测、跨节点 InfiniBand/RoCE 队列对（QP）交换与 Ring/Tree 通信环拓扑构筑，生成本 Rank 绑定的 `ncclComm_t` 句柄。
-
-2. **非阻塞异步发射与流同步契约（图 3-2）**：
    - 如图 3-2 所示，当在 Python 中调用 `dist.all_reduce(tensor, async_op=True)` 时，CPU 线程绝不阻塞等待跨卡通信完成，而是迅速向专用的 CUDA 通信 Stream（Communication Stream）压入一个底层 NCCL 算子；
    - 该函数立即返回一个 `Work` 异步句柄；
    - 主计算流（Compute Stream）若需要读取 AllReduce 之后的张量，必须通过 CUDA Event 建立硬件级流间同步依赖（或在 CPU 侧显式调用 `work.wait()`）；

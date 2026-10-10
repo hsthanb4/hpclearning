@@ -28,7 +28,9 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
+### 1. 数据并行（DP/DDP）的数学本质与并行语义
+
+数据并行（Data Parallelism）在数学本质上是**空间维度展开的梯度累积**。如**图 4-1 与图 4-2** 所示，整个集群拥有 $N$ 个并行工作进程（Rank 0 至 Rank $N-1$），每个 GPU 显存内都完整存放了一份同构的模型参数副本 $W$：
 
 ::: {.img-card}
 ![](assets/figs/train_ddp_ring_allreduce_math.png){width="95%"}
@@ -53,27 +55,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 4-2：数据并行（DDP）同构副本前向与全量梯度归约架构</em></p>
 
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant B as 反向求导 (Backward Compute)
-    participant Bucket as 梯度分桶 (Bucket 0 / Bucket 1)
-    participant NCCL as 异步通信流 (Ring AllReduce)
-    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线
-    B->>Bucket: 逐层反向求导 (Layer N)
-    Bucket-->>Bucket: 梯度写入，达到阈值 (如 25MB)
-    Bucket->>NCCL: 异步触发 AllReduce (Bucket 0)
-    B->>Bucket: 继续求导上一层 (Layer N-1, N-2)
-    Note right of NCCL: 环形通信与计算并行执行
-    NCCL-->>NCCL: Bucket 0 同步完成
-    Bucket->>NCCL: 异步触发 AllReduce (Bucket 1)
-    NCCL-->>NCCL: 全部 Bucket 同步完毕
-```
-<p class="caption" align="center"><em>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em></p>
-
-### 1. 数据并行（DP/DDP）的数学本质与并行语义
-
-数据并行（Data Parallelism）在数学本质上是**空间维度展开的梯度累积**。如**图 4-1 与图 4-2** 所示，整个集群拥有 $N$ 个并行工作进程（Rank 0 至 Rank $N-1$），每个 GPU 显存内都完整存放了一份同构的模型参数副本 $W$。
 
 当一个全局 Batch（Global Batch Size, GBS）的数据输入系统时，各 Rank 分别取走互不重叠的数据子集（Micro Batch, MBS）。由于各 Rank 上的前向传播与反向传播计算完全基于各自的本地数据进行，彼此之间没有任何数据依赖，因此计算阶段具备天然的完全并行性。
 
@@ -117,7 +98,26 @@ $$T_{\text{step}} = T_{\text{fwd}} + T_{\text{bwd}} + T_{\text{comm}} + T_{\text
 - 此时，默认的计算流（`compute_stream`）无须任何等待，继续向前推进计算 Layer $k-1$、Layer $k-2$ 的反向求导。
 - 只要浅层的反向计算耗时大于等于深层梯度的网络传输耗时，绝大部分通信时间就被反向计算完全掩盖（$T_{\text{comm}}$ 隐藏在 $T_{\text{bwd}}$ 背后）。
 
-如**图 4-3** 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行。
+如**图 4-3** 所示，整个反向计算与网络传输在时间线上呈现高度交叠的双轨并发执行：
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant B as 反向求导 (Backward Compute)
+    participant Bucket as 梯度分桶 (Bucket 0 / Bucket 1)
+    participant NCCL as 异步通信流 (Ring AllReduce)
+    Note over B,NCCL: PyTorch DDP 计算与通信重叠流水线
+    B->>Bucket: 逐层反向求导 (Layer N)
+    Bucket-->>Bucket: 梯度写入，达到阈值 (如 25MB)
+    Bucket->>NCCL: 异步触发 AllReduce (Bucket 0)
+    B->>Bucket: 继续求导上一层 (Layer N-1, N-2)
+    Note right of NCCL: 环形通信与计算并行执行
+    NCCL-->>NCCL: Bucket 0 同步完成
+    Bucket->>NCCL: 异步触发 AllReduce (Bucket 1)
+    NCCL-->>NCCL: 全部 Bucket 同步完毕
+```
+<p class="caption" align="center"><em>图 4-3：PyTorch DDP 梯度分桶与异步 AllReduce 计算通信重叠流水</em></p>
+
 
 ### 4. 优化二：梯度分桶策略（Gradient Bucketing）
 

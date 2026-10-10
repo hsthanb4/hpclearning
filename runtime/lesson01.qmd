@@ -21,7 +21,14 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+当我们在 Python 中执行 `torch.matmul(a, b)` 或 `torch.add(x, y)` 时，PyTorch 从 Python 顶层调用到底层硬件发射对应的 CUDA 内核，中间跨越了极其复杂的底层运行时栈（Runtime Stack）。这一调用栈的核心由两大基础设施支撑：**`c10::Dispatcher` 分发器** 与 **Autograd 自动微分引擎**。
+
+1. **`c10::Dispatcher` 动态分发中心**：
+   - 解决的核心问题是**多维度解耦与异构后端的零开销多路复用**。
+   - 一个张量算子在实际执行时，面临着多维度的正交状态：运算在 CPU 还是 CUDA 设备上？数据是 FP32 还是 INT8 量化类型？是否需要记录反向图（Autograd）？是否处于批量矢量化执行模式（`vmap` / `Batched`）？是否处于图编译追踪模式（`Tracer` / `FakeTensor`）？
+   - 如图 1-1 所示，`c10::Dispatcher` 摒弃了
 
 ```{mermaid}
 flowchart TD
@@ -39,26 +46,7 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 1-1：PyTorch Dispatcher 调度键分发与执行栈拓扑结构</em></p>
 
-```{mermaid}
-flowchart LR
-    Loss["标量损失 loss.backward()"] --> Queue["待处理反向节点工作队列 (ReadyQueue)"]
-    Queue --> Pop["弹出当前就绪 Node (如 MulBackward0)"]
-    Pop --> Compute["执行反向算子计算输入叶子张量梯度"]
-    Compute --> Accum["更新或累加 .grad 属性 (AccumulateGrad)"]
-    Accum --> CheckEdges{"检查并递减前驱边依赖计数"}
-    CheckEdges -->|就绪| Push["将前驱 Node 入队"]
-    CheckEdges -->|未完成| Wait["等待其他路径汇合"]
-```
-<p class="caption" align="center"><em>图 1-2：Autograd 动态计算图反向拓扑遍历与梯度累加工作流</em></p>
-
-### 1. 它是什么，解决什么问题
-
-当我们在 Python 中执行 `torch.matmul(a, b)` 或 `torch.add(x, y)` 时，PyTorch 从 Python 顶层调用到底层硬件发射对应的 CUDA 内核，中间跨越了极其复杂的底层运行时栈（Runtime Stack）。这一调用栈的核心由两大基础设施支撑：**`c10::Dispatcher` 分发器** 与 **Autograd 自动微分引擎**。
-
-1. **`c10::Dispatcher` 动态分发中心**：
-   - 解决的核心问题是**多维度解耦与异构后端的零开销多路复用**。
-   - 一个张量算子在实际执行时，面临着多维度的正交状态：运算在 CPU 还是 CUDA 设备上？数据是 FP32 还是 INT8 量化类型？是否需要记录反向图（Autograd）？是否处于批量矢量化执行模式（`vmap` / `Batched`）？是否处于图编译追踪模式（`Tracer` / `FakeTensor`）？
-   - 如图 1-1 所示，`c10::Dispatcher` 摒弃了在算子内部写死庞大 `if-else` 分支的高耦合设计，采用高效的位图调度键集（`DispatchKeySet`）与函数指针查找表，将分发时延压缩在数十纳秒级别，实现了异构设备、量化、自动求导与编译器的无缝插拔。
+在算子内部写死庞大 `if-else` 分支的高耦合设计，采用高效的位图调度键集（`DispatchKeySet`）与函数指针查找表，将分发时延压缩在数十纳秒级别，实现了异构设备、量化、自动求导与编译器的无缝插拔。
 
 2. **Autograd 动态计算图引擎**：
    - 解决的核心问题是**深度学习动态网络的前向自动图构建与反向高效链式拓扑求导**。
@@ -75,7 +63,21 @@ PyTorch 运行时的执行流涵盖了从分发器多键解包到反向就绪队
    - 随后，系统调用 `redispatch` 剥离当前处理过的 Autograd 键，分发器自动降级路由到次高优先级的 `DispatchKey::CUDA`，调用 ATen 底层 C++ 算子 `at::native::add_cuda` 真正发射 GPU 计算内核。
 
 2. **Autograd 反向动态拓扑遍历与 ReadyQueue（Backward Workflow）**：
-   - 如图 1-2 所示，当用户调用 `loss.backward()` 时，引擎在后台启动一个专用的反向执行引擎（`Engine::execute`），并初始化工作队列 `ReadyQueue`；
+   - 如图 1-2 所示，当用户调用 `loss.backward()` 时，
+
+```{mermaid}
+flowchart LR
+    Loss["标量损失 loss.backward()"] --> Queue["待处理反向节点工作队列 (ReadyQueue)"]
+    Queue --> Pop["弹出当前就绪 Node (如 MulBackward0)"]
+    Pop --> Compute["执行反向算子计算输入叶子张量梯度"]
+    Compute --> Accum["更新或累加 .grad 属性 (AccumulateGrad)"]
+    Accum --> CheckEdges{"检查并递减前驱边依赖计数"}
+    CheckEdges -->|就绪| Push["将前驱 Node 入队"]
+    CheckEdges -->|未完成| Wait["等待其他路径汇合"]
+```
+<p class="caption" align="center"><em>图 1-2：Autograd 动态计算图反向拓扑遍历与梯度累加工作流</em></p>
+
+引擎在后台启动一个专用的反向执行引擎（`Engine::execute`），并初始化工作队列 `ReadyQueue`；
    - 损失函数的根节点首先被推入 `ReadyQueue`；
    - 调度线程持续从 `ReadyQueue` 中弹出已就绪的 `Node`（例如 `MulBackward0`），解包前向保存的张量，调用其 `apply()` 方法计算输入张量的局部梯度；
    - 若梯度回传的目标张量是用户定义的模型参数（Leaf Variable），触发 `AccumulateGrad` 算子，原子更新该参数的 `.grad` 属性；

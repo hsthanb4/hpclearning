@@ -21,28 +21,16 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/gpudirect_vs_host_tcp.png){width="85%"}
-<p class="caption">图 2-1：GPUDirect RDMA 与传统 Host TCP/IP 网络吞吐与带宽饱和对比（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-flowchart TD
-    Setup["初始化 InfiniBand 设备与上下文"] --> RegMR["注册内存区域 (ibv_reg_mr 锁定物理页)"]
-    RegMR --> CreateQP["创建发送/接收队列对 (Queue Pair: QP)"]
-    CreateQP --> Exchange["带外通信 (TCP) 交换 QP 元数据并进入 RTS 状态"]
-    Exchange --> PostSend["下发异步传输请求 (ibv_post_send / RDMA Write)"]
-    PostSend --> PollCQ["网卡硬件自主搬运并轮询完成队列 (ibv_poll_cq)"]
-```
-<p class="caption" align="center"><em>图 2-2：RDMA 队列对 (QP) 建立、内存注册与硬件自驱动传输流水线</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 在百亿至万亿参数大模型分布式训练（如 70B/405B 参数 LLM）与高并发在线推理集群中，跨节点通信需要以毫秒乃至微秒级的频率在成百上千个 GPU 间实时同步百兆至千兆字节的激活值或梯度数据。
 
 传统基于操作系统的标准 TCP/IP 网络协议栈在此场景下暴露出致命瓶颈（如图 2-1 所示）：
+
+::: {.img-card}
+![](assets/figs/gpudirect_vs_host_tcp.png){width="85%"}
+<p class="caption">图 2-1：GPUDirect RDMA 与传统 Host TCP/IP 网络吞吐与带宽饱和对比（基于 scientific-figure-making 绘制）</p>
+
 
 1. **多重数据拷贝与内存带宽挤占**：传统路径下，GPU 显存数据必须先通过 PCIe 复制到 Host 内存（D2H），再由 CPU 拷贝到内核 Socket 缓冲区，最终经网卡 DMA 发送；在接收端经历对称的逆向流程。一次跨机传输涉及 4 次内存拷贝，吞吐严重受限于 Host 内存总线带宽。
 
@@ -63,6 +51,19 @@ flowchart TD
 #### (1) RDMA 控制平面与数据平面的严格分离
 
 RDMA 通信机制将控制链路（慢速路径）与数据搬运（极速路径）完全解耦，其核心生命周期如图 2-2 所示：
+
+:::
+
+```{mermaid}
+flowchart TD
+    Setup["初始化 InfiniBand 设备与上下文"] --> RegMR["注册内存区域 (ibv_reg_mr 锁定物理页)"]
+    RegMR --> CreateQP["创建发送/接收队列对 (Queue Pair: QP)"]
+    CreateQP --> Exchange["带外通信 (TCP) 交换 QP 元数据并进入 RTS 状态"]
+    Exchange --> PostSend["下发异步传输请求 (ibv_post_send / RDMA Write)"]
+    PostSend --> PollCQ["网卡硬件自主搬运并轮询完成队列 (ibv_poll_cq)"]
+```
+<p class="caption" align="center"><em>图 2-2：RDMA 队列对 (QP) 建立、内存注册与硬件自驱动传输流水线</em></p>
+
 
 1. **设备初始化与保护域构建（Setup & Protection Domain）**：  
    用户进程调用 `ibv_open_device` 获取 HCA 上下文，并调用 `ibv_alloc_pd` 分配保护域（Protection Domain, PD），隔离不同租户的内存与队列资源。

@@ -27,36 +27,24 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart TD
-    Cluster["超大规模集群计算拓扑"] --> TP["TP (机内 NVLink 域, TP=4~8)"]
-    Cluster --> SP["SP / CP (长上下文序列维度拆分)"]
-    Cluster --> PP["PP (跨机层级切分, PP=4~16)"]
-    Cluster --> EP["EP (MoE 稀疏专家层间路由)"]
-    Cluster --> DP["DP / ZeRO-3 (全局数据副本分片)"]
-    TP & SP & PP & EP & DP ==> Matrix["5D 并行网格: [DP, PP, TP, SP, EP]"]
-```
-<p class="caption" align="center"><em>图 11-1：5D 并行维度分解与物理通信层次映射架构</em></p>
-
-```{mermaid}
-flowchart TD
-    Start["开始集群训练配置搜索"] --> C1{"单卡是否装得下?"}
-    C1 -->|是| PureDP["纯 DP / ZeRO-1 (通信效率最高)"]
-    C1 -->|否| C2{"单机 8 卡装得下?"}
-    C2 -->|是| ZeRO3["ZeRO-3 / FSDP (无跨机模型切分)"]
-    C2 -->|否| C3["机内启用 TP=4/8 + 跨机启用 PP=4/8 + 外层叠加 DP/EP"]
-    C3 --> Check["验证每层通信带宽瓶颈与计算通信重叠率"]
-```
-<p class="caption" align="center"><em>图 11-2：工业界大模型并行训练方案选型与切分决策树</em></p>
-
 ### 1. 5D 并行体系总览与切分维度正交性
 
 在超大规模基础大模型（如 70B 至 1T 参数）的分布式预训练中，没有任何单一的并行技术能够独立承载海量参数、超长上下文以及庞大批次的严苛要求。
 现代大模型训练系统（如 Megatron-LM、DeepSeek-V3、NeMo）通过在多维几何网格上正交组合多种技术，构建起 **5D 混合并行体系**。
 
 如**图 11-1** 所示，集群总 GPU 数量 $N_{\text{gpus}}$ 被形式化分解为 5 个独立维度的笛卡尔积：
+
+```{mermaid}
+flowchart TD
+    subgraph Parallel5D["5D 混合并行空间分解 (DP × TP × PP × CP × EP)"]
+        direction TB
+        Cluster["总卡数 N_gpus = 1024"]
+        Cluster --> Node["节点内 NVLink 高速域: TP (8)"]
+        Cluster --> Spine["机架内 / 跨机 RoCE / IB 域: CP (2) × PP (4) × EP (8) × DP (2)"]
+    end
+```
+<p class="caption" align="center"><em>图 11-1：5D 并行维度分解与物理通信层次映射架构</em></p>
+
 $$N_{\text{gpus}} = N_{\text{dp}} \times N_{\text{tp}} \times N_{\text{pp}} \times N_{\text{cp}} \times N_{\text{ep}}$$
 
 各并行维度的显存切分对象、通信原语与瓶颈对比如下（核心全景表）：
@@ -103,6 +91,19 @@ $$N_{\text{gpus}} = N_{\text{dp}} \times N_{\text{tp}} \times N_{\text{pp}} \tim
   CP 仅在输入 Context 超过单机容量时（$s \ge 32\text{k}$）引入；EP 仅在引入 MoE 稀疏结构时激活，两者与其他主并行维度均保持正交。
 
 ### 4. 工业界并行策略选型决策树（如**图 11-2** 所示）
+
+```{mermaid}
+flowchart LR
+    Start{"模型参数量 N 与序列长度 S"} --> Branch1{"S > 32k ?"}
+    Branch1 -->|是| AddCP["引入 CP (上下文并行)"]
+    Branch1 -->|否| Branch2{"单卡装得下模型吗?"}
+    Branch2 -->|装得下| PureDP["纯 DP / ZeRO-1 (最高吞吐)"]
+    Branch2 -->|装不下| CheckMem{"NVLink 域装得下吗?"}
+    CheckMem -->|是| TP_ZeRO["TP (≤8) + ZeRO-3 / FSDP"]
+    CheckMem -->|否| AddPP["TP (8) + PP + ZeRO-1/2 (跨节点流水)"]
+```
+<p class="caption" align="center"><em>图 11-2：工业界大模型并行训练方案选型与切分决策树</em></p>
+
 
 面对全新的大模型预训练任务，资深架构师遵循标准的三步推演法则：
 

@@ -27,30 +27,6 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
-
-<p align="center">
-  <img src="assets/figs/tp_mlp_math_equivalence.png" width="95%" alt="张量并行先列后行代数等价性与零中间通信推导" />
-</p>
-<p class="caption" align="center"><em>图 6-1：Megatron-LM MLP 模块“先列后行”分块矩阵乘法代数等价性证明与零中间通信机制</em></p>
-
-```{mermaid}
-sequenceDiagram
-    autonumber
-    participant Input as 输入张量 X
-    participant Column as Column Linear (QKV Projection)
-    participant Core as Multi-Head Attention Compute
-    participant Row as Row Linear (Out Projection)
-    participant Comm as 通信原语 (AllReduce)
-
-    Input->>Column: 无通信广播输入 X
-    Column->>Core: 各卡计算本地注意力头 (Heads / TP)
-    Core->>Row: 局部注意力上下文乘本地行分片
-    Row->>Comm: 触发一次 AllReduce 同步各卡部分和
-    Comm-->>Input: 输出完整特征向量进入下层
-```
-<p class="caption" align="center"><em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em></p>
-
 ### 1. 矩阵乘法分块恒等式与张量并行的代数基础
 
 张量并行（Tensor Parallelism, TP）是由 Megatron-LM 提出的经典模型并行范式。不同于数据并行（DP/ZeRO）在样本 batch 维度切分，TP 的核心思路是将神经网络层内部的单个矩阵乘法（GEMM）物理拆分到多个不同的 GPU 上协同计算。
@@ -90,6 +66,12 @@ $$Y = \sum_{i=1}^k Z_i = \sum_{i=1}^k X_i W_i = [X_1, X_2, \dots, X_k] \begin{bm
 如果简单地对每个线性层孤立使用列并行或行并行，每次计算都会分别引入一次 All-Gather 或 AllReduce，带来昂贵的通信开销。Megatron-LM 最天才的架构设计在于：**将网络模块设计为“列并行 $\to$ 行并行”的成对级联，使得中间层计算实现零通信跨越！**
 
 #### A. MLP 模块的列行级联与数学等价性证明（如**图 6-1** 所示）
+
+<p align="center">
+  <img src="assets/figs/tp_mlp_math_equivalence.png" width="95%" alt="张量并行先列后行代数等价性与零中间通信推导" />
+</p>
+<p class="caption" align="center"><em>图 6-1：Megatron-LM MLP 模块“先列后行”分块矩阵乘法代数等价性证明与零中间通信机制</em></p>
+
 
 在经典 Transformer MLP 模块中，单卡未切分的标准前向计算流程为：
 $$Y = \sigma(X W_1) \cdot W_2$$
@@ -167,6 +149,24 @@ $$A B = [A_1, A_2, \dots, A_k] \begin{bmatrix} B_1 \\ B_2 \\ \vdots \\ B_k \end{
 6. 结论：Megatron-LM 之所以能将通信压缩为仅 1 次 AllReduce，核心正在于**“先列切分使得非线性激活在本地解耦”与“后行切分使得矩阵分块内积展开刚好匹配加法规约”**的精妙数学对偶。
 
 #### B. 多头自注意力模块（MHA）的列行级联（如**图 6-2** 所示）
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Input as 输入张量 X
+    participant Column as Column Linear (QKV Projection)
+    participant Core as Multi-Head Attention Compute
+    participant Row as Row Linear (Out Projection)
+    participant Comm as 通信原语 (AllReduce)
+
+    Input->>Column: 无通信广播输入 X
+    Column->>Core: 各卡计算本地注意力头 (Heads / TP)
+    Core->>Row: 局部注意力上下文乘本地行分片
+    Row->>Comm: 触发一次 AllReduce 同步各卡部分和
+    Comm-->>Input: 输出完整特征向量进入下层
+```
+<p class="caption" align="center"><em>图 6-2：张量并行 Attention 模块一次前向传播数据流与通信点</em></p>
+
 
 自注意力模块遵循完全相同的对称哲学：
 

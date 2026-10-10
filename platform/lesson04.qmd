@@ -21,7 +21,11 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在云原生 AI 算力平台中，平台工程师面临的核心挑战是：如何将物理宿主机上极其复杂的英伟达 GPU 硬件生态（包含底层内核模块、微码固件、Fabric Manager、专有驱动、NVML 监控库）安全、弹性且透明地交付给成千上万个运行在 Kubernetes Pod 容器中的深度学习应用（如 PyTorch、vLLM、Megatron-LM）？
+
+传统容器技术与 GPU 硬件直通之间存在本质上的架构分层矛盾（如图 4-1 所示）：
 
 ```{mermaid}
 flowchart TD
@@ -43,21 +47,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 4-1：NVIDIA 容器运行时生态与 K8s Device Plugin 分层交互拓扑</em></p>
 
-```{mermaid}
-flowchart LR
-    Start["Device Plugin 启动"] --> Query["调用 NVML 查询节点可用物理 GPU 数量"]
-    Query --> Report["通过 gRPC ListAndWatch 向 Kubelet 注册 gpu 资源池"]
-    Report --> Schedule["K8s 调度器分配 Pod 到当前节点"]
-    Schedule --> Allocate["Kubelet 调用 DevicePlugin.Allocate() 挑选具体 GPU ID"]
-    Allocate --> Hook["容器运行时 prestart hook 注入设备节点并启动容器"]
-```
-<p class="caption" align="center"><em>图 4-2：Kubernetes GPU 设备发现、配额上报与容器挂载生命周期</em></p>
-
-### 1. 它是什么，解决什么问题
-
-在云原生 AI 算力平台中，平台工程师面临的核心挑战是：如何将物理宿主机上极其复杂的英伟达 GPU 硬件生态（包含底层内核模块、微码固件、Fabric Manager、专有驱动、NVML 监控库）安全、弹性且透明地交付给成千上万个运行在 Kubernetes Pod 容器中的深度学习应用（如 PyTorch、vLLM、Megatron-LM）？
-
-传统容器技术与 GPU 硬件直通之间存在本质上的架构分层矛盾（如图 4-1 所示）：
 
 - Linux 容器（如 Docker、containerd）本质上是基于 Linux 内核 Namespace（PID、Mount、Network）与 Cgroups 实现的轻量级进程隔离，**所有容器共享宿主机内核（Host Kernel）**；
 - GPU 是高度专用的硬件外设，其驱动分为运行在 CPU 特权态（Ring 0）的**宿主机内核模块（`nvidia.ko`、`nvidia-uvm.ko`、`nvidia-peermem.ko`）**与用户态驱动动态链接库（`libcuda.so`、`libnvidia-ml.so`）；
@@ -94,6 +83,17 @@ flowchart LR
 #### (2) Kubernetes GPU 设备生命周期与调度流水线
 
 如图 4-2 所示，GPU 从物理硬件暴露到被 Pod 容器消费经历严密的五步生命周期：
+
+```{mermaid}
+flowchart LR
+    Start["Device Plugin 启动"] --> Query["调用 NVML 查询节点可用物理 GPU 数量"]
+    Query --> Report["通过 gRPC ListAndWatch 向 Kubelet 注册 gpu 资源池"]
+    Report --> Schedule["K8s 调度器分配 Pod 到当前节点"]
+    Schedule --> Allocate["Kubelet 调用 DevicePlugin.Allocate() 挑选具体 GPU ID"]
+    Allocate --> Hook["容器运行时 prestart hook 注入设备节点并启动容器"]
+```
+<p class="caption" align="center"><em>图 4-2：Kubernetes GPU 设备发现、配额上报与容器挂载生命周期</em></p>
+
 
 1. **插件启动与硬件探测**：NVIDIA Device Plugin 作为 DaemonSet 运行在每个 GPU 节点，通过 NVML API 查询物理 GPU 数量并实时监控其温度与 ECC 错误状态；
 

@@ -31,11 +31,12 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
 
-::: {.img-card}
-![](assets/figs/inference_prefill_vs_decode_math.png){width="95%"}
-<p class="caption">图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）</p>
+**vLLM V1 架构**是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。
+
+为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：
+
 :::
 
 ```{mermaid}
@@ -57,21 +58,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 1-2：vLLM V1 三层解耦核心架构 (Frontend → EngineCore → Workers)</em></p>
 
-```{mermaid}
-flowchart LR
-    Req["HTTP 请求到达"] --> Tokenize["分词器编码 Tokens"]
-    Tokenize --> PutReq["压入 EngineCore 请求队列"]
-    PutReq --> Step["EngineCore::step() 统一调度决策"]
-    Step --> Forward["GPU ModelRunner 并行前向推理 (TP AllReduce)"]
-    Forward --> Detokenize["采样器输出 Token 解码并流式回传 SSE"]
-```
-<p class="caption" align="center"><em>图 1-3：vLLM V1 端到端请求流转与异构协同执行流水线</em></p>
-
-### 1. 它是什么，解决什么问题
-
-**vLLM V1 架构**是大语言模型高并发推理领域最具代表性的重构工程范式。在早期的 vLLM V0 架构中，Python 全局解释器锁（GIL）瓶颈明显、调度逻辑与异步 HTTP 事件循环深层交织，导致在单步耗时仅需数毫秒的轻量 Decode 场景中，CPU 侧的调度开销往往超过了 GPU 的计算耗时，引发严重的“GPU 算力饥饿等待 CPU 调度”的瓶颈。
-
-为了攻克这一系统瓶颈，vLLM V1 确立了严格的三层解耦架构（图 1-2）：
 
 - **`AsyncLLM`（前端服务层）**：面向客户端的异步 HTTP/gRPC/SSE 接入网关，负责请求接入、Tokenization 分词、流式输出解包与取消信号监听；
 - **`EngineCore` / `EngineCoreProc`（调度核心内核层）**：运行在完全物理隔离的独立进程中，由单事件循环主导，独占全局请求生命周期调度器（`Scheduler`）与显存逻辑账本（`KVCacheManager`）；
@@ -83,6 +69,11 @@ flowchart LR
 
 端到端请求流转与核心控制循环如图 1-1 至图 1-3 所示：
 
+::: {.img-card}
+![](assets/figs/inference_prefill_vs_decode_math.png){width="95%"}
+<p class="caption">图 1-1：大模型推理双阶段计算/访存二象性数学模型（Prefill 计算受限 vs Decode 显存墙受限）</p>
+
+
 1. **三段式步进迭代循环（Schedule $\to$ Execute $\to$ Update）**：
    在 `EngineCore.step()` 内部，系统严格遵循严谨的时序管道：
    - **调度阶段（Schedule）**：`Scheduler` 消费输入队列，根据全局 Token 预算（Token Budget）生成本次批次的执行计划 `plan = scheduler.schedule()`；
@@ -91,6 +82,17 @@ flowchart LR
    - **状态递推更新（Update）**：调用 `scheduler.update_from_output(plan, model_output)`，更新每个请求的已计算 Token 计数并回收已完结请求的逻辑 KV 块。
 
 2. **端到端流水线推进（图 1-3）**：
+
+```{mermaid}
+flowchart LR
+    Req["HTTP 请求到达"] --> Tokenize["分词器编码 Tokens"]
+    Tokenize --> PutReq["压入 EngineCore 请求队列"]
+    PutReq --> Step["EngineCore::step() 统一调度决策"]
+    Step --> Forward["GPU ModelRunner 并行前向推理 (TP AllReduce)"]
+    Forward --> Detokenize["采样器输出 Token 解码并流式回传 SSE"]
+```
+<p class="caption" align="center"><em>图 1-3：vLLM V1 端到端请求流转与异构协同执行流水线</em></p>
+
    HTTP 请求到达后，`AsyncLLM` 完成异步分词，将 `EngineCoreRequest` 推入无锁共享内存队列；`EngineCore` 批量消费并驱动 GPU ModelRunner 并发前向传播；采样完成后的 Token 结果以流式事件（SSE）的形式逆向实时推送回前端。
 
 ### 3. 正确性条件与常见误区

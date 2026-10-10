@@ -27,31 +27,6 @@ jupyter: python3
 
 ## 核心概念
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart TD
-    subgraph StandardAttn["传统 Attention: O(N^2) 频繁往返 HBM"]
-        QKV["Q, K, V (GMEM)"] --> S["S = Q K^T (写入 HBM)"]
-        S --> P["P = Softmax(S) (写入 HBM)"]
-        P --> O["O = P V (写回 HBM)"]
-    end
-    subgraph FlashAttn["FlashAttention: Tile 块驻留 SRAM 融合计算"]
-        Q_tile["Q Block"] & K_tile["K Block"] --> SRAM["SRAM 内部 Online Softmax + Matmul"]
-        SRAM --> O_tile["直接写回最终 O (节省 10x 访存)"]
-    end
-```
-<p class="caption" align="center"><em>图 13-1：传统注意力大量读写高带宽内存 vs FlashAttention 片上瓦片融合对比</em></p>
-
-```{mermaid}
-flowchart LR
-    Outer["外层循环: 遍历 K, V 分块 (加载至 SRAM)"] --> Inner["内层循环: 遍历 Q 分块 (加载至 SRAM)"]
-    Inner --> Kernel["计算局部 S = Q K^T 并执行 Online Softmax 状态更新"]
-    Kernel --> Acc["增量累加更新局部输出矩阵 O_block"]
-    Acc --> Inner
-```
-<p class="caption" align="center"><em>图 13-2：FlashAttention 前向分块双层循环流水与增量更新流</em></p>
-
 ### 1. GPU 硬件微架构层次与存储金字塔（Memory Hierarchy）
 
 要写出达到硬件峰值利用率的深度学习内核，必须深入理解现代 GPU 的物理组织。以 NVIDIA Hopper（H100）架构为例：
@@ -105,6 +80,23 @@ H100 的 Tensor Core 标称计算峰值高达近 $1000\text{ TFLOPS}$，但外�
 $$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) V$$
 
 #### A. 传统自注意力的访存灾难（如**图 13-1** 所示）
+
+```{mermaid}
+flowchart LR
+    subgraph Standard["传统注意力 HBM 访存灾难"]
+        direction TB
+        QKV["Q, K, V (显存)"] --> S["得分矩阵 S = QK^T (写回显存: O(N^2))"]
+        S --> P["Softmax 概率 P (写回显存: O(N^2))"]
+        P --> O["输出 O = PV (写回显存)"]
+    end
+    subgraph FA["FlashAttention 片上融合"]
+        direction TB
+        SRAM["GPU SRAM 高速缓存 (瓦片分块)"] --> Online["在线流式 Softmax (0 中间显存写回)"]
+        Online --> Out["直接输出最终 O"]
+    end
+```
+<p class="caption" align="center"><em>图 13-1：传统注意力大量读写高带宽内存 vs FlashAttention 片上瓦片融合对比</em></p>
+
 在原生 PyTorch 实现中，该公式被拆解为三个分离的物理内核：
 
 1. **GEMM 1**：从 HBM 加载 $Q$ 与 $K$，计算注意力点积分数 $S = Q K^T$，将庞大的 $N \times N$ 矩阵完整**写入 HBM**（$O(N^2)$ 显存）；
@@ -117,6 +109,25 @@ $$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d}}\right) 
 
 #### B. FlashAttention 的破局机制（SRAM 瓦片融合 + Online Softmax）
 Dao et al. 提出的 FlashAttention 彻底颠覆了上述流程（如**图 13-2** 所示）：
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant HBM as 高带宽显存 (HBM)
+    participant SRAM as 片上共享内存 (SRAM)
+    participant TC as Tensor Core 计算核心
+
+    HBM->>SRAM: 分块加载 Q_i 瓦片 (驻留外层循环)
+    loop 内层循环遍历 K, V 瓦片 (j = 1 to T_c)
+        HBM->>SRAM: 分块加载 K_j, V_j
+        SRAM->>TC: 计算局部得分 S_ij = Q_i K_j^T
+        TC->>SRAM: 在线更新局部最大值 m_i 与归一化分母 l_i
+        SRAM->>TC: 增量累加更新注意力输出 O_i
+    end
+    SRAM->>HBM: 将最终归一化结果 O_i 写回全局显存
+```
+<p class="caption" align="center"><em>图 13-2：FlashAttention 前向分块双层循环流水与增量更新流</em></p>
+
 
 - **零物化（Zero Materialization）**：**绝对不在外部 HBM 中生成完整的 $N \times N$ 矩阵！**
 - **分块载入 SRAM**：将 $Q$ 划分为行块 $Q_i \in \mathbb{R}^{B_r \times d}$，将 $K, V$ 划分为列块 $K_j, V_j \in \mathbb{R}^{B_c \times d}$。将这些紧凑的小块载入片上共享内存（SRAM）。

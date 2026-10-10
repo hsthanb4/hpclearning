@@ -21,32 +21,6 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-```{mermaid}
-flowchart TD
-    subgraph QuotaPool["集群总资源配额池 (1000 GPUs)"]
-        TeamA["部门 A 保证配额 (Guaranteed: 400 GPUs)"]
-        TeamB["部门 B 保证配额 (Guaranteed: 400 GPUs)"]
-        Shared["共享空闲与突发池 (Oversubscription: 200 GPUs)"]
-    end
-    subgraph DRF["主导资源公平调度 (Dominant Resource Fairness)"]
-        Dominant["根据 CPU、GPU、内存中占比最高的主导份额实现均衡分配"]
-    end
-    QuotaPool --> DRF
-```
-<p class="caption" align="center"><em>图 6-1：多租户配额保障、弹性突发超售与 DRF 资源公平模型</em></p>
-
-```{mermaid}
-flowchart LR
-    LargeJob["高优先级大作业等待 64 卡 (预计 30 分钟后到位)"] --> LockTime["调度器计算预留时间窗口 (Reservation Window)"]
-    LockTime --> ScanSmall["扫描等待队列中的碎片小作业 (如 4 卡、运行 15 分钟)"]
-    ScanSmall --> BackfillCheck{"小作业是否能在预留时间前结束?"}
-    BackfillCheck -->|是| RunNow["立即回填调度 (Backfill) 启动小作业，极大化集群利用率"]
-    BackfillCheck -->|否| WaitSmall["小作业保持等待，确保绝不推迟大作业启动时刻"]
-```
-<p class="caption" align="center"><em>图 6-2：回填调度 (Backfill Scheduling) 与保留时间窗口填充工作流</em></p>
-
 ### 1. 它是什么，解决什么问题
 
 在多团队共享的大规模企业级 AI 算力中心（通常汇聚数百至数千张高端 GPU，单卡硬件与能耗成本极高），平台运营与调度系统面临着三大核心诉求的激烈博弈：
@@ -66,6 +40,21 @@ flowchart LR
 
 #### (1) 多租户配额模型与主导资源公平（DRF，如图 6-1 所示）
 
+```{mermaid}
+flowchart TD
+    subgraph QuotaPool["集群总资源配额池 (1000 GPUs)"]
+        TeamA["部门 A 保证配额 (Guaranteed: 400 GPUs)"]
+        TeamB["部门 B 保证配额 (Guaranteed: 400 GPUs)"]
+        Shared["共享空闲与突发池 (Oversubscription: 200 GPUs)"]
+    end
+    subgraph DRF["主导资源公平调度 (Dominant Resource Fairness)"]
+        Dominant["根据 CPU、GPU、内存中占比最高的主导份额实现均衡分配"]
+    end
+    QuotaPool --> DRF
+```
+<p class="caption" align="center"><em>图 6-1：多租户配额保障、弹性突发超售与 DRF 资源公平模型</em></p>
+
+
 - **分层配额池设计（Hierarchical Quota Pools）**：  
   平台将物理卡池划分为“保证配额（Guaranteed）”与“共享突发池（Shared Elastic Pool）”。租户在保证限额内提交的任务享有最高优先级；超出保证限额的任务只能作为“可抢占突发任务（Preemptible Burst Jobs）”在共享池中运行。一旦保证配额的合法持有者提交新作业，突发任务将被优雅回收退让。
 
@@ -77,6 +66,17 @@ flowchart LR
   调度器在每一轮调度中，始终优先为当前主导份额 $s_i$ 最小的租户分发资源，从而在多维异构环境下严格实现帕累托最优与无嫉妒性（Envy-Freeness）。
 
 #### (2) 回填调度算法与保留时间窗口填充（Backfill Scheduling，如图 6-2 所示）
+
+```{mermaid}
+flowchart LR
+    LargeJob["高优先级大作业等待 64 卡 (预计 30 分钟后到位)"] --> LockTime["调度器计算预留时间窗口 (Reservation Window)"]
+    LockTime --> ScanSmall["扫描等待队列中的碎片小作业 (如 4 卡、运行 15 分钟)"]
+    ScanSmall --> BackfillCheck{"小作业是否能在预留时间前结束?"}
+    BackfillCheck -->|是| RunNow["立即回填调度 (Backfill) 启动小作业，极大化集群利用率"]
+    BackfillCheck -->|否| WaitSmall["小作业保持等待，确保绝不推迟大作业启动时刻"]
+```
+<p class="caption" align="center"><em>图 6-2：回填调度 (Backfill Scheduling) 与保留时间窗口填充工作流</em></p>
+
 
 如图 6-2 所示，Backfill 调度的核心执行流水线分为三步：
 

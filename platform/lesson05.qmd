@@ -21,7 +21,11 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在生产级大规模 AI 算力集群中，传统容器调度器（如 Kubernetes 默认调度器 `kube-scheduler`）基于无状态微服务假设构建，其核心调度机制是**逐个 Pod 独立调度（Pod-by-Pod Scheduling）**。
+
+这种调度机制在大模型分布式训练中引发了两个灾难性的系统级瓶颈（如图 5-1 与图 5-2 所示）：
 
 ```{mermaid}
 flowchart TD
@@ -41,21 +45,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 5-1：分布式训练 All-or-Nothing Gang 调度防死锁核心机制</em></p>
 
-```{mermaid}
-flowchart TD
-    Job["新提交分布式作业 (请求 32 卡)"] --> CheckLevel1{"是否有单机柜满足全量卡数?"}
-    CheckLevel1 -->|是| PlaceRack["机柜内放置: 极小化跨 ToR 核心交换机流量 (最优)"]
-    CheckLevel1 -->|否| CheckLevel2{"是否有同属于同一汇聚交换机的相邻机柜?"}
-    CheckLevel2 -->|是| PlaceAgg["同 Spine 汇聚层放置: 保证次优 RDMA 带宽"]
-    CheckLevel2 -->|否| Reject["排队等待拓扑资源空出，拒绝散布放置"]
-```
-<p class="caption" align="center"><em>图 5-2：集群拓扑感知调度放置 (Topology-Aware Scheduling) 决策树</em></p>
-
-### 1. 它是什么，解决什么问题
-
-在生产级大规模 AI 算力集群中，传统容器调度器（如 Kubernetes 默认调度器 `kube-scheduler`）基于无状态微服务假设构建，其核心调度机制是**逐个 Pod 独立调度（Pod-by-Pod Scheduling）**。
-
-这种调度机制在大模型分布式训练中引发了两个灾难性的系统级瓶颈（如图 5-1 与图 5-2 所示）：
 
 1. **分布式任务占坑死锁（Scheduling Deadlock / Starvation）**：  
    分布式深度学习训练要求参与通信的 $N$ 个 Worker 必须全部在线才能完成 NCCL Rendezvous 握手并启动计算。若任务 A 和任务 B 各自需要 8 张 GPU，而集群当前恰好剩余 8 张空闲卡。默认调度器可能将前 4 张卡分配给任务 A 的部分 Pod，后 4 张卡分配给任务 B 的部分 Pod。由于两组任务都无法凑齐全部成员，各自卡在同步屏障等待中，既不进行任何计算，也绝不释放已占有的 GPU 资源，导致集群算力陷入长期的死锁瘫痪（如图 5-1 所示）。

@@ -25,48 +25,18 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
-
-::: {.img-card}
-![](assets/figs/cuda_roofline.png){width="85%"}
-<p class="caption">图 3-1：NVIDIA H100 Roofline 性能模型与 GEMV 极低算术强度受限区分析（基于 scientific-figure-making 绘制）</p>
-:::
-
-```{mermaid}
-flowchart LR
-    subgraph Matrix["矩阵 A (M × K)"]
-        Row0["Row 0 ➔ 分配给 Warp 0"]
-        Row1["Row 1 ➔ 分配给 Warp 1"]
-        RowM["Row M ➔ 分配给 Warp M"]
-    end
-    subgraph Vector["向量 x (K × 1)"]
-        Vx["常驻 L1/L2 Cache 广播读取"]
-    end
-    subgraph Out["输出 y (M × 1)"]
-        Y0["y[0]"]
-        Y1["y[1]"]
-        YM["y[M]"]
-    end
-    Row0 & Vx --> Y0
-    Row1 & Vx --> Y1
-    RowM & Vx --> YM
-```
-<p class="caption" align="center"><em>图 3-2：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em></p>
-
-```{mermaid}
-flowchart TD
-    Init["Warp 绑定矩阵第 row 行"] --> Loop["Warp 内各线程跨步读取 A[row, c] 并与 x[c] 做乘积累加"]
-    Loop --> Reduce["Warp 内执行 Shuffle 求和归约"]
-    Reduce --> Write["Lane 0 将点积和加上偏置写回全局内存 y[row]"]
-```
-<p class="caption" align="center"><em>图 3-3：GEMV 单行点积累加与 Warp 归约执行流水</em></p>
-
 ### 1. 矩阵-向量乘（GEMV）在大模型推理中的地位与算术强度瓶颈
 
 通用矩阵-向量乘（General Matrix-Vector Multiplication, GEMV: $y = A x + \text{bias}$）是线性代数与深度学习中的基础算子。
 尤其在大语言模型（LLM）的**自回归解码生成阶段（Decode Phase）**中，每生成一个新 Token，KV Cache 投影以及 MLP 投影都是以单个 Token（即批次维度 $\text{Batch}=1$）输入线性层。此时通用的矩阵乘（GEMM: $[M, K] \times [K, N]$）必然退化为矩阵-向量乘（GEMV: $[M, N] \times [N, 1] \to [M, 1]$）：
 
 - **极低的算术强度（Memory-Bound 典型代表，结合图 3-1 Roofline 模型）**：
+
+::: {.img-card}
+![](assets/figs/cuda_roofline.png){width="85%"}
+<p class="caption">图 3-1：NVIDIA H100 Roofline 性能模型与 GEMV 极低算术强度访存受限瓶颈（基于 scientific-figure-making 绘制）</p>
+:::
+
   设矩阵 $A \in \mathbb{R}^{M \times N}$，向量 $x \in \mathbb{R}^N$。
    - 理论计算量：每个元素需要 1 次乘法和 1 次加法，总浮点运算量为 $2 M N\text{ FLOPs}$；
    - 显存访存量：必须从全局内存中加载整个权重矩阵 $A$（$4MN$ 字节），读取向量 $x$（$4N$ 字节），并写回结果 $y$（$4M$ 字节）。
@@ -89,6 +59,19 @@ flowchart TD
 
 工业级标准设计采用如**图 3-2** 所示的 **Block-per-Row（一个线程块负责一行矩阵-向量点积）**：
 
+```{mermaid}
+flowchart LR
+    subgraph GEMV_Mapping["Block-per-Row 映射拓扑"]
+        direction TB
+        M0["Matrix Row 0 (K 个元素)"] -->|Block 0 (256 线程协同)| Dot0["输出 y[0]"]
+        M1["Matrix Row 1 (K 个元素)"] -->|Block 1 (256 线程协同)| Dot1["输出 y[1]"]
+        M2["Matrix Row 2 (K 个元素)"] -->|Block 2 (256 线程协同)| Dot2["输出 y[2]"]
+        X["全局向量 x (K 个元素，被所有 Block 高频复用)"] -.-> Dot0 & Dot1 & Dot2
+    end
+```
+<p class="caption" align="center"><em>图 3-2：GEMV 矩阵-向量乘行级映射与数据复用拓扑</em></p>
+
+
 - 每个 Thread Block（例如 `BLOCK_SIZE = 256`）专职负责输出向量的一个分量 $y[\text{row}]$，即计算第 `row = blockIdx.x` 行与向量 $x$ 的内积。
 - Block 内的 256 个线程沿着列维度以网格跨步循环前移：
   ```cuda
@@ -104,6 +87,22 @@ flowchart TD
 虽然每个 Block 都从显存中逻辑读取 $x$，但由于硬件 L1 Data Cache 和 L2 Cache（几十 MB）的巨大容量，向量 $x$ 在首个 Block 读取后便大概率常驻在高速片上缓存中，后续各个 Block 读取 $x$ 几乎全部命中 L2 缓存，极大缓解了显存带宽压力。
 
 #### C. 点积规约与原子写入解耦（图 3-3）
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant T as Block 内部线程 (256 线程)
+    participant V as float4 向量化加载
+    participant W as Warp 洗牌规约
+    participant GM as 全局内存 y[row]
+
+    T->>V: 跨步网格循环连续加载 A[row, k..k+3] 与 x[k..k+3]
+    V->>T: 片上寄存器积和累加 sum += a * x
+    T->>W: Warp 内 __shfl_down_sync 折半求和
+    W->>GM: 线程 0 将最终标量直接写入 y[row]
+```
+<p class="caption" align="center"><em>图 3-3：GEMV 单行点积累加与 Warp 归约执行流水</em></p>
+
 当 Block 内每个线程完成各自负责列的局部乘累加后，调用第 2 课所学的 `block_reduce_sum`：
 
 1. Warp 内通过 `__shfl_down_sync` 快速树状折叠；

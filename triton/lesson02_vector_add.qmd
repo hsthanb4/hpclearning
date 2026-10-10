@@ -25,7 +25,14 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+Triton 与传统 CUDA 在内存模型上的本质区别在于：CUDA 编写的是单个线程（Thread-level）的标量指针寻址与操作，而 Triton 编写的是以 Program 块为单位、针对向量/张量块（Block of Tensors）的指针与数据操作。
+在 Triton 的向量加法中，指针不再是一个标量地址，而是一个**指针张量（Pointer Tensor）**：`ptr + offsets`。它与值张量（Value Tensor）在维度和形状上一一对应。解决的核心工程问题是如何将高维张量在显存中的线性地址映射为硬件向量加载指令，并在非块大小整数倍的数据尾部通过谓词掩码（Predicate Mask）安全切断非法的内存读写，防止越界访存（Out-of-Bounds Memory Fault）。
+
+### 2. 它如何工作
+
+整个向量加法的数据流与控制流遵循紧密的协同契约（如 [图 2-1](file:///Users/wujie/hpclearning/triton/lesson02_vector_add.qmd) 与 [图 2-2](file:///Users/wujie/hpclearning/triton/lesson02_vector_add.qmd) 所示）：
 
 ```{mermaid}
 flowchart LR
@@ -44,14 +51,6 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 2-2：Triton 向量加法端到端发射与并行执行流程</em></p>
 
-### 1. 它是什么，解决什么问题
-
-Triton 与传统 CUDA 在内存模型上的本质区别在于：CUDA 编写的是单个线程（Thread-level）的标量指针寻址与操作，而 Triton 编写的是以 Program 块为单位、针对向量/张量块（Block of Tensors）的指针与数据操作。
-在 Triton 的向量加法中，指针不再是一个标量地址，而是一个**指针张量（Pointer Tensor）**：`ptr + offsets`。它与值张量（Value Tensor）在维度和形状上一一对应。解决的核心工程问题是如何将高维张量在显存中的线性地址映射为硬件向量加载指令，并在非块大小整数倍的数据尾部通过谓词掩码（Predicate Mask）安全切断非法的内存读写，防止越界访存（Out-of-Bounds Memory Fault）。
-
-### 2. 它如何工作
-
-整个向量加法的数据流与控制流遵循紧密的协同契约（如 [图 2-1](file:///Users/wujie/hpclearning/triton/lesson02_vector_add.qmd) 与 [图 2-2](file:///Users/wujie/hpclearning/triton/lesson02_vector_add.qmd) 所示）：
 
 1. **主机端发射与网格映射**：Python Wrapper 校验张量形状、数据类型与内存连续性后，以 `grid = (cdiv(n, BLOCK),)` 发射 Kernel。每个 Program 分配唯一的 `pid = tl.program_id(0)`。
 

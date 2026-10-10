@@ -25,7 +25,13 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+**Triton 编程范式（Program、Block 与 Mask）** 彻底颠覆了传统 CUDA C++ 基于单线程（SIMT Thread-level）的手工繁琐编程，开启了基于 **分块级单程序多数据（Block-level SPMD）** 的现代 GPU 算子开发新纪元。
+
+**CUDA SIMT 痛点 vs. Triton 块级抽象（结合图 1-1 与图 1-2）**：
+- **传统 CUDA 的心智负担**：开发者必须在脑海中手动折算“Warp 内 32 个线程的交错排布、寄存器 Bank Conflict、Shared Memory Padding”，极易出错；
+- **Triton 的分块心智模型（图 1-1）**：
 
 ```{mermaid}
 flowchart TD
@@ -36,6 +42,12 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 1-1：Triton SPMD Block 划分与块偏移指针代数</em></p>
 
+
+   - 开发者编写的代码不是针对“单个线程”，而是针对一个 **Program 实例（相当于 CUDA 的一个 CTA / ThreadBlock）**；
+   - 变量不是单个标量，而是**多维向量/块张量（Block of Data）**，例如 `tl.arange(0, BLOCK)` 一次性声明了一个长度为 `BLOCK` 的向量切片；
+   - 编译器（Triton-MLIR 编译器）自动负责将其映射到底层的物理 Warp、分配通用寄存器与 Tensor Core 指令；
+- **边界防御武器：Mask（图 1-2）**：
+
 ```{mermaid}
 flowchart LR
     Offsets["计算逻辑元素索引 offsets"] --> Mask["生成布尔掩码: mask = offsets < N"]
@@ -44,17 +56,7 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 1-2：Triton tl.store 边界掩码 (Mask) 保护执行流程图</em></p>
 
-### 1. 它是什么，解决什么问题
-
-**Triton 编程范式（Program、Block 与 Mask）** 彻底颠覆了传统 CUDA C++ 基于单线程（SIMT Thread-level）的手工繁琐编程，开启了基于 **分块级单程序多数据（Block-level SPMD）** 的现代 GPU 算子开发新纪元。
-
-**CUDA SIMT 痛点 vs. Triton 块级抽象（结合图 1-1 与图 1-2）**：
-- **传统 CUDA 的心智负担**：开发者必须在脑海中手动折算“Warp 内 32 个线程的交错排布、寄存器 Bank Conflict、Shared Memory Padding”，极易出错；
-- **Triton 的分块心智模型（图 1-1）**：
-   - 开发者编写的代码不是针对“单个线程”，而是针对一个 **Program 实例（相当于 CUDA 的一个 CTA / ThreadBlock）**；
-   - 变量不是单个标量，而是**多维向量/块张量（Block of Data）**，例如 `tl.arange(0, BLOCK)` 一次性声明了一个长度为 `BLOCK` 的向量切片；
-   - 编译器（Triton-MLIR 编译器）自动负责将其映射到底层的物理 Warp、分配通用寄存器与 Tensor Core 指令；
-- **边界防御武器：Mask（图 1-2）**：真实世界的数据规模 $N$ 极少能被 2 的幂次分块大小（如 128、256）整除。Triton 强制引入条件布尔掩码（Mask），在硬件层面彻底掐灭尾部越界访问。
+真实世界的数据规模 $N$ 极少能被 2 的幂次分块大小（如 128、256）整除。Triton 强制引入条件布尔掩码（Mask），在硬件层面彻底掐灭尾部越界访问。
 
 ### 2. 它如何工作（结合图 1-1 与图 1-2）
 

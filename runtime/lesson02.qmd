@@ -21,11 +21,29 @@ jupyter: python3
 
 ## 核心概念与运行机制
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+PyTorch 标志性的即时执行模式（Eager Mode）赋予了算法开发者极致的 Python 交互性与调试便利性，但在大规模 AI Infra 与生产部署中暴露出两大核心性能劣势：
+
+1. **显存读写瓶颈（Memory Bandwidth Wall）**：在由大量细粒度算子（如 Bias-Add、LayerNorm、GELU、Residual Add）构成的网络中，GPU 大部分时间都在将中间激活从 HBM 读入 SRAM、计算后又写回 HBM，产生了海量冗余的高带宽访存往返；
+
+2. **CPU 调度发射瓶颈（CPU Overhead Wall）**：每个小算子都需要穿透 Python 解释器与 Dispatcher，当底层 Kernel 仅执行几微秒时，CPU 发射延迟超过了 GPU 运算时间，造成严重的 GPU 计算流水线饥饿。
+
+**`torch.compile`（PyTorch 2.0 编译器技术栈）**在彻底保持 Python 动态语法与原生开发体验的前提下，实现了媲美静态图引擎的高性能：
+- **三层协同架构**：由 **TorchDynamo**（基于 CPython PEP 523 字节码重写前端捕获 FX 计算图）、**AOTAutograd**（在编译期捕获前向与反向联合图并生成高效重计算方案）与 **TorchInductor**（后端深度学习编译器代码生成器，自动将算子编译并融合为高性能 Triton / C++ 内核）三位一体构成；
+- **算子极致融合**：如图 2-1 所示，
 
 ::: {.img-card}
 ![](assets/figs/pytorch_eager_vs_compile.png){width="85%"}
 <p class="caption">图 2-1：torch.compile Inductor 融合算子对比 Eager 原生执行加速比（基于 scientific-figure-making 绘制）</p>
+
+通过将多个连续的点元运算（Pointwise）与归约运算（Reduction）在 SRAM 层面彻底融合为单个 Triton 内核，消除中间 HBM 往返，可取得 1.5x~2.5x 的稳定吞吐跃升；
+- **守卫验证与安全边界**：通过 **Guards** 机制构建严密的前提契约，并在遭遇不可追踪代码时通过 **Graph Break** 安全分区降级。
+
+### 2. 它如何工作
+
+`torch.compile` 的执行流涵盖了从字节码捕获、Guard 校验到动态重编译的完整生命周期（时序如图 2-2 所示）：
+
 :::
 
 ```{mermaid}
@@ -39,22 +57,6 @@ flowchart LR
 ```
 <p class="caption" align="center"><em>图 2-2：torch.compile Guard 命中判定与自适应特化重编译时序</em></p>
 
-### 1. 它是什么，解决什么问题
-
-PyTorch 标志性的即时执行模式（Eager Mode）赋予了算法开发者极致的 Python 交互性与调试便利性，但在大规模 AI Infra 与生产部署中暴露出两大核心性能劣势：
-
-1. **显存读写瓶颈（Memory Bandwidth Wall）**：在由大量细粒度算子（如 Bias-Add、LayerNorm、GELU、Residual Add）构成的网络中，GPU 大部分时间都在将中间激活从 HBM 读入 SRAM、计算后又写回 HBM，产生了海量冗余的高带宽访存往返；
-
-2. **CPU 调度发射瓶颈（CPU Overhead Wall）**：每个小算子都需要穿透 Python 解释器与 Dispatcher，当底层 Kernel 仅执行几微秒时，CPU 发射延迟超过了 GPU 运算时间，造成严重的 GPU 计算流水线饥饿。
-
-**`torch.compile`（PyTorch 2.0 编译器技术栈）**在彻底保持 Python 动态语法与原生开发体验的前提下，实现了媲美静态图引擎的高性能：
-- **三层协同架构**：由 **TorchDynamo**（基于 CPython PEP 523 字节码重写前端捕获 FX 计算图）、**AOTAutograd**（在编译期捕获前向与反向联合图并生成高效重计算方案）与 **TorchInductor**（后端深度学习编译器代码生成器，自动将算子编译并融合为高性能 Triton / C++ 内核）三位一体构成；
-- **算子极致融合**：如图 2-1 所示，通过将多个连续的点元运算（Pointwise）与归约运算（Reduction）在 SRAM 层面彻底融合为单个 Triton 内核，消除中间 HBM 往返，可取得 1.5x~2.5x 的稳定吞吐跃升；
-- **守卫验证与安全边界**：通过 **Guards** 机制构建严密的前提契约，并在遭遇不可追踪代码时通过 **Graph Break** 安全分区降级。
-
-### 2. 它如何工作
-
-`torch.compile` 的执行流涵盖了从字节码捕获、Guard 校验到动态重编译的完整生命周期（时序如图 2-2 所示）：
 
 1. **TorchDynamo 字节码拦截与 FX 图提取**：
    - 当调用 `@torch.compile` 装饰的函数时，TorchDynamo 拦截 CPython 栈帧（Frame Evaluation）；

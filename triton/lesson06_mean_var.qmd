@@ -25,7 +25,18 @@ jupyter: python3
 
 ## 核心心智模型
 
-### 核心操作与执行流程图解
+### 1. 它是什么，解决什么问题
+
+在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 $\mu$ 与方差 $\sigma^2$ 是必经步骤。总体方差（Population Variance）的经典定义为：
+$$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 $$
+在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 $2$ 的幂次 $\text{BLOCK}$。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 $0.0$。
+但本课揭示了一个极其隐蔽的致命陷阱：**“单位元的代数污染”**。
+当执行中心化操作 $(x - \mu)$ 时，原先填充了 $0.0$ 的 Padding lanes 会变为 $(0.0 - \mu) = -\mu$；其平方则变为 $(-\mu)^2 = \mu^2 \neq 0$。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 $(\text{BLOCK} - N) \times \mu^2$ 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。
+本课解决的核心工程问题是：**理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染**。
+
+### 2. 它如何工作
+
+两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：
 
 ```{mermaid}
 flowchart LR
@@ -44,18 +55,7 @@ flowchart TD
 ```
 <p class="caption" align="center"><em>图 6-2：两阶段掩码二次传播计算时序流</em></p>
 
-### 1. 它是什么，解决什么问题
 
-在 LayerNorm、RMSNorm 以及批归一化（BatchNorm）中，计算特征的均值 $\mu$ 与方差 $\sigma^2$ 是必经步骤。总体方差（Population Variance）的经典定义为：
-$$ \mu = \frac{1}{N} \sum_{i=0}^{N-1} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=0}^{N-1} (x_i - \mu)^2 $$
-在 Triton 向量化内核中，为了满足 SIMD 折半二叉树规约，张量宽度必须扩展至 $2$ 的幂次 $\text{BLOCK}$。在上节课中，我们在加载时为 Padding lanes 填充了加法单位元 $0.0$。
-但本课揭示了一个极其隐蔽的致命陷阱：**“单位元的代数污染”**。
-当执行中心化操作 $(x - \mu)$ 时，原先填充了 $0.0$ 的 Padding lanes 会变为 $(0.0 - \mu) = -\mu$；其平方则变为 $(-\mu)^2 = \mu^2 \neq 0$。如果直接对平方项求和，这些原本虚构的 Padding lanes 将把 $(\text{BLOCK} - N) \times \mu^2$ 的巨大虚假数值强行注入方差累加器，造成彻底的数值崩溃。
-本课解决的核心工程问题是：**理解掩码在复合算子数据流中的“二次传播（Mask Re-propagation）”机制，掌握中心化后的掩码重施加（Re-masking）技术，杜绝静默数值污染**。
-
-### 2. 它如何工作
-
-两阶段掩码统计量与二次传播时序如图 6-1 与图 6-2 所示：
 
 1. **Pass 1（带掩码加载与均值规约）**：
    - 使用 `cols = tl.arange(0, BLOCK)` 与 `mask = cols < N`。
