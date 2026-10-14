@@ -49,14 +49,29 @@ $$N_{\text{gpus}} = N_{\text{dp}} \times N_{\text{tp}} \times N_{\text{pp}} \tim
 
 各并行维度的显存切分对象、通信原语与瓶颈对比如下（核心全景表）：
 
-| 并行维度 (Dimension) | 物理切分对象 | 显存节省本质 | 核心通信算子 | 网络带宽要求与放置域 | 主要瓶颈与副作用 |
-|---|---|---|---|---|---|
-| **DP (数据并行)** | Batch 样本 | 减小每卡本地批次（激活显存） | AllReduce (求和) | 低/中（跨机以太网/IB） | 受限于全局目标 GBS 上限 |
-| **ZeRO-1/2/3** | 优化器/梯度/权重 | 沿 DP 维切分静态状态 | Reduce-Scatter + All-Gather | 中/高（适合跨机或机内） | ZeRO-3 通信量增至 $3\Psi$，大集群延迟累积 |
-| **TP (+SP)** | 隐藏维 / 序列维 | 参数、梯度与中间激活均分至 $1/\text{TP}$ | AllReduce / AllGather + ReduceScatter | **极高（必须机内 NVLink）** | 通信位于计算关键路径，严禁跨节点 |
-| **PP (流水线)** | 网络层深度 ($L$) | 静态权重按层数均分为 $1/p$ | P2P 邻居点对点发送/接收 | **低（仅传层边界激活）** | 流水线气泡（Bubble Ratio $\approx \frac{p-1}{m}$） |
-| **CP (上下文)** | 序列长度 ($s$) | 沿序列切分整模型激活 | 环形 P2P / All-to-All | 中/高（跨节点 RDMA 网络） | 自注意力多轮通信开销 |
-| **EP (专家)** | MoE 专家索引 ($E$) | 稀疏 FFN 专家参数分发 | 双向 All-to-All (分发+汇聚) | **高（受跨机双向横截面带宽制约）** | 专家负载失衡产生木桶短板 |
+| 并行维度 (Dimension) | 物理切分对象 | 显存节省本质 | 核心通信算子 | 通信触发时机 (Timing) | 网络带宽要求与放置域 | 主要瓶颈与副作用 |
+|---|---|---|---|---|---|---|
+| **DP (数据并行)** | Batch 样本 | 减小每卡本地批次（激活显存） | AllReduce (求和) | **反向阶段**：每层反向梯度算完后触发（分桶与反向求导计算异步重叠）；前向与优化器更新无通信 | 低/中（跨机以太网/IB） | 受限于全局目标 GBS 上限 |
+| **ZeRO-1/2/3** | 优化器/梯度/权重 | 沿 DP 维切分静态状态 | Reduce-Scatter + All-Gather | **ZeRO-1/2**：仅在反向阶段（ZeRO-1 尾部 AllReduce 同步梯度；ZeRO-2 边反向边 Reduce-Scatter 梯度分片）；<br>**ZeRO-3**：前向每层**前** All-Gather 权重、算后释放；反向每层**前** All-Gather 权重，算完梯度后 Reduce-Scatter 并释放 | 中/高（适合跨机或机内） | ZeRO-3 通信量增至 $3\Psi$，大集群延迟累积 |
+| **TP (+SP)** | 隐藏维 / 序列维 | 参数、梯度与中间激活均分至 $1/\text{TP}$ | AllReduce / AllGather + ReduceScatter | **前向与反向关键路径（In-line）**：每层注意力投影（RowParallel 后）与 MLP 输出各 1 次通信（单层前向 2 次、反向对称 2 次阻塞式集合通信） | **极高（必须机内 NVLink）** | 通信位于计算关键路径，严禁跨节点 |
+| **PP (流水线)** | 网络层深度 ($L$) | 静态权重按层数均分为 $1/p$ | P2P 邻居点对点发送/接收 | **微批次边界流转**：前向算完当前 Stage 最后一层发激活（`isend`）；反向算完当前 Stage 第一层发激活梯度（`isend`） | **低（仅传层边界激活）** | 流水线气泡（Bubble Ratio $\approx \frac{p-1}{m}$） |
+| **CP (上下文)** | 序列长度 ($s$) | 沿序列切分整模型激活 | 环形 P2P / All-to-All | **仅在 Attention 阶段**：前向与反向计算多头注意力时触发（KV 块沿环 P2P 异步轮转，或 Attention 前后执行 All-to-All 换轴）；MLP/Norm 无通信 | 中/高（跨节点 RDMA 网络） | 自注意力多轮通信开销 |
+| **EP (专家)** | MoE 专家索引 ($E$) | 稀疏 FFN 专家参数分发 | 双向 All-to-All (分发+汇聚) | **仅在 MoE FFN 层**：前向路由后执行第 1 次 All-to-All（Token 派发给专家），专家计算后执行第 2 次 All-to-All（输出聚合回原卡）；反向对称执行 2 次 | **高（受跨机双向横截面带宽制约）** | 专家负载失衡产生木桶短板 |
+
+#### 核心通信时机与生命周期时序推演（Forward / Backward / Step）
+
+理解通信时机是把握并行系统性能重叠（Overlap）与网络瓶颈的关键：
+
+1. **计算关键路径阻塞型（In-line Blocking）**：
+   - **TP (+SP)**：通信深度嵌套在单层 Transformer 的前向与反向计算图核心。RowParallel 矩阵乘法输出的是局部部分和，必须经过 AllReduce 求和后才能输入后续的残差相加与 LayerNorm，**无法与后续计算异步重叠**。单层前向 2 次、反向 2 次，属于最高频、对延迟最敏感的阻塞通信。
+2. **前后向阶段触发型（Per-Layer / Boundary Event）**：
+   - **ZeRO-3**：将通信平摊到每一层前后。前向算到第 $l$ 层前必须执行 All-Gather 拿全量权重，算完立即释放显存；反向算到第 $l$ 层前再次 All-Gather 权重，求导完成后立即通过 Reduce-Scatter 分发该层梯度分片并再次释放权重。
+   - **PP**：通信仅发生在微批次（Micro-Batch）跨越流水线切分点（Stage 边界）的时刻。Stage $k$ 算完边界层输出立即向 Stage $k+1$ 发送 P2P 激活消息，反向则回传激活梯度。
+3. **特定算子局部触发型（Operator-Specific）**：
+   - **CP**：通信**完全局限于自注意力（Self-Attention）模块**内部。无论是 Ring Attention 的环形 KV P2P 轮转，还是 DeepSpeed Ulysses 的 Attention 前后 All-to-All 换轴，网络中的 Embedding、MLP、LayerNorm 等逐 Token 算子均在各卡本地完全独立执行，产生 0 跨卡通信。
+   - **EP**：通信**完全局限于稀疏 MoE 门控与 FFN 模块**内部。在 Router 计算出各 Token 目标专家后，触发第 1 次 All-to-All（Token Dispatch）；专家执行完 GEMM 计算后，触发第 2 次 All-to-All（Token Combine）汇聚输出。
+4. **反向计算异步重叠型（Backward Overlapped）**：
+   - **DP / ZeRO-1 / ZeRO-2**：前向传播与优化器更新阶段完全无跨卡网络流量。通信仅在反向传播过程中触发，由独立的 CUDA 通信流（NCCL Stream）负责。通过分桶（Bucket）机制，在当前层计算反向梯度的同时，后台并发对已完成求导的前序层梯度执行 AllReduce 或 Reduce-Scatter，能够近乎 100% 掩盖通信耗时。
 
 ### 2. 硬件物理拓扑与通信分层映射法则（面试核心红线）
 
