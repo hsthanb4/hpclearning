@@ -1,0 +1,282 @@
+---
+title: "第 11 课：动态形状（Dynamic Shapes）深度处理：TorchDynamo 特化与 Guard 膨胀抑制"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 彻底搞懂深度学习编译优化（`torch.compile` / TorchDynamo / Inductor / TensorRT）在**动态形状（Dynamic Shapes）**下的核心困境；
+- 深入推导 TorchDynamo 中 `SymInt`（符号整数）与 Guard（守卫条件）的工作机理与执行开销；
+- 掌握避免“重编译风暴（Recompilation Storm）”与“Guard 爆炸（Guard Explosion）”的工业级工程防御手段；
+- 掌握分桶调度（Bucketization）与无填充拼接（Pad-free Packed Sequences）的系统级设计。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（动态形状分桶调度器与 Guard 膨胀抑制模拟器），并通过测试断言；
+- 三个问答题均说明图编译特化与符号推演的因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 2 课：torch.compile：Graph Break、Guard 与动态 Shape](lesson02.qmd)、编译原理与符号代数基础。
+- 本课位置：深入解决生产级推理与训练在大模型、变长视觉与点云动态批处理中的高频卡顿问题。
+
+---
+
+## 核心心智模型
+
+### 1. 动态形状的物理困境：重编译风暴 vs 算力浪费
+
+在传统深度学习编译器（如早期 TensorRT、XLA）的假设中，张量的维度（Batch Size $B$、序列长度 $S$、特征维度 $C$）在启动时都是固定常数。编译器可以据此进行激进的循环展开、静态显存分配与硬件寄存器微架构特化。
+
+然而在现代多模态大模型、自动驾驶与具身机器人中：
+- 语言模型的输入 Prompt 长度随时变化；
+- 视觉分词器（Vision Tokenizer）处理不同分辨率图像输出的 Patch 数量动态变化；
+- 激光雷达点云每帧检测出的有效目标物体数量完全不可预知。
+
+```{mermaid}
+flowchart TD
+    subgraph DynamicDilemma["动态形状处理的两难困境与工程解法"]
+        direction TB
+        subgraph Bad1["方案一：强行做静态特化 (Naive Static)"]
+            S1["每遇到一个新的序列长度 (如 127, 128, 129...)"] --> S2["触发一次耗时数十秒的完整 JIT 重编译"]
+            S2 --> S3["生产系统遭遇'重编译风暴'，严重卡死挂起"]
+        end
+        subgraph Bad2["方案二：朴素最大补齐 (Naive Padding)"]
+            P1["将所有输入强行 Padding 到最大长度 (如 4096)"] --> P2["大量计算与显存耗费在无意义的 0 元素上"]
+            P2 --> P3["有效吞吐暴跌 70%~90%"]
+        end
+        subgraph Solution["工业级解法：分桶特化 + 符号推演 (Bucketization + SymInt)"]
+            B1["符号整数 (SymInt) 表达共享计算图"]
+            B2["几何分桶离散化 (64, 128, 256...) 限制图实例上限"]
+            B3["Guard 守卫条件智能聚类与抑制"]
+        end
+    end
+```
+<p class="caption" align="center"><em>图 11-1：动态形状编译的两难困境与工业级破局方案</em></p>
+
+---
+
+### 2. TorchDynamo 的符号化推演与 Guard 爆炸
+
+当开启 `torch.compile(model, dynamic=True)` 时：
+1. **符号化抽象（`SymInt`）**：
+   Dynamo 不再将张量维度视为固定整数，而是引入一个符号变量 $s_0$。所有的中间算子计算尺寸均表示为 $s_0$ 的代数表达式（如 $2 s_0 + 1$ 或 $s_0 // 2$）；
+2. **守卫条件（Guard）生成**：
+   为了保证编译出的图在数学上合法，Dynamo 会生成一系列 Guard（如 `s0 >= 1`, `s0 % 8 == 0`）。在每次前向调用时，CPU 必须先以极快的速度求值这些 Guard：
+   - 若全部命中，直接复用已编译的高效二进制内核；
+   - 若 Guard 失败，才触发新的特化图编译。
+3. **Guard 爆炸危机（Guard Explosion）**：
+   如果代码中包含大量 Python 原生整数判断（如 `if x.shape[0] > 10:`），Dynamo 会为每个控制分支生成独立的特化 Guard。成千上万个 Guard 会导致 Python 解释器在每次前向执行前花费数十毫秒进行条件校验，使得编译带来的加速被 Guard 检查开销完全抵消！
+
+---
+
+## 代码实战：动态形状分桶调度器与 Guard 膨胀抑制模拟器
+
+我们实现一个生产级动态形状分桶调度器，将连续动态维度对齐到离散几何桶（Bucket），限制特化编译图数量，并抑制非必要的 Guard 重编译。
+
+### 练习题描述
+
+补齐 `DynamicShapeBucketManager` 类：
+1. `__init__(buckets)`：
+   - 初始化可用几何分桶列表（如 `[64, 128, 256, 512, 1024]`）；
+2. `get_bucket(actual_length)`：
+   - 找到能够容纳 `actual_length` 的**最小合法分桶尺寸**；若超出最大桶尺寸，则采用最大分桶并发出截断或动态异常；
+3. `dispatch(shape_tuple)`：
+   - 将输入动态形状（如 `(batch, seq_len, hidden)`）映射为分桶规整后的形状键（`bucket_key`）；
+   - 检查已编译缓存中是否存在该分桶的执行图：若命中，计数增加；若未命中，模拟触发一次编译（`recompile_count += 1`）并记录入缓存；
+   - 返回执行图分发信息。
+
+::: {#dynamic_exercise .cell course_role='exercise'}
+```python
+class DynamicShapeBucketManager:
+    def __init__(self, buckets=[64, 128, 256, 512, 1024]):
+        self.buckets = sorted(buckets)
+        self.compiled_cache = {}  # {bucket_key: compiled_graph_object}
+        self.recompile_count = 0
+        self.hit_count = 0
+
+    def get_bucket(self, actual_length):
+        """
+        寻找容纳 actual_length 的最小分桶。
+        若 actual_length 超出最大分桶，返回 None。
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def dispatch(self, actual_shape):
+        """
+        分发动态形状。actual_shape 为 (batch_size, seq_len, hidden_dim)。
+        仅对 seq_len (index 1) 做分桶映射。
+        返回: dict, 包含:
+            - "dispatched_shape": tuple
+            - "is_recompiled": bool
+            - "cache_key": str
+        """
+        # TODO: YOUR CODE HERE
+        pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+manager = DynamicShapeBucketManager(buckets=[64, 128, 256, 512])
+
+# 1. 验证单步分桶查找
+assert manager.get_bucket(50) == 64
+assert manager.get_bucket(64) == 64
+assert manager.get_bucket(65) == 128
+assert manager.get_bucket(600) is None  # 超出范围
+
+# 2. 模拟连续随机请求
+# 第一次来 50 长度 -> 命中 64 桶，触发初次编译
+res1 = manager.dispatch((2, 50, 768))
+assert res1["dispatched_shape"] == (2, 64, 768)
+assert res1["is_recompiled"] == True
+assert manager.recompile_count == 1
+
+# 第二次来 60 长度 -> 同样归入 64 桶，命中缓存！无需重编译！
+res2 = manager.dispatch((2, 60, 768))
+assert res2["dispatched_shape"] == (2, 64, 768)
+assert res2["is_recompiled"] == False
+assert manager.hit_count == 1
+assert manager.recompile_count == 1  # 未增加重编译
+
+# 第三次来 110 长度 -> 归入 128 桶，触发新桶编译
+res3 = manager.dispatch((2, 110, 768))
+assert res3["dispatched_shape"] == (2, 128, 768)
+assert res3["is_recompiled"] == True
+assert manager.recompile_count == 2
+
+print("动态形状分桶与编译缓存管理器验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么 `torch.compile` 中的 `torch._dynamo.mark_dynamic` 能够避免 Guard 爆炸？
+
+当一个维度的数值（例如 Batch Size 或 Prompt 长度）高度动态变化时，如果我们没有显式声明 `mark_dynamic(tensor, dim)`，Dynamo 默认采取什么策略？显式标记为动态维度后，编译器在底层发生了什么转变？
+
+**你的答案：**
+
+### Q2：什么是无填充（Pad-free / Varlen）变长注意力机制？
+
+在处理多张不同长宽比的图像（如视觉语言模型 ViT）或多个变长对话时，传统分桶仍然存在少量的 Padding 冗余。FlashAttention 的 `varlen`（Variable Length）接口是如何利用前缀累加数组（`cu_seqlens`）彻底消除所有补零填充的？
+
+**你的答案：**
+
+### Q3：在 TensorRT 导出中，如何合理设置 Optimization Profile（Min/Opt/Max Shape）？
+
+在将动态模型编译为 TensorRT Engine 时，必须配置 `Profile` 的三元组范围（`kMIN`, `kOPT`, `kMAX`）。如果将 `kMIN` 设得极小（如 1）而 `kMAX` 设得极大（如 4096），为什么会导致优化器在选择最佳 Kernel 策略时严重失准？`kOPT` 的物理意义是什么？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现几何分桶对齐、形状键转换、重编译拦截与缓存命中统计，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述符号维度推导、cu_seqlens 连续展开与 TensorRT Profile 选型因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#dynamic_solution .cell course_role='solution' execution_count=1}
+```python
+class DynamicShapeBucketManager:
+    def __init__(self, buckets=[64, 128, 256, 512, 1024]):
+        self.buckets = sorted(buckets)
+        self.compiled_cache = {}
+        self.recompile_count = 0
+        self.hit_count = 0
+
+    def get_bucket(self, actual_length):
+        for b in self.buckets:
+            if actual_length <= b:
+                return b
+        return None
+
+    def dispatch(self, actual_shape):
+        batch, seq_len, hidden = actual_shape
+        bucket_seq = self.get_bucket(seq_len)
+        if bucket_seq is None:
+            raise ValueError(f"序列长度 {seq_len} 超出最大分桶 {self.buckets[-1]}")
+            
+        dispatched_shape = (batch, bucket_seq, hidden)
+        cache_key = f"b{batch}_s{bucket_seq}_h{hidden}"
+        
+        if cache_key in self.compiled_cache:
+            self.hit_count += 1
+            is_recompiled = False
+        else:
+            self.recompile_count += 1
+            is_recompiled = True
+            # 模拟生成编译图并存入缓存
+            self.compiled_cache[cache_key] = {"kernel_obj": f"compiled_engine_{cache_key}"}
+            
+        return {
+            "dispatched_shape": dispatched_shape,
+            "is_recompiled": is_recompiled,
+            "cache_key": cache_key
+        }
+
+# 验证执行
+manager = DynamicShapeBucketManager(buckets=[64, 128, 256, 512])
+assert manager.get_bucket(50) == 64
+assert manager.get_bucket(64) == 64
+assert manager.get_bucket(65) == 128
+assert manager.get_bucket(600) is None
+
+res1 = manager.dispatch((2, 50, 768))
+assert res1["dispatched_shape"] == (2, 64, 768)
+assert res1["is_recompiled"] == True
+
+res2 = manager.dispatch((2, 60, 768))
+assert res2["dispatched_shape"] == (2, 64, 768)
+assert res2["is_recompiled"] == False
+assert manager.hit_count == 1
+assert manager.recompile_count == 1
+
+res3 = manager.dispatch((2, 110, 768))
+assert res3["dispatched_shape"] == (2, 128, 768)
+assert res3["is_recompiled"] == True
+assert manager.recompile_count == 2
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **默认策略与激进特化（Over-Specialization）**：
+   若未显式标记动态，Dynamo 会在遇到第一个具体形状（如 Batch=3, Seq=128）时，默认将其当成不变常数进行严格特化编译，并生成一条严苛的 Guard：`assert tensor.shape[0] == 3 and tensor.shape[1] == 128`。
+   当下一次输入变为 Batch=4 或 Seq=130 时，Guard 校验失败，Dynamo 被迫再次启动耗时漫长的编译器重新生成一份全新的特化代码。循环往复，导致严重的重编译风暴。
+2. **`mark_dynamic` 建立通用符号图**：
+   显式标记后，Dynamo 强制将该维度实例化为一个抽象符号 $s_0$。生成的编译中间表示（IR）将基于符号代数推导，后续输入只要满足最基本的代数契约（如 $s_0 \ge 1$），便直接复用同一套泛化编译内核，彻底消除 Guard 爆炸。
+
+### Q2 参考答案
+
+1. **传统 Padding 的算力与显存黑洞**：
+   在 Batch 中如果有一个样本长 2048，其余样本长 128，传统做法必须将所有样本全部 Padding 到 2048。在 Self-Attention 计算时，复杂度随序列长度呈平方增长（$L^2$），导致绝大部分矩阵乘算力和显存带宽都在无情计算无效的填充零和掩码。
+2. **`cu_seqlens` 紧凑展开机制**：
+   FlashAttention varlen 接口允许将整个 Batch 内所有有效 Token 连续平铺在一段一维显存中（总长度为 $\sum L_i$），并传入一个前缀和数组 `cu_seqlens = [0, L_1, L_1+L_2, ...]`。
+   GPU 在计算每个 Block 时，根据 `cu_seqlens` 动态定位对应样本的起止偏移，彻底消灭所有无意义的 Padding，在多模态变长场景下将端到端吞吐提升 2~5 倍。
+
+### Q3 参考答案
+
+1. **Optimization Profile 的硬件调优依据**：
+   TensorRT 在构建引擎时，并不是简单翻译算子，而是在目标 GPU 上对各种不同的 Tiling 切分、Warp 配置和算法实现进行实测基准压测（Benchmarking），挑选最快的内核。
+2. **`kOPT`（最优预期形状）的物理锚定**：
+   `kOPT` 是 TensorRT 决定硬件微架构选型（如选择多大的 Shared Memory 瓦片尺寸、分配多少寄存器）的最关键依据。如果将范围设得过宽（如 1 到 4096），而将 `kOPT` 设在 2048，则当实际运行时大量请求是短序列（如 128）时，被选中的大分块内核会导致极差的 SM 活跃度（Occupancy）与极低的效率。合理配置应紧密贴合生产环境 P90 的真实流量分布。
+:::

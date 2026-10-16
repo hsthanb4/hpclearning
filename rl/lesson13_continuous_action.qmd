@@ -1,0 +1,285 @@
+---
+title: "第 13 课：连续动作空间 RL 系统：高斯与 Beta 策略、动作平滑惩罚与动力学约束"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 深刻剖析**大模型离散 Token 强化学习**（PPO / GRPO 面向离散词表）与**机器人/自动驾驶物理连续动作空间强化学习**的数学与系统鸿沟；
+- 深入推导高斯策略（Gaussian Policy）重参数化技巧（Reparameterization Trick）与 Tanh 截断的雅可比行列式对数概率修正（Jacobian Correction）；
+- 掌握避免边界概率死锁的 **Beta 分布策略**与物理紧凑域映射；
+- 掌握物理执行器动力学平滑惩罚（Smoothness Loss）与加速度/急加度（Jerk）约束的工程实现。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（连续高斯策略重参数化采样、Tanh 雅可比修正与动力学平滑惩罚器），并通过测试断言；
+- 三个问答题均说明概率测度变换与物理执行器损伤因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 3 课：策略梯度与基线](lesson03_policy_gradient.qmd)、[第 8 课：SAC：最大熵与温度](lesson08_sac.qmd)。
+- 本课位置：强化学习主线从大模型对齐向具身实体物理控制演进的关键课程。
+
+---
+
+## 核心心智模型
+
+### 1. 离散 Token 概率 vs 连续物理动作空间
+
+在大模型后训练（如 DeepSeek-R1、ChatGPT RLHF）中，策略网络在每一步输出词表大小（$|\mathcal{V}| \approx 128000$）的离散 Softmax 概率分布，采样得到单个整数 Token ID。
+
+但在机械臂或自动驾驶中，动作是**多维实数向量（Continuous Action Vector）**：
+$$a \in [-1.0, 1.0]^D$$
+例如机械臂的 7 个关节目标力矩或转速。如果简单地将连续区间离散化为网格，维度诅咒（Curse of Dimensionality）会导致动作空间呈指数级爆炸（$10^7 = 1000$ 万种组合），策略梯度根本无法收敛！
+
+```{mermaid}
+flowchart TD
+    subgraph ContinuousFlow["连续动作空间强化学习策略建模流水线"]
+        direction TB
+        State["机器人状态观测 s_t (关节角度、传感器)"] --> PolicyNet["连续策略网络 (Actor MLP / Transformer)"]
+        PolicyNet --> OutputMean["预测高斯均值 mu(s) 与对数标准差 log_std(s)"]
+        OutputMean --> Reparam["1. 重参数化采样 (Reparameterization Trick)<br>u = mu + std * epsilon (其中 epsilon ~ N(0, I))"]
+        Reparam --> TanhSquash["2. 物理边界非线性压缩 (Tanh Squashing)<br>a = tanh(u) 强制动作映射在 [-1, 1] 物理区间"]
+        TanhSquash --> LogProbFix["3. 概率测度微积分修正 (Jacobian Determinant)<br>log pi(a; s) = log pi(u; s) - sum(log(1 - a^2))"]
+        LogProbFix --> SmoothReward["4. 动力学防抖惩罚 (Smoothness & Jerk Cost)<br>R_total = R_task - lambda_1 * ||a_t - a_t-1||^2"]
+    end
+```
+<p class="caption" align="center"><em>图 13-1：连续动作空间高斯策略建模、边界压缩与平滑惩罚体系</em></p>
+
+---
+
+### 2. Tanh 边界压缩的数学陷阱：雅可比行列式修正
+
+为了将无界的高斯采样值 $u \in (-\infty, +\infty)$ 限制在真实电机的物理安全范围 $[-1, 1]$ 内，标准做法是使用双曲正切函数：
+$$a = \tanh(u)$$
+
+根据概率论的**随机变量换元定理（Change of Variables Theorem）**，对于非线性单射变换 $a = g(u)$，其概率密度函数满足：
+$$p_A(a) = p_U(u) \cdot \left| \frac{d g(u)}{d u} \right|^{-1}$$
+
+对数概率必须显式扣除雅可比导数项：
+$$\log \pi(a \mid s) = \log \pi(u \mid s) - \sum_{i=1}^D \log\left(1 - \tanh^2(u_i) + \epsilon\right)$$
+
+- **致命警示**：如果漏掉这一项（直接将 $\log \pi(u \mid s)$ 当作实际动作概率），会导致越靠近边界（$a \to \pm 1$）的状态熵被极其严重的病态高估，策略会过早将动作死锁在最大极限位置，导致电机堵转烧毁。
+
+---
+
+## 代码实战：连续动作高斯策略与动力学平滑惩罚器
+
+我们实现一个工业级连续动作空间采样与损失惩罚器，包含重参数化采样、Tanh 边界雅可比修正与时序动作平滑惩罚。
+
+### 练习题描述
+
+补齐 `ContinuousActionPolicy` 类：
+1. `sample_action(mean, log_std)`：
+   - 给定高斯分布参数，使用标准正态噪声生成重参数化隐变量 $u = \mu + \sigma \cdot \epsilon$；
+   - 应用 $a = \tanh(u)$ 将动作压缩至 $[-1, 1]$；
+   - 严格根据概率变换公式，计算正确的对数概率 $\log \pi(a \mid s)$；
+2. `compute_smoothness_penalty(action_history, lambda_smooth=0.1, lambda_jerk=0.05)`：
+   - 输入包含历史几步动作的序列 $[a_{t-2}, a_{t-1}, a_t]$；
+   - 计算一阶差分速度惩罚：$\|a_t - a_{t-1}\|_2^2$；
+   - 计算二阶差分急加度（Jerk）惩罚：$\|a_t - 2a_{t-1} + a_{t-2}\|_2^2$；
+   - 返回加权惩罚损失标量。
+
+::: {#continuous_exercise .cell course_role='exercise'}
+```python
+import numpy as np
+
+class ContinuousActionPolicy:
+    def __init__(self, action_dim=7):
+        self.action_dim = action_dim
+
+    def sample_action(self, mean, log_std, noise=None):
+        """
+        重参数化采样高斯动作并进行 Tanh 雅可比修正。
+        
+        参数:
+        - mean: np.ndarray, 形状 [Batch, Action_Dim]
+        - log_std: np.ndarray, 形状 [Batch, Action_Dim]
+        - noise: np.ndarray or None, 预注入的标准高斯噪声 (用于确定性单测)
+        
+        返回:
+        - action: np.ndarray, 压缩至 [-1, 1] 的物理动作
+        - log_prob: np.ndarray, 形状 [Batch], 修正后的真实对数概率
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def compute_smoothness_penalty(self, action_seq, lambda_smooth=0.1, lambda_jerk=0.05):
+        """
+        计算动作轨迹的一阶平滑与二阶急加度惩罚。
+        action_seq: list of np.ndarray [a_{t-2}, a_{t-1}, a_t], 每个形状 [Action_Dim]
+        返回: float 标量惩罚值
+        """
+        # TODO: YOUR CODE HERE
+        pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+policy = ContinuousActionPolicy(action_dim=2)
+
+mock_mean = np.array([[0.0, 0.5]], dtype=np.float32)
+mock_log_std = np.array([[0.0, -0.5]], dtype=np.float32)  # std 约为 1.0 与 0.6065
+mock_noise = np.array([[0.5, -0.2]], dtype=np.float32)
+
+# 1. 验证采样与 Tanh 截断
+act, log_prob = policy.sample_action(mock_mean, mock_log_std, noise=mock_noise)
+print("采样动作:", act, "对数概率:", log_prob)
+
+assert act.shape == (1, 2)
+assert np.all(act >= -1.0) and np.all(act <= 1.0)
+# 手动推导 u:
+# u[0] = 0.0 + 1.0 * 0.5 = 0.5 -> tanh(0.5) = 0.4621
+# u[1] = 0.5 + exp(-0.5) * (-0.2) = 0.5 - 0.1213 = 0.3787 -> tanh(0.3787) = 0.3616
+assert abs(act[0, 0] - 0.4621) < 1e-3
+assert abs(act[0, 1] - 0.3616) < 1e-3
+
+# 2. 验证平滑度与急加度 (Jerk) 惩罚
+# 构造一段连续跳变的动作历史: [0.0, 0.0] -> [0.1, 0.1] -> [0.5, 0.5] (发生明显突跳)
+a_t2 = np.array([0.0, 0.0])
+a_t1 = np.array([0.1, 0.1])
+a_t0 = np.array([0.5, 0.5])
+
+cost = policy.compute_smoothness_penalty([a_t2, a_t1, a_t0], lambda_smooth=1.0, lambda_jerk=1.0)
+# 一阶差分 (a_t0 - a_t1) = [0.4, 0.4] -> L2平方 = 0.16 + 0.16 = 0.32
+# 二阶差分 (a_t0 - 2*a_t1 + a_t2) = [0.5-0.2, 0.5-0.2] = [0.3, 0.3] -> L2平方 = 0.09 + 0.09 = 0.18
+# 总惩罚 = 1.0 * 0.32 + 1.0 * 0.18 = 0.50
+print("计算出的平滑与急加度惩罚:", cost)
+assert abs(cost - 0.50) < 1e-4
+
+print("连续动作空间策略与动力学惩罚器验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么连续动作策略中，Beta 分布往往比 Tanh 高斯分布更能避免“边界死锁”？
+
+当物理动作被天然限制在有限紧凑区间 $[a_{\min}, a_{\max}]$ 时，Tanh 高斯策略在接近边界 $\pm 1$ 时梯度极其平坦；而基于两个正形状参数 $\alpha, \beta > 1$ 的 Beta 分布在定义域天然有界，它是如何在数学上从根源消除雅可比修正奇点和梯度消失的？
+
+**你的答案：**
+
+### Q2：在端到端强化学习中，如果不加动力学平滑惩罚，智能体会学出什么病态策略？
+
+在机械臂插拔或机器人行走任务中，如果仅仅给予最终任务奖励（如“成功插入目标孔隙得 +100 分”），智能体策略往往会输出极其高频的“Bang-Bang 控制”（即在极短时间内在 $+1$ 和 $-1$ 最大极限值之间剧烈抖动切换）。为什么这种策略在仿真中能得分但在物理真机上一秒就会烧毁电机？
+
+**你的答案：**
+
+### Q3：如何将连续动作策略网络在 GPU 向量化环境（如 Isaac Gym）中进行大规模并行采样？
+
+在管理上万个并发仿真的 GPU 强化学习集群中，Actor 采样如何利用同一个 PyTorch Tensor 消除所有 CPU 循环？为什么说“状态收集、策略推理、物理步进与奖励计算全在同一张 GPU 显存内闭环”是现代具身强化学习吞吐暴涨 1000 倍的核心秘诀？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现高斯重参数化、Tanh 换元雅可比修正与一阶二阶差分动力学惩罚，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述边界概率测度变换、Bang-Bang 控制危害与 GPU 全片上闭环因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#continuous_solution .cell course_role='solution' execution_count=1}
+```python
+class ContinuousActionPolicy:
+    def __init__(self, action_dim=7):
+        self.action_dim = action_dim
+
+    def sample_action(self, mean, log_std, noise=None):
+        std = np.exp(log_std)
+        if noise is None:
+            noise = np.random.normal(0, 1.0, size=mean.shape)
+            
+        # 1. 重参数化高斯隐变量: u = mean + std * noise
+        u = mean + std * noise
+        
+        # 2. 非线性 Tanh 压缩至 [-1, 1] 物理区间
+        action = np.tanh(u)
+        
+        # 3. 高斯未压缩对数概率 log p(u)
+        # log N(u; mu, sigma) = -0.5 * [ ((u-mu)/sigma)^2 + 2*log_std + log(2*pi) ]
+        var = np.square(std)
+        log_prob_u = -0.5 * (np.square(u - mean) / var + 2.0 * log_std + np.log(2.0 * np.pi))
+        log_prob_u = np.sum(log_prob_u, axis=-1)  # 对动作各维度求和
+        
+        # 4. 换元定理雅可比行列式微积分修正: - sum( log(1 - a^2 + eps) )
+        # 引入 1e-6 防止边界 a = +-1 时 log(0) 产生 -inf
+        jacobian_term = np.sum(np.log(np.clip(1.0 - np.square(action), 1e-6, 1.0)), axis=-1)
+        
+        # 真实动作对数概率
+        log_prob = log_prob_u - jacobian_term
+        return action, log_prob
+
+    def compute_smoothness_penalty(self, action_seq, lambda_smooth=0.1, lambda_jerk=0.05):
+        assert len(action_seq) >= 3, "需要至少 3 步历史动作计算一阶与二阶差分"
+        a_t2, a_t1, a_t0 = action_seq[-3], action_seq[-2], action_seq[-1]
+        
+        # 一阶差分速度变化: ||a_t - a_{t-1}||^2
+        diff1 = a_t0 - a_t1
+        smooth_loss = np.sum(np.square(diff1))
+        
+        # 二阶差分加速度/急加度变化 (Jerk): ||a_t - 2*a_{t-1} + a_{t-2}||^2
+        diff2 = a_t0 - 2.0 * a_t1 + a_t2
+        jerk_loss = np.sum(np.square(diff2))
+        
+        total_cost = float(lambda_smooth * smooth_loss + lambda_jerk * jerk_loss)
+        return total_cost
+
+# 验证执行
+policy = ContinuousActionPolicy(action_dim=2)
+mock_mean = np.array([[0.0, 0.5]], dtype=np.float32)
+mock_log_std = np.array([[0.0, -0.5]], dtype=np.float32)
+mock_noise = np.array([[0.5, -0.2]], dtype=np.float32)
+
+act, log_prob = policy.sample_action(mock_mean, mock_log_std, noise=mock_noise)
+assert act.shape == (1, 2)
+assert np.all(act >= -1.0) and np.all(act <= 1.0)
+assert abs(act[0, 0] - 0.4621) < 1e-3
+assert abs(act[0, 1] - 0.3616) < 1e-3
+
+a_t2 = np.array([0.0, 0.0])
+a_t1 = np.array([0.1, 0.1])
+a_t0 = np.array([0.5, 0.5])
+cost = policy.compute_smoothness_penalty([a_t2, a_t1, a_t0], lambda_smooth=1.0, lambda_jerk=1.0)
+assert abs(cost - 0.50) < 1e-4
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **Tanh 高斯的边界数值饱和与对数奇点**：
+   当高斯隐变量 $|u| > 3$ 时，$\tanh(u)$ 极速逼近 $\pm 1$。此时其导数 $1 - \tanh^2(u) \to 0$。在微积分雅可比修正项 $-\log(1 - a^2)$ 中，真数接近 0 导致修正项趋于负无穷大。在反向传播时，梯度极易发生极端截断，导致策略一旦陷入动作边界就无法再通过梯度更新探索内部区域。
+2. **Beta 分布的原生有界性与良好梯度**：
+   Beta 分布天然定义在闭区间 $[0, 1]$ 上（可通过线性仿射缩放到 $[-1, 1]$）。它由两个正数参数 $\alpha, \beta$ 完全确定。无论参数如何变化，其支撑集始终严格在紧凑域内部，完全不需要经过非线性的 Tanh 压缩，因而彻底免除了雅可比行列式修正项，消除了数值奇点与边界饱和死锁。
+
+### Q2 参考答案
+
+1. **仿真物理引擎的时间步离散缺陷**：
+   在物理仿真器（如 MuJoCo 或 Isaac Sim）中，时间以离散步长（如 20ms）积分。如果神经网络在每一步直接给出最大正向力矩 $+1.0$，下一步给出最大反向力矩 $-1.0$（即 Bang-Bang 控制），在数学上能够以最快速度克服刚体惯性，从而在不考虑物理损耗的仿真中刷出极高的目标达成奖励。
+2. **真实电机的物理毁灭**：
+   物理电机的电感和磁通具有响应时间，机械齿轮之间存在微小的啮合间隙（Backlash）。高频的极值反转会在齿轮齿面上产生剧烈的刚性撞击（冲击力可达额定力矩的数十倍），导致减速器齿轮瞬间崩齿断裂，驱动器功率 MOSFET 管因反向电动势过流击穿烧毁。加入一阶平滑与二阶急加度（Jerk）惩罚，能够强制网络学习出符合物理动力学规律的平滑加减速曲线。
+
+### Q3 参考答案
+
+1. **传统 CPU 仿真调度的严重跨总线瓶颈**：
+   传统强化学习（如旧版 Gym）每个仿真环境运行在 CPU 上，每一步需要：`CPU 模拟物理 -> PCIe 上传状态 -> GPU 网络推理 -> PCIe 下载动作 -> CPU 推进仿真`。对于数千个环境，PCIe 搬运与 CPU 线程调度开销吃掉了 95% 以上的时间，GPU 计算核利用率不足 5%。
+2. **GPU 原生全片上物理仿真闭环（GPU-native Rollout）**：
+   现代 GPU 仿真框架（如 Isaac Gym、Isaac Lab、MuJoCo XLA）直接将上万个机器人刚体关节物理引擎完全写为 CUDA 内核并部署在 GPU 显存中。
+   每一步的观测状态张量 `obs` 直接保存在 GPU HBM 中，Actor 网络直接以批处理形式原地前向推理，输出的动作张量 `actions` 零拷贝直接送入下一个物理步进 CUDA 内核。全程零 PCIe 往返、零 CPU 介入，使得环境交互吞吐直接突破每秒数十万帧！
+:::

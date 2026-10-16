@@ -1,0 +1,309 @@
+---
+title: "第 10 课：跨进程共享内存（IPC）生命周期管理与防泄漏机制"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 深入掌握自动驾驶与具身机器人多进程架构（感知、时空融合、规控策略）下的 **CUDA 跨进程共享内存（CUDA IPC）** 机制；
+- 搞清 `cudaIpcMemHandle_t`、`cudaIpcOpenMemHandle` 与 `cudaIpcCloseMemHandle` 的底层驱动映射原理；
+- 彻底破解工业界高频出现的“Python 垃圾回收延迟”、“进程异常退出孤儿句柄”引发的 GPU 显存静默泄漏危机；
+- 掌握设计生产级跨进程引用计数守护与 RAII 自动闭合安全管理器的实战范式。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（带跨进程引用计数与孤儿句柄自愈的 IPC 显存生命周期管理器），并通过测试断言；
+- 三个问答题均说明驱动级引用计数与内存映射因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 7 课：Profiler、Timeline 与 CUDA Allocator](lesson07.qmd)、操作系统进程间通信与虚拟地址空间。
+- 本课位置：自动驾驶车载感知与端侧具身智能微秒级多进程零拷贝通信的最核心运行时支柱。
+
+---
+
+## 核心心智模型
+
+### 1. 为什么车载与机器人系统必须采用 CUDA IPC？
+
+在自动驾驶（如激光雷达感知 + 视觉 BEV + 轨迹规划）或双臂具身机器人系统中，系统通常被拆分为多个解耦的独立操作系统进程：
+
+```{mermaid}
+flowchart LR
+    subgraph MultiProcSys["典型车载/机器人端到端多进程架构"]
+        direction LR
+        P1["感知进程 (Perception)<br>输出 3D 障碍物与 BEV 特征图"]
+        P2["时空融合与世界模型<br>输出占用栅格 (Occupancy Grid)"]
+        P3["规控策略 (Flow Matching Policy)<br>输出 16 步高频连续控制轨迹"]
+    end
+    P1 ===>|"传统 CPU Socket 转发: 延迟 15~30ms (不可接受!)"| P2
+    P2 ===>|"传统 CPU Socket 转发: 延迟 15~30ms (不可接受!)"| P3
+```
+<p class="caption" align="center"><em>图 10-1：多进程通信的传统网络/CPU 内存拷贝瓶颈</em></p>
+
+如果通过传统的 CPU 共享内存（`shm`）或 Socket 传输，庞大的特征图和点云数据需要经历：`GPU 显存 -> PCIe -> CPU 内存 -> IPC 拷贝 -> PCIe -> 下游 GPU 显存`，端到端延迟高达数十毫秒，直接导致控制滞后发生物理碰撞。
+
+**CUDA IPC（Inter-Process Communication）** 允许生产者进程直接将一段物理显存的全局句柄（64 字节的 `cudaIpcMemHandle_t`）传递给消费者进程；消费者调用 `cudaIpcOpenMemHandle`，驱动便将该段物理显存**直接映射到消费者的虚拟地址空间中**，实现绝对意义上的**零拷贝（Zero-Copy）、零 PCIe 搬运、微秒级直接访问**！
+
+---
+
+### 2. 致命隐患：驱动级锁死与静默显存泄漏
+
+CUDA IPC 的强大之处伴随着极高的系统级风险：
+
+```{mermaid}
+flowchart TD
+    subgraph IPC_Leak_Anatomy["CUDA IPC 跨进程静默显存泄漏因果链"]
+        direction TB
+        Alloc["1. 生产者在 GPU 上分配 2GB 物理显存<br>生成 cudaIpcMemHandle_t 传给消费者"] --> ConsumerOpen["2. 消费者调用 cudaIpcOpenMemHandle<br>驱动将物理显存引用计数 +1"]
+        ConsumerOpen --> ProducerDel["3. 生产者业务结束，调用 del tensor 并 empty_cache()<br>生产者试图释放这 2GB 显存"]
+        ProducerDel --> DriverBlock{"4. NVIDIA 驱动检查物理块引用计数:<br>发现消费者映射仍处于 Open 状态！"}
+        DriverBlock --> Stalled["5. 驱动强制拒绝释放物理显存！<br>显存被死锁，无法回收重用"]
+        Stalled --> OOM["6. 几千次推理循环后，端侧 GPU 显存枯竭 (OOM Crash)"]
+    end
+```
+<p class="caption" align="center"><em>图 10-2：CUDA IPC 跨进程引用未释放导致的显存永久死锁</em></p>
+
+- **泄漏三大罪魁祸首**：
+  1. **Python 循环引用与 GC 延迟**：消费者用完 Tensor 后没有立即显式销毁，Python 的 GC 延迟回收，导致 `cudaIpcCloseMemHandle` 迟迟未被触发；
+  2. **消费者进程偶发崩溃（Crash）**：消费者因为其他原因被操作系统杀死（如 OOM Killer），未来得及调用关闭指令，导致该显存段在驱动中成为**永久孤儿（Orphan Memory）**；
+  3. **PyTorch Caching Allocator 干扰**：PyTorch 自身的显存池并不感知外部进程何时关闭映射，导致内部地址簿失步。
+
+---
+
+## 代码实战：生产级 IPC 共享内存生命周期管理器
+
+我们设计一个线程安全且具备跨进程引用计数守护与孤儿句柄回收能力的 IPC 生命周期管理器。
+
+### 练习题描述
+
+补齐 `IPCMemoryManager` 类：
+1. `allocate_and_share(tensor_id, size_bytes)`：
+   - 生产者开辟一块显存，生成唯一的 IPC 句柄，初始化系统全局引用计数为 1；
+2. `acquire_handle(handle_id, consumer_pid)`：
+   - 消费者进程声明获取该显存，驱动级引用计数原子增加 1，记录该消费者的映射；
+3. `release_handle(handle_id, consumer_pid)`：
+   - 消费者进程声明用完该显存，驱动级引用计数减 1，注销该消费者的映射；若引用计数归 0，触发真正的底层显存释放；
+4. `reap_dead_processes(active_pids)`：
+   - 看门狗例程：比对当前系统活跃进程 PID，若发现已崩溃死亡的 PID 仍持有未关闭的句柄，强制将其引用剔除并清理，防止显存永久泄漏。
+
+::: {#ipc_exercise .cell course_role='exercise'}
+```python
+class IPCMemoryManager:
+    def __init__(self):
+        # 记录物理显存分配: {tensor_id: {"size": int, "ref_count": int, "consumers": set()}}
+        self.registry = {}
+        self.total_allocated_bytes = 0
+
+    def allocate_and_share(self, tensor_id, size_bytes):
+        """
+        生产者分配物理显存并发布句柄。
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def acquire_handle(self, tensor_id, consumer_pid):
+        """
+        消费者进程映射句柄，引用计数递增。
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def release_handle(self, tensor_id, consumer_pid):
+        """
+        消费者进程关闭映射，引用计数递减。若归零则释放物理显存。
+        返回: is_freed: bool, 物理显存是否真正被释放
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def reap_dead_processes(self, active_pids):
+        """
+        孤儿句柄看门狗：清理已死亡进程持有的句柄。
+        返回: 强制清理释放的张量 ID 列表
+        """
+        # TODO: YOUR CODE HERE
+        pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+mgr = IPCMemoryManager()
+
+# 1. 生产者发布两块显存（各 1GB）
+mgr.allocate_and_share("bev_feature_map", size_bytes=1024 * 1024 * 1024)
+mgr.allocate_and_share("point_cloud_voxels", size_bytes=1024 * 1024 * 1024)
+assert mgr.total_allocated_bytes == 2 * 1024 * 1024 * 1024
+
+# 2. 消费者进程 (PID 1001, 1002) 映射 bev_feature_map
+mgr.acquire_handle("bev_feature_map", consumer_pid=1001)
+mgr.acquire_handle("bev_feature_map", consumer_pid=1002)
+assert mgr.registry["bev_feature_map"]["ref_count"] == 3  # 生产者(1) + 两个消费者(2)
+
+# 3. 正常释放流：PID 1001 释放
+freed = mgr.release_handle("bev_feature_map", consumer_pid=1001)
+assert freed == False
+assert mgr.registry["bev_feature_map"]["ref_count"] == 2
+
+# 4. 模拟进程异常崩溃与孤儿回收：PID 1002 意外崩溃死亡
+# 生产者自身也完成生命周期声明释放 (模拟生产者退出自身持有)
+mgr.release_handle("bev_feature_map", consumer_pid="producer")
+# 此时仍剩已死亡的 PID 1002 持有，如果不做处理就会泄漏！
+assert "bev_feature_map" in mgr.registry
+
+# 运行看门狗清理 (当前只有 PID 2000 活着，1002 已死)
+reaped = mgr.reap_dead_processes(active_pids={2000})
+assert "bev_feature_map" in reaped
+assert "bev_feature_map" not in mgr.registry
+assert mgr.total_allocated_bytes == 1024 * 1024 * 1024  # 仅剩 point_cloud_voxels
+
+print("IPC 跨进程显存生命周期与孤儿回收管理器验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么 `cudaIpcCloseMemHandle` 必须严格在对应的 CUDA Context 中调用？
+
+如果消费者进程在多个不同 GPU 设备（如 Device 0 和 Device 1）之间切换，若在当前激活为 Device 1 的线程上下文中试图关闭一个在 Device 0 上打开的 IPC 指针，CUDA 运行时会报什么错误？这要求多卡框架如何设计线程局部上下文？
+
+**你的答案：**
+
+### Q2：PyTorch 的 `torch.multiprocessing` 在 Linux 上默认采用哪种共享策略？
+
+对比 `'file_descriptor'` 与 `'file_system'` 两种跨进程张量传递策略，为什么高并发训练/推理系统必须将共享策略显式配置为 `torch.multiprocessing.set_sharing_strategy('file_system')` 以避免系统报 `Too many open files` 错误？
+
+**你的答案：**
+
+### Q3：如何实现跨进程的 CUDA Stream 事件同步（IPC Event）？
+
+在生产者写入共享显存后，消费者如何确信数据已经完全写入完毕且 Cache 已刷写，而无需使用昂贵的 CPU 信号量或全局睡眠等待？`cudaIpcGetEventHandle` 与 `cudaIpcOpenEventHandle` 是如何配合完成纯 GPU 硬件级微秒同步的？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确处理跨进程引用计数递增递减、进程集合维护与孤儿死亡进程检测释放，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述驱动级 Context、跨进程 Event 与 OS 文件描述符因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#ipc_solution .cell course_role='solution' execution_count=1}
+```python
+class IPCMemoryManager:
+    def __init__(self):
+        self.registry = {}
+        self.total_allocated_bytes = 0
+
+    def allocate_and_share(self, tensor_id, size_bytes):
+        if tensor_id in self.registry:
+            raise ValueError(f"张量 {tensor_id} 已经分配！")
+        self.registry[tensor_id] = {
+            "size": size_bytes,
+            "ref_count": 1,                     # 生产者自身持有 1
+            "consumers": {"producer"}           # 登记持有者集合
+        }
+        self.total_allocated_bytes += size_bytes
+
+    def acquire_handle(self, tensor_id, consumer_pid):
+        if tensor_id not in self.registry:
+            raise KeyError(f"张量 {tensor_id} 不存在！")
+        info = self.registry[tensor_id]
+        if consumer_pid not in info["consumers"]:
+            info["consumers"].add(consumer_pid)
+            info["ref_count"] += 1
+
+    def release_handle(self, tensor_id, consumer_pid):
+        if tensor_id not in self.registry:
+            return True
+        info = self.registry[tensor_id]
+        if consumer_pid in info["consumers"]:
+            info["consumers"].remove(consumer_pid)
+            info["ref_count"] -= 1
+            
+        if info["ref_count"] <= 0:
+            # 物理显存彻底释放
+            self.total_allocated_bytes -= info["size"]
+            del self.registry[tensor_id]
+            return True
+        return False
+
+    def reap_dead_processes(self, active_pids):
+        reaped_tensors = []
+        for tensor_id in list(self.registry.keys()):
+            info = self.registry[tensor_id]
+            dead_consumers = [pid for pid in info["consumers"] if pid != "producer" and pid not in active_pids]
+            for dead_pid in dead_consumers:
+                info["consumers"].remove(dead_pid)
+                info["ref_count"] -= 1
+                
+            if info["ref_count"] <= 0:
+                self.total_allocated_bytes -= info["size"]
+                del self.registry[tensor_id]
+                reaped_tensors.append(tensor_id)
+                
+        return reaped_tensors
+
+# 验证执行
+mgr = IPCMemoryManager()
+mgr.allocate_and_share("bev_feature_map", size_bytes=1024 * 1024 * 1024)
+mgr.allocate_and_share("point_cloud_voxels", size_bytes=1024 * 1024 * 1024)
+assert mgr.total_allocated_bytes == 2 * 1024 * 1024 * 1024
+
+mgr.acquire_handle("bev_feature_map", consumer_pid=1001)
+mgr.acquire_handle("bev_feature_map", consumer_pid=1002)
+assert mgr.registry["bev_feature_map"]["ref_count"] == 3
+
+freed = mgr.release_handle("bev_feature_map", consumer_pid=1001)
+assert freed == False
+assert mgr.registry["bev_feature_map"]["ref_count"] == 2
+
+mgr.release_handle("bev_feature_map", consumer_pid="producer")
+assert "bev_feature_map" in mgr.registry
+
+reaped = mgr.reap_dead_processes(active_pids={2000})
+assert "bev_feature_map" in reaped
+assert "bev_feature_map" not in mgr.registry
+assert mgr.total_allocated_bytes == 1024 * 1024 * 1024
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **CUDA 虚拟内存驱动层上下文绑定**：
+   在 CUDA 架构中，物理显存的虚拟指针与其所在的 Primary Context 紧密绑定。`cudaIpcOpenMemHandle` 返回的虚拟地址只在分配该内存的特定物理设备上下文空间中有意义。
+2. **跨设备上下文错位错误**：
+   若当前活动上下文处于 Device 1，调用针对 Device 0 内存的 `cudaIpcCloseMemHandle`，CUDA 驱动由于无法在当前上下文页表中定位该虚拟映射，会立刻抛出 `cudaErrorInvalidValue` 或 `cudaErrorContextIsDestroyed` 致命异常，导致显存无法解绑并破坏后续内存池管理。因此，多卡多线程必须通过 `cudaSetDevice(target_gpu)` 确保上下文与目标指针物理归属严格一致。
+
+### Q2 参考答案
+
+1. **`file_descriptor` 策略的文件描述符耗尽**：
+   默认的 `'file_descriptor'` 策略在多进程传递张量时，会为每一个共享张量生成并传递一个底层的 OS 文件描述符（FD）。在复杂网络中，每个 Batch 可能包含数百个张量切片，经过几千次迭代，打开的 FD 数量极速累计，迅速击穿 Linux 系统的 `ulimit -n` 上限，报 `RuntimeError: Too many open files` 异常崩溃。
+2. **`file_system` 策略的全局共享文件空间**：
+   切换为 `'file_system'` 策略后，PyTorch 改为利用共享文件句柄与 `/dev/shm` 内存映射文件管理生命周期，不再为每个小张量霸占独立的 FD 槽位，彻底规避了句柄耗尽崩溃，是生产级高并发多进程的首选配置。
+
+### Q3 参考答案
+
+1. **纯片上硬件级跨进程 Event（IPC Event）**：
+   CUDA 提供了与 IPC 内存对应的 `cudaIpcEventHandle_t`。生产者进程在完成写入操作的 CUDA Stream 上调用 `cudaEventRecord(write_done_event, stream)`，并通过 `cudaIpcGetEventHandle` 导出句柄发送给消费者。
+2. **零 CPU 轮询的硬件流等待（Hardware Wait）**：
+   消费者进程通过 `cudaIpcOpenEventHandle` 将句柄导入为本地 Event 对象，然后在消费者的计算 Stream 上调用 `cudaStreamWaitEvent(consumer_stream, write_done_event)`。
+   这一同步完全由 GPU 芯片内部的硬件调度器执行，硬件检测到依赖就绪后自动启动消费者 Kernel，CPU 完全不参与轮询，时延从毫秒级降低至纳秒级。
+:::

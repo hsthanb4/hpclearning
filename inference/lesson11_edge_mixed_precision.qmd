@@ -1,0 +1,303 @@
+---
+title: "第 11 课：端侧混合精度部署：FP16/INT8/W4A8/FP4 量化对齐与延迟控制"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 掌握车载计算平台（如 NVIDIA Drive Orin / Thor）与机器人边缘计算单元的功耗、显存带宽与热节流（Thermal Throttling）刚性约束；
+- 搞懂为什么“一刀切全量低精度量化（Uniform INT8/FP4）”在自动驾驶与具身机器人控制中会导致灾难性失控；
+- 掌握基于**层敏感度分析（Layer Sensitivity Profiling）**与信噪比（SNR）的分级混合精度（Mixed-Precision）工程落地范式；
+- 掌握跨精度算子边界的数据类型转换（Cast Overhead）消除与确定性低时延控制策略。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（端侧混合精度敏感度分析与自动精度分级配置器），并通过测试断言；
+- 三个问答题均说明端侧硬件算力单元与精度敏感度的因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 6 课：量化源码走读](lesson06.qmd)、[CUDA：第 17 课 硬件感知量化算子](../cuda/lesson17_qat_operators.qmd)。
+- 本课位置：深入边缘车载芯片与移动机器人端侧部署落地最后一公里的关键课程。
+
+---
+
+## 核心心智模型
+
+### 1. 端侧计算平台的严苛物理限制
+
+不同于数据中心集群（单机 8 卡拥有上万瓦供电、80GB HBM 显存与数 TB/s 带宽），自动驾驶车载芯片与机器人本体计算单元面临极致的物理限制：
+- **热设计功耗（TDP）严格受限**：通常仅有 15W ~ 60W，长时间高负荷运转极易触发硬件级**热节流（Thermal Throttling）**，导致 GPU 自动降频、推理时延翻倍甚至丢帧；
+- **显存带宽极度稀缺**：使用的是低功耗 LPDDR5 内存，物理带宽通常仅 100~200 GB/s（只有数据中心 H100 的十分之一），任何 Memory-bound 访存瓶颈在端侧都会被无限放大。
+
+因此，将模型权重与激活压至 INT8、W4A8 乃至 FP4，是**降低显存带宽压力、翻倍有效算力、控制发热功耗的唯一必由之路**。
+
+---
+
+### 2. “一刀切全量量化”的致命陷阱与分级混合精度
+
+如果简单粗暴地将网络中所有层全部转为 INT8 或 INT4：
+- **感知端**：激光雷达小目标（远距离行人、锥桶）在初层卷积量化后特征彻底被截断丢失；
+- **控制端**：最终的 Action Head（连续动作头）如果被 INT8 截断，关节力矩输出将出现阶梯状跳变，导致机械臂在物理接触时剧烈震颤。
+
+工业级成熟落地的解法是**分级混合精度（Mixed-Precision Allocation）**：
+
+```{mermaid}
+flowchart LR
+    subgraph MixedPrec["端侧工业级分级混合精度架构"]
+        direction TB
+        InputLayer["1. 输入前置层 (Point Cloud / Image Stem)<br>敏感度极高！保留 FP16 / BF16"]
+        InputLayer --> DeepBlocks["2. 深层骨干网 (Transformer Backbone / FFN)<br>参数量巨大 (占 80%)，但容忍度高<br>激进量化为 INT8 / W4A8 / FP4"]
+        DeepBlocks --> ActionHead["3. 最终控制头 (Continuous Action Head / 3D BBox)<br>敏感度极高！保留 FP16 浮点高精度"]
+    end
+```
+<p class="caption" align="center"><em>图 11-1：端侧端到端模型分级混合精度部署方案</em></p>
+
+- **敏感度准则**：通过自动化分析各层在量化扰动下的**输出信噪比（SNR）或余弦相似度降幅**，对不同层分别指派最激进但精度安全的精度格式；
+- **避免类型频繁转换（Cast Overhead）**：相邻算子如果反复在 `FP16 -> INT8 -> FP16 -> INT8` 之间来回转换，其格式转换算子的耗时会彻底吃掉量化带来的计算收益。必须以“Block”为粒度成组量化，最小化边界转换。
+
+---
+
+## 代码实战：端侧混合精度敏感度分析与自动精度配置器
+
+我们实现一个工业级混合精度分析器，根据各层量化后的敏感度得分与算力节省预算，自动输出最优的分层精度分配方案。
+
+### 练习题描述
+
+补齐 `EdgeMixedPrecisionOptimizer` 类：
+1. `calculate_layer_sensitivity(fp_tensor, quantized_tensor)`：
+   - 计算量化前后张量的相对误差扰动率（$\text{Relative Error} = \frac{\|x - \hat{x}\|_2}{\|x\|_2 + \epsilon}$）；
+2. `assign_precisions(layer_sensitivities, sensitivity_threshold_high, sensitivity_threshold_low)`：
+   - 根据敏感度得分自动指派精度级别：
+     - 若相对误差 $\ge \text{threshold\_high}$（极度敏感层）：指派 `"FP16"`；
+     - 若相对误差介于阈值之间：指派 `"INT8"`；
+     - 若相对误差 $\le \text{threshold\_low}$（极不敏感层）：指派更激进的 `"W4A8"`；
+3. `calculate_compression_ratio(layer_weights_mb, layer_precisions)`：
+   - 根据各层参数大小与指派的精度，计算压缩后的总显存大小及整体压缩比。
+
+::: {#mixed_prec_exercise .cell course_role='exercise'}
+```python
+import numpy as np
+
+class EdgeMixedPrecisionOptimizer:
+    def __init__(self):
+        # 格式对应的相对字节权重 (相对于 FP16 为基准 1.0)
+        self.bit_scale = {
+            "FP16": 1.0,    # 16-bit
+            "INT8": 0.5,    # 8-bit
+            "W4A8": 0.25    # 权重 4-bit, 激活 8-bit (权重大头压至 25%)
+        }
+
+    def calculate_layer_sensitivity(self, fp_tensor, quantized_tensor):
+        """
+        计算单层的相对量化误差敏感度得分。
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def assign_precisions(self, layer_sensitivities, thresh_high=0.15, thresh_low=0.03):
+        """
+        根据敏感度字典输出各层的最优量化格式指派。
+        返回: dict of {layer_name: precision_str}
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def calculate_compression_ratio(self, layer_weights_mb, layer_precisions):
+        """
+        计算模型压缩前后总显存大小 (MB) 及压缩倍率。
+        返回: (original_mb: float, compressed_mb: float, speedup_ratio: float)
+        """
+        # TODO: YOUR CODE HERE
+        pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+optimizer = EdgeMixedPrecisionOptimizer()
+
+# 1. 验证敏感度计算
+fp_mock = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+q_mock = np.array([1.05, 2.0, 2.95, 4.0], dtype=np.float32)
+sens = optimizer.calculate_layer_sensitivity(fp_mock, q_mock)
+# 相对误差约 0.0129
+assert abs(sens - 0.0129) < 1e-3
+
+# 2. 模拟一个包含三阶段的典型端到端模型
+# Stem 初层敏感度高(0.20)，Backbone 中间层敏感度低(0.02)，Action Head 敏感度极高(0.35)
+mock_sens = {
+    "vision_stem": 0.20,
+    "backbone_block1": 0.02,
+    "backbone_block2": 0.025,
+    "backbone_block3": 0.08,  # 中等敏感度
+    "action_head": 0.35
+}
+
+precisions = optimizer.assign_precisions(mock_sens, thresh_high=0.15, thresh_low=0.03)
+print("分层精度指派结果:", precisions)
+assert precisions["vision_stem"] == "FP16"
+assert precisions["backbone_block1"] == "W4A8"
+assert precisions["backbone_block2"] == "W4A8"
+assert precisions["backbone_block3"] == "INT8"
+assert precisions["action_head"] == "FP16"
+
+# 3. 统计显存压缩收益
+mock_sizes_mb = {
+    "vision_stem": 50.0,
+    "backbone_block1": 400.0,
+    "backbone_block2": 400.0,
+    "backbone_block3": 400.0,
+    "action_head": 50.0
+}
+orig, comp, ratio = optimizer.calculate_compression_ratio(mock_sizes_mb, precisions)
+print(f"原始显存: {orig} MB, 压缩后: {comp} MB, 压缩倍率: {ratio:.2f}x")
+# 原始总和: 1300 MB
+# 压缩后: 50*1.0 + 400*0.25 + 400*0.25 + 400*0.5 + 50*1.0 = 50 + 100 + 100 + 200 + 50 = 500 MB
+assert abs(orig - 1300.0) < 1e-4
+assert abs(comp - 500.0) < 1e-4
+assert abs(ratio - 2.6) < 0.1
+print("端侧混合精度敏感度分析与配置器验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么在车载端侧芯片上，相邻算子频繁发生精度转换（Cast）会彻底抹平量化收益？
+
+如果在计算图上交替安排 `Layer1(INT8) -> Layer2(FP16) -> Layer3(INT8)`，GPU 硬件在每两层之间必须插入 `Reformat / Cast` 算子。在 Orin / Thor 芯片架构中，这些格式转换内核为什么是纯粹的显存带宽吞噬者？
+
+**你的答案：**
+
+### Q2：如何防止端侧芯片发生热节流（Thermal Throttling）导致的时延抖动？
+
+在炎热夏季或长时间闭环自动驾驶行驶中，如果车载 SoC 芯片结温突破 90℃，硬件温度控制单元（DVFS）会做出什么反应？算法工程师如何通过功耗感知调度（Power-Aware Capping）与轻量化混合精度稳定住时钟频率？
+
+**你的答案：**
+
+### Q3：自动驾驶规划（Planning）模型采用 INT8 量化时，最容易出现什么Corner Case？
+
+在极端长尾工况（例如前方道路突然出现施工路障、极小概率需要紧急避让的极限曲率弯道）下，为什么经过均匀量化的轨迹规划网络最容易输出荒谬的“失控直行”指令？工业界对此有何双重校验守卫机制？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现相对敏感度扰动推导、分层三级精度指派与加权压缩比统计，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述格式转换微架构开销、热节流硬件机制与安全守卫因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#mixed_prec_solution .cell course_role='solution' execution_count=1}
+```python
+class EdgeMixedPrecisionOptimizer:
+    def __init__(self):
+        self.bit_scale = {
+            "FP16": 1.0,
+            "INT8": 0.5,
+            "W4A8": 0.25
+        }
+
+    def calculate_layer_sensitivity(self, fp_tensor, quantized_tensor):
+        diff = fp_tensor - quantized_tensor
+        norm_diff = np.linalg.norm(diff)
+        norm_orig = np.linalg.norm(fp_tensor)
+        sensitivity = float(norm_diff / (norm_orig + 1e-12))
+        return sensitivity
+
+    def assign_precisions(self, layer_sensitivities, thresh_high=0.15, thresh_low=0.03):
+        precisions = {}
+        for layer_name, sens in layer_sensitivities.items():
+            if sens >= thresh_high:
+                precisions[layer_name] = "FP16"
+            elif sens <= thresh_low:
+                precisions[layer_name] = "W4A8"
+            else:
+                precisions[layer_name] = "INT8"
+        return precisions
+
+    def calculate_compression_ratio(self, layer_weights_mb, layer_precisions):
+        original_mb = sum(layer_weights_mb.values())
+        compressed_mb = 0.0
+        
+        for layer_name, orig_mb in layer_weights_mb.items():
+            prec = layer_precisions.get(layer_name, "FP16")
+            scale = self.bit_scale.get(prec, 1.0)
+            compressed_mb += (orig_mb * scale)
+            
+        speedup_ratio = float(original_mb / compressed_mb) if compressed_mb > 0 else 1.0
+        return float(original_mb), float(compressed_mb), speedup_ratio
+
+# 验证执行
+optimizer = EdgeMixedPrecisionOptimizer()
+fp_mock = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+q_mock = np.array([1.05, 2.0, 2.95, 4.0], dtype=np.float32)
+sens = optimizer.calculate_layer_sensitivity(fp_mock, q_mock)
+assert abs(sens - 0.0129) < 1e-3
+
+mock_sens = {
+    "vision_stem": 0.20,
+    "backbone_block1": 0.02,
+    "backbone_block2": 0.025,
+    "backbone_block3": 0.08,
+    "action_head": 0.35
+}
+precisions = optimizer.assign_precisions(mock_sens, thresh_high=0.15, thresh_low=0.03)
+assert precisions["vision_stem"] == "FP16"
+assert precisions["backbone_block1"] == "W4A8"
+assert precisions["backbone_block2"] == "W4A8"
+assert precisions["backbone_block3"] == "INT8"
+assert precisions["action_head"] == "FP16"
+
+mock_sizes_mb = {
+    "vision_stem": 50.0,
+    "backbone_block1": 400.0,
+    "backbone_block2": 400.0,
+    "backbone_block3": 400.0,
+    "action_head": 50.0
+}
+orig, comp, ratio = optimizer.calculate_compression_ratio(mock_sizes_mb, precisions)
+assert abs(orig - 1300.0) < 1e-4
+assert abs(comp - 500.0) < 1e-4
+assert abs(ratio - 2.6) < 0.1
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **类型转换算子的显存往返黑洞**：
+   当精度在 INT8 与 FP16 之间频繁切换时，底层的 TensorRT 执行器必须插入专门的 Reformat / Cast Kernel。这些算子不包含任何有意义的深度学习特征变换，纯粹是将数据从全局显存读入、转换字节格式后再写回全局显存。
+2. **打碎内核融合（Breaking Operator Fusion）**：
+   频繁的类型转换会导致原本可以无缝融合的 `GEMM + Bias + Activation` 被迫分裂为多个孤立的小算子，每次都要在低带宽的 LPDDR5 显存中进出，所消耗的显存带宽与发射延迟远超低精度计算带来的加速收益。成熟方案必须将精度相同的层聚类打包为连续的 Sub-Graph 批量执行。
+
+### Q2 参考答案
+
+1. **硬件动态降频（DVFS Throttling）机制**：
+   当 SoC 芯片温度超过预设阈值（如 90℃）时，车载芯片的电源管理控制器会自动强制降低 GPU 的核心工作频率（Core Frequency）以降低发热。这会导致原本耗时 15ms 的推理突然飙升至 30ms，造成自动驾驶主控周期严重丢帧。
+2. **功耗感知编排与混合精度防护**：
+   通过分级混合精度将大头权重压至 INT8/W4A8，将内存读写功耗（Memory Power）降低 50% 以上；同时结合动态降载机制，在车辆处于巡航静止或环境简单时动态减少前向计算特征维度，使芯片核心温度长期稳定在 75℃ 以下的安全区间，杜绝突发降频。
+
+### Q3 参考答案
+
+1. **长尾极值（Outliers）在离散截断中被淹没**：
+   在常规直行跟车场景下，动作预测的输出非常平缓（例如方向盘转角在 0 度附近波动，均方差很小）。因此 PTQ 离散缩放区间大多聚焦在微小的角度区间内。
+   在极端长尾避障场景下，模型需要输出一个极大转角（如方向盘急转 60 度）。如果该大转角超出了量化饱和阈值，会被硬件强制截断；或者因为量化步长过粗，小概率激活的规避特征被量化阶梯彻底归零，导致网络误判为“继续平稳直行”。
+2. **多模态安全兜底网（Safety Shield Guard）**：
+   工业界自动驾驶系统必须在端侧模型之后部署独立的硬编码物理安全校验层（如基于物理碰撞检测的 Safety Trajectory Filter）。一旦神经网络给出的量化轨迹与实际环境有碰撞风险，立即触发规则层接管并执行紧急制动。
+:::

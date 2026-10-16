@@ -1,0 +1,260 @@
+---
+title: "第 17 课：硬件感知量化：QAT 伪量化（FakeQuant）、STE 与对称/非对称算子实战"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 掌握量化感知训练（QAT, Quantization-Aware Training）与训练后量化（PTQ）的根本区别及工程选型；
+- 深入推导伪量化（FakeQuantization）算子的前向离散截断与反向**直通估计器（Straight-Through Estimator, STE）**的数学原理；
+- 搞清对称量化（Symmetric）与带 Zero-point 非对称量化（Asymmetric）在底层硬件 ALU/DSP 上的计算成本取舍；
+- 掌握硬件感知量化算子在 GPU 上的高效实现与与下游推理引擎（如 TensorRT / ONNX Runtime）的无缝对齐。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（带 STE 梯度回传的硬件感知伪量化算子模拟内核），并通过测试断言；
+- 三个问答题均说明量化噪声建模与硬件指令因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 1 课：线程映射与 Grid-Stride Loop](lesson01_vector_add.qmd)、[推理：第 6 课 量化源码走读](../inference/lesson06.qmd)。
+- 本课位置：连接模型训练优化与端侧低精度推理部署的关键桥梁算子。
+
+---
+
+## 核心心智模型
+
+### 1. 为什么大模型端侧部署必须掌握 QAT 伪量化？
+
+虽然 PTQ（训练后量化）只需少量校准样本即可完成权重量化，但在以下场景下，PTQ 往往会导致毁灭性的精度暴跌：
+1. **超低位宽量化（INT4 / FP4）**：离散量化步长极大，舍入误差被剧烈放大；
+2. **端侧物理控制模型（如自动驾驶轨迹规划、具身机械臂控制）**：对输出连续数值的微小扰动极度敏感，微小的离散噪声就会造成轨迹剧烈抖动甚至失控。
+
+**量化感知训练（QAT）**的核心思想是：**在模型训练或微调的前向传播中，主动模拟目标硬件量化引入的“精度截断”与“数值饱和”，让神经网络权重在反向传播中主动学习并适应这种量化噪声！**
+
+```{mermaid}
+flowchart TD
+    subgraph QAT_Pipeline["QAT 伪量化 (FakeQuant) 前向与反向流水线"]
+        direction TB
+        subgraph Forward["前向传播 (Forward Pass: 模拟真实硬件整型截断)"]
+            FloatW["浮点权重/激活 x (FP32/BF16)"] --> ScaleDiv["1. 缩放除法: x / Scale"]
+            ScaleDiv --> RoundInt["2. 整数舍入: round() 产生量化阶梯"]
+            RoundInt --> ClipClamp["3. 硬件位宽截断: clamp(-128, 127)"]
+            ClipClamp --> DequantMul["4. 反量化恢复: x_q * Scale 还原为浮点输入下一层"]
+        end
+
+        subgraph Backward["反向传播 (Backward Pass: STE 直通估计器)"]
+            GradOut["上游传入梯度 dL/dx_hat"] --> STE_Filter{"是否落在截断区间内?<br>[-Clip_Bound, Clip_Bound]"}
+            STE_Filter --"在区间内"--> PassGrad["梯度原样直通: dL/dx = dL/dx_hat"]
+            STE_Filter --"超出边界"--> ZeroGrad["梯度清零: dL/dx = 0 (停止更新溢出权重)"]
+        end
+    end
+```
+<p class="caption" align="center"><em>图 17-1：QAT 伪量化算子前向截断与反向 STE 梯度直通模型</em></p>
+
+---
+
+### 2. 数学反向传播的致命困境与 STE 直通估计器
+
+在前向计算中，`round(x)` 算子是一个阶梯状的离散函数：
+- 在除整数点外的所有位置，其导数严格为 **0**；
+- 在整数点处，函数发生跳变，导数**不存在（未定义）**。
+
+如果严格按照微积分链式法则求导，反向传播的梯度为：
+$$\frac{\partial \text{round}(u)}{\partial u} = 0 \implies \frac{\partial \mathcal{L}}{\partial x} = \frac{\partial \mathcal{L}}{\partial \hat{x}} \cdot 0 = 0$$
+所有可学习权重都将收不到任何梯度，模型彻底停止学习！
+
+**Straight-Through Estimator (STE, 直通估计器)**：
+在反向传播时，故意“假装”舍入函数是一个恒等映射（Identity Operator），令 $\frac{\partial \text{round}(u)}{\partial u} \approx 1$；但对于超出饱和裁剪阈值的值，则将梯度置 0（阻止异常值继续无限发散）：
+$$\frac{\partial \hat{x}}{\partial x} = \begin{cases} 1, & \text{若 } -Q_{\max} \le \frac{x}{s} \le Q_{\max} \\ 0, & \text{其他} \end{cases}$$
+
+---
+
+## 代码实战：带 STE 梯度的硬件感知对称伪量化算子
+
+我们实现一个具备完整前向伪量化与反向 STE 梯度直通特性的对称量化算子内核。
+
+### 练习题描述
+
+补齐 `fake_quantize_symmetric` 及其对应的梯度计算 `fake_quantize_backward_ste`：
+1. **前向伪量化**：
+   - 给定输入浮点张量 $x$ 与量化缩放因子 $s$，针对 INT8（位宽 $b=8$，对称范围 $[-127, 127]$）；
+   - 计算量化整型值：$x_q = \text{clip}\left(\text{round}\left(\frac{x}{s}\right), -127, 127\right)$；
+   - 计算反量化浮点伪输出：$\hat{x} = x_q \cdot s$；
+2. **反向 STE 梯度回传**：
+   - 给定上游梯度 $\frac{\partial \mathcal{L}}{\partial \hat{x}}$；
+   - 根据未裁剪前的输入数值与边界范围 $[-127s, 127s]$，在边界内的元素梯度原样直通，超出饱和边界的元素梯度截断为 0。
+
+::: {#qat_exercise .cell course_role='exercise'}
+```python
+import numpy as np
+
+def fake_quantize_symmetric_forward(x, scale, bits=8):
+    """
+    对称伪量化前向算子模拟。
+    
+    参数:
+    - x: np.ndarray, 输入浮点张量
+    - scale: float, 量化缩放因子
+    - bits: int, 量化位宽 (如 8)
+    
+    返回:
+    - x_hat: np.ndarray, 伪量化后的浮点张量
+    - clip_mask: np.ndarray (bool), 标记哪些元素未发生溢出截断
+    """
+    # TODO: YOUR CODE HERE
+    pass
+
+def fake_quantize_symmetric_backward_ste(grad_output, clip_mask):
+    """
+    STE 直通估计器反向梯度回传。
+    
+    参数:
+    - grad_output: np.ndarray, 上游传回的梯度 dL/dx_hat
+    - clip_mask: np.ndarray, 前向保存的未饱和掩码
+    
+    返回:
+    - grad_input: np.ndarray, 回传给输入 x 的梯度 dL/dx
+    """
+    # TODO: YOUR CODE HERE
+    pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+x_in = np.array([-2.5, -0.6, 0.0, 0.55, 3.2], dtype=np.float32)
+scale = 0.02  # INT8 对应最大表示范围: 127 * 0.02 = 2.54
+
+# 前向传播
+x_hat, mask = fake_quantize_symmetric_forward(x_in, scale=scale, bits=8)
+print("输入:", x_in)
+print("伪量化输出:", x_hat)
+print("未溢出掩码:", mask)
+
+# 验证边界截断: 3.2 超过了 2.54，应该被截断在 127 * 0.02 = 2.54
+assert abs(x_hat[-1] - 2.54) < 1e-4
+# 验证中间离散舍入: 0.55 / 0.02 = 27.5 -> round to 28 -> 28 * 0.02 = 0.56
+assert abs(x_hat[3] - 0.56) < 1e-4
+assert mask[-1] == False and mask[2] == True
+
+# 反向传播 (模拟上游传入全为 1.0 的梯度)
+grad_out = np.ones_like(x_in)
+grad_in = fake_quantize_symmetric_backward_ste(grad_out, mask)
+print("STE 反向梯度:", grad_in)
+assert grad_in[-1] == 0.0, "溢出值反向梯度应被清零！"
+assert grad_in[3] == 1.0, "正常未溢出值反向梯度应原样直通！"
+print("QAT 伪量化与 STE 算子验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：对称量化与带 Zero-point 的非对称量化在硬件微架构执行上有何差异？
+
+在 GPU Tensor Core 或端侧 NPU 计算矩阵乘 $Y = X \cdot W$ 时，若激活值 $X$ 采用非对称量化（包含非零的偏移量 $Z$），为什么会导致 GEMM 算子产生额外的列求和（Reduction Offset）开销？
+
+**你的答案：**
+
+### Q2：为什么 QAT 训练通常在后半程（Fine-Tuning）才开启，而非从随机初始化一开始就打开？
+
+如果在模型训练的第一步就引入离散舍入与 STE 梯度估计，会对优化器的动量（Adam Momentum）与参数收敛造成什么负面影响？工业界典型的 QAT 调度策略是什么？
+
+**你的答案：**
+
+### Q3：如何保证 PyTorch QAT 训练出的模型与 TensorRT 端侧推理引擎完全等价？
+
+在导出 ONNX 并使用 TensorRT 编译时，经常出现“PyTorch 评测准确率无损，但 TensorRT 推理掉点严重”的问题。请从 Scale 计算公式、舍入模式（Round-to-nearest-even vs Round-away-from-zero）与算子融合边界三个方面分析其根因。
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现对称整型缩放、舍入、截断及反向 STE 掩码过滤，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述量化微架构开销与训练调度因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#qat_solution .cell course_role='solution' execution_count=1}
+```python
+def fake_quantize_symmetric_forward(x, scale, bits=8):
+    q_max = (1 << (bits - 1)) - 1  # 例如 8-bit 对称: 127
+    q_min = -q_max                 # -127
+    
+    # 1. 缩放到量化整数格
+    scaled = x / scale
+    
+    # 2. 离散舍入
+    rounded = np.round(scaled)
+    
+    # 3. 硬件动态范围截断
+    clamped = np.clip(rounded, q_min, q_max)
+    
+    # 4. 记录未饱和掩码 (在 [q_min, q_max] 闭区间内视为未饱和)
+    clip_mask = (scaled >= q_min) & (scaled <= q_max)
+    
+    # 5. 反量化输出
+    x_hat = clamped * scale
+    return x_hat, clip_mask
+
+def fake_quantize_symmetric_backward_ste(grad_output, clip_mask):
+    # STE: 掩码内梯度直通 (乘以 1.0)，超出掩码范围梯度截断为 0.0
+    grad_input = np.where(clip_mask, grad_output, 0.0)
+    return grad_input
+
+# 验证执行
+x_in = np.array([-2.5, -0.6, 0.0, 0.55, 3.2], dtype=np.float32)
+scale = 0.02
+x_hat, mask = fake_quantize_symmetric_forward(x_in, scale=scale, bits=8)
+assert abs(x_hat[-1] - 2.54) < 1e-4
+assert abs(x_hat[3] - 0.56) < 1e-4
+assert mask[-1] == False and mask[2] == True
+
+grad_in = fake_quantize_symmetric_backward_ste(np.ones_like(x_in), mask)
+assert grad_in[-1] == 0.0 and grad_in[3] == 1.0
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **对称量化的纯整数乘累加**：
+   在对称量化下，$X \approx s_x X_q$ 且 $W \approx s_w W_q$。矩阵乘展开为 $Y = (s_x s_w) \sum_k X_q W_q$。硬件核心只需执行纯净的带符号整数乘加指令（如 INT8 DP4A 或 Tensor Core MMA），最后整体乘以浮点常量标量 $(s_x s_w)$，效率极高。
+2. **非对称量化的项展开惩罚**：
+   非对称量化下，$X \approx s_x (X_q - Z_x)$。带入矩阵乘展开后为：
+   $$Y = s_x s_w \left( \sum_k X_q W_q - Z_x \sum_k W_q \right)$$
+   可以看到，式中多出了第二项 $-Z_x \sum_k W_q$。这要求硬件必须额外维护权重的列求和偏置并在线相减。在很多端侧硬件上，这会打破 Tensor Core 极致流水线，增加指令发射开销与片上缓存压力。
+
+### Q2 参考答案
+
+1. **训练初期伪量化噪声破坏收敛**：
+   在模型刚初始化阶段，权重和激活的分布极度不稳定，梯度方差巨大。如果在此时强行插入不连续的量化截断与 STE 粗糙梯度估计，会导致梯度的方向严重失真，破坏 Adam 等优化器的一阶与二阶动量累加，引起训练震荡甚至发散。
+2. **工业界退火调度策略（Warmup-Freeze Schedule）**：
+   - 前期（0%~70% 训练步）：使用全精度（FP32/BF16）正常预训练，使权重收敛到全局平缓的极小值低谷；
+   - 中期（70%~95% 训练步）：开启 FakeQuant 伪量化算子，以较小的学习率（常规的 10%）微调，让权重微调适应离散网格；
+   - 后期（最后 5% 步）：冻结量化 Scale 和 Batch Normalization / LayerNorm 统计量，只微调核心权重，确保最终导出的参数严格对齐目标量化点。
+
+### Q3 参考答案
+
+1. **缩放因子与饱和定义差异**：
+   PyTorch 的 `torch.ao.quantization` 默认可能将对称最大值定义为 127（无负 128），而某些推理引擎将 INT8 对称范围定为 $[-128, 127]$。如果两者边界定义相差 1 个量化单位，会导致极值点截断不一致。
+2. **舍入规则（Rounding Mode）微架构偏差**：
+   PyTorch/CUDA 在 GPU 上常用“四舍五入到最近偶数（Round-to-Nearest-Even）”，而某些端侧 NPU 为简化数字逻辑电路采用了“向零舍入（Truncation）”或“远离零舍入”。
+3. **算子融合时机失配**：
+   在训练时，FakeQuant 往往放置在 `Conv -> BiasAdd -> ReLU` 之后；若 TensorRT 将其融合为单一的 `FusedConvAct` 且硬件内部在浮点累加阶段提前量化，会导致数学执行顺序发生漂移。必须在导出 ONNX 时显式使用 `QuantizeLinear` 与 `DequantizeLinear` 算子严格锚定硬件契约。
+:::

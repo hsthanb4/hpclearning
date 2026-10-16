@@ -1,0 +1,276 @@
+---
+title: "第 4 课：FP8/BF16 浮点数值精度异常、下溢与 NaN 排查"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 深入剖析低精度浮点格式（FP8 E4M3/E5M2、BF16、FP16）的底层位结构与极窄动态范围特征；
+- 理解硬件级“冲刷为零（Flush-to-Zero, FTZ）”与非规格化数（Subnormal）对训练收敛的致命影响；
+- 掌握 NaN（Not a Number）与 Inf（Infinity）雪崩级联传播的数学根因与定位技巧；
+- 掌握设计工业级轻量片上数值异常探针（Anomaly Detector）与动态缩放守卫（Dynamic Scaling Guard）的方法。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（低精度下溢截断模拟与 NaN 传播链逆向溯源器），并通过测试断言；
+- 三个问答题均说明浮点数位格式与运算因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[CUTLASS：第 7 课 混合精度与数值转换](../cutlass/lesson07_mixed_precision.qmd)、计算机组成原理（IEEE 754 浮点编码）。
+- 本课位置：深入数值系统与底层计算正确性，解决训练损失突发 NaN 和低精度推理精度坍塌问题。
+
+---
+
+## 核心心智模型
+
+### 1. 浮点格式动态范围与精度对比
+
+在现代大模型训练与推理中，算力演进的核心主线是不断降低数值位宽（从 FP32 到 FP16/BF16，再到 FP8 甚至 FP4）。但位宽的降低直接带来了**动态范围（Dynamic Range）与有效精度（Precision）的剧烈缩减**：
+
+```{mermaid}
+flowchart TD
+    subgraph Formats["主流低精度浮点格式底层位分布"]
+        direction TB
+        FP32["FP32 (32-bit): 1 符号位 + 8 指数位 + 23 尾数位<br>范围: ~1e-38 到 ~3e38 (动态范围巨大，精度极高)"]
+        BF16["BF16 (16-bit): 1 符号位 + 8 指数位 + 7 尾数位<br>范围: ~1e-38 到 ~3e38 (与 FP32 相同动态范围，绝不上溢，但尾数精度低)"]
+        FP16["FP16 (16-bit): 1 符号位 + 5 指数位 + 10 尾数位<br>范围: ~6e-5 到 65504 (动态范围极小，极易发生 65504 上溢崩溃)"]
+        FP8_E4M3["FP8 E4M3: 1 符号位 + 4 指数位 + 3 尾数位<br>范围: 最大值仅 448！用于前向传播 Forward 与权重"]
+        FP8_E5M2["FP8 E5M2: 1 符号位 + 5 指数位 + 2 尾数位<br>范围: 最大值 57344，但仅 2 位尾数！常用于反向梯度 Backward"]
+    end
+```
+<p class="caption" align="center"><em>图 4-1：现代 GPU 核心浮点数据格式位宽与动态范围对比</em></p>
+
+- **BF16 的统治力**：保留了与 FP32 完全相同的 8 位指数，因此在大模型预训练中几乎无需担心上溢（Overflow），成为了主流标准；
+- **FP8 的致命挑战**：FP8 E4M3 的最大值仅为 **448**，最小值仅为 $2^{-6} \approx 0.0156$（规格化数）。在深度 Transformer 中，许多层的激活值与梯度很容易超出这一微小的窗口，必须配合高频的动态缩放系数（Scale Factor）。
+
+---
+
+### 2. 致命现象：下溢静默清零与 NaN 雪崩传播
+
+#### 现象一：下溢与 Flush-to-Zero (FTZ) 导致的静默停止学习
+
+GPU 为了追求极致的吞吐性能，硬件浮点单元默认开启 **FTZ（Flush to Zero）** 模式。
+- 当计算出的极小数值（如梯度值为 $10^{-8}$）低于当前格式的最小规格化数时，硬件不会花费几十个周期去处理复杂的非规格化数（Subnormal），而是**直接强制将其清零（Flush to 0）**；
+- **后果**：代码完全不报错，但底层权重梯度全部变成了 0，模型发生**静默欠拟合（Silent Stagnation）**，训练了几百万元的算力却毫无进展。
+
+#### 现象二：单个 NaN 引发全模型级联雪崩
+
+```{mermaid}
+flowchart LR
+    subgraph NaNCascade["NaN 级联雪崩扩散链条"]
+        direction TB
+        Div0["某一层的 LayerNorm 方差接近 0<br>计算 1 / sqrt(var + eps) 产生 Inf"] --> MatMul["与后续矩阵乘相乘产生 NaN"]
+        MatMul --> Softmax["Softmax 输入含 NaN<br>全行输出全变 NaN"]
+        Softmax --> AllWeights["反向传播梯度全为 NaN<br>一次 update 摧毁全模型所有参数"]
+    end
+```
+<p class="caption" align="center"><em>图 4-2：局部异常引发全模型级联 NaN 污染过程</em></p>
+
+- **IEEE 754 污染特性**：任何与 NaN 参与的浮点运算，其结果必定为 NaN（`x + NaN = NaN`，`x * NaN = NaN`）；
+- 一旦某一层产生了一个非法的浮点数，只需短短几个算子，整个模型几十亿个参数就会在一次梯度更新中彻底化为乌有。
+
+---
+
+## 代码实战：轻量级数值异常探针与动态缩放守卫
+
+在工业级大规模训练系统中，直接在每一步插入 `torch.isnan(x).any()` 会引发严重的 CPU-GPU 同步阻塞气泡。高效的做法是：利用异步非阻塞统计，跟踪数值张量的动态最大值与异常计数，并在检测到突发下溢或 NaN 趋势时自动触发缩放保护与告警。
+
+### 练习题描述
+
+补齐 `audit_tensor_numerics` 函数：
+1. 遍历并检测给定的张量字典（模拟各网络层的输入/输出）；
+2. 统计各张量中是否含有 `NaN` 或 `Inf`；
+3. 统计张量中绝对值落在极小下溢区间（$0 < |x| < \text{underflow\_threshold}$）的比例；
+4. 寻找第一次出现 `NaN` 的首发故障层（Root Cause Layer）；
+5. 针对健康张量，基于当前最大绝对值与目标低精度最大容量（如 FP8 E4M3 峰值 448.0），计算最优的安全缩放系数（Scale Factor）。
+
+::: {#numerics_exercise .cell course_role='exercise'}
+```python
+import numpy as np
+
+def audit_tensor_numerics(layers_data, target_fp_max=448.0, underflow_thresh=1e-4):
+    """
+    审计各层张量数值稳定性，排查下溢与 NaN 根因。
+    
+    参数:
+    - layers_data: dict of {str: np.ndarray}, 各层的输出张量数据
+    - target_fp_max: float, 目标低精度格式的最大表示值 (默认 FP8 E4M3: 448.0)
+    - underflow_thresh: float, 下溢探测阈值
+    
+    返回:
+    - dict, 包含:
+        - "first_nan_layer": str or None, 第一个出现 NaN 的层名
+        - "layer_reports": dict of {str: dict}, 包含各层的:
+            - "has_nan": bool
+            - "has_inf": bool
+            - "underflow_ratio": float, 下溢占比 (0.0 ~ 1.0)
+            - "optimal_scale": float, 推荐量化缩放系数
+    """
+    # TODO: YOUR CODE HERE
+    pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+# 构造模拟测试数据
+np.random.seed(42)
+t_embed = np.random.normal(0, 0.5, size=(100, 100))
+# layer 1 出现大量极小值（下溢风险）
+t_layer1 = np.random.normal(0, 1e-5, size=(100, 100))
+# layer 2 突发除零产生了 NaN
+t_layer2 = np.copy(t_embed)
+t_layer2[10, 20] = np.nan
+# layer 3 受到污染也包含 NaN
+t_layer3 = t_layer2 * 2.0
+
+mock_layers = {
+    "embed": t_embed,
+    "layer1_norm": t_layer1,
+    "layer2_attn": t_layer2,
+    "layer3_ffn": t_layer3
+}
+
+res = audit_tensor_numerics(mock_layers, target_fp_max=448.0, underflow_thresh=1e-4)
+print("数值审计结果:", res)
+assert res["first_nan_layer"] == "layer2_attn", f"Expected root cause layer2_attn, got {res['first_nan_layer']}"
+assert res["layer_reports"]["embed"]["has_nan"] == False
+assert res["layer_reports"]["layer1_norm"]["underflow_ratio"] > 0.95
+assert res["layer_reports"]["layer2_attn"]["has_nan"] == True
+assert res["layer_reports"]["layer3_ffn"]["has_nan"] == True
+print("低精度数值稳定性与 NaN 溯源探针验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么 DeepSeek-V3 采用 FP8 训练时必须引入 $1 \times 128$ 的 Block-wise 量化？
+
+为什么传统的整张量单一缩放（Tensor-wise Scaling）在 FP8 格式下无法保证超大语言模型的无损训练收敛？$1 \times 128$ 细粒度分块量化是如何在数学上解决离群值（Outliers）与下溢困境的？
+
+**你的答案：**
+
+### Q2：在注意力机制中，为什么必须在除以 $\sqrt{d_k}$ 后再进行 Softmax？
+
+从数值稳定性与梯度流动的角度解释：如果去掉注意力打分中的缩放因子 $\frac{1}{\sqrt{d_k}}$，当隐藏层维度 $d_k$ 很大时（例如 128），Softmax 的输入数值范围会发生什么变化？为什么会导致梯度消失并极易诱发数值溢出？
+
+**你的答案：**
+
+### Q3：如何实现零同步开销的“异步 NaN 哨兵（Asynchronous NaN Sentinel）”？
+
+在千卡分布式集群中，如果每步都在 CPU 端调用 `torch.isnan()` 会导致毁灭性的性能下降。工业界（如 Megatron-LM 或 DeepSpeed）是如何利用 GPU 显存中的单个标量标志位与异步通信流，在不引入 Host-Device 同步气泡的前提下完成 NaN 熔断拦截的？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确处理 NaN/Inf 判定、下溢比例统计、首发层溯源与安全 Scale 计算，通过测试断言；
+- Q1～Q3 各 2 分：必须给出浮点数有效范围与数学变换的物理因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#numerics_solution .cell course_role='solution' execution_count=1}
+```python
+def audit_tensor_numerics(layers_data, target_fp_max=448.0, underflow_thresh=1e-4):
+    first_nan = None
+    reports = {}
+    
+    for layer_name, tensor in layers_data.items():
+        # 1. 检测 NaN 与 Inf
+        is_nan = np.isnan(tensor)
+        has_nan = bool(np.any(is_nan))
+        has_inf = bool(np.any(np.isinf(tensor)))
+        
+        if has_nan and first_nan is None:
+            first_nan = layer_name
+            
+        # 2. 统计下溢比例 (排除 NaN/Inf 与纯绝对 0)
+        valid_mask = ~(is_nan | np.isinf(tensor))
+        abs_vals = np.abs(tensor[valid_mask])
+        non_zero_mask = abs_vals > 0
+        non_zero_count = np.sum(non_zero_mask)
+        
+        if non_zero_count > 0:
+            underflow_count = np.sum((abs_vals > 0) & (abs_vals < underflow_thresh))
+            underflow_ratio = float(underflow_count / non_zero_count)
+            max_val = float(np.max(abs_vals))
+        else:
+            underflow_ratio = 0.0
+            max_val = 0.0
+            
+        # 3. 计算最优量化缩放系数 (Scale = FP_MAX / (Max_Val + eps))
+        optimal_scale = float(target_fp_max / (max_val + 1e-12)) if max_val > 0 else 1.0
+        
+        reports[layer_name] = {
+            "has_nan": has_nan,
+            "has_inf": has_inf,
+            "underflow_ratio": underflow_ratio,
+            "optimal_scale": optimal_scale
+        }
+        
+    return {
+        "first_nan_layer": first_nan,
+        "layer_reports": reports
+    }
+
+# 执行验证
+np.random.seed(42)
+t_embed = np.random.normal(0, 0.5, size=(100, 100))
+t_layer1 = np.random.normal(0, 1e-5, size=(100, 100))
+t_layer2 = np.copy(t_embed)
+t_layer2[10, 20] = np.nan
+t_layer3 = t_layer2 * 2.0
+mock_layers = {
+    "embed": t_embed,
+    "layer1_norm": t_layer1,
+    "layer2_attn": t_layer2,
+    "layer3_ffn": t_layer3
+}
+res = audit_tensor_numerics(mock_layers, target_fp_max=448.0, underflow_thresh=1e-4)
+assert res["first_nan_layer"] == "layer2_attn"
+assert res["layer_reports"]["embed"]["has_nan"] == False
+assert res["layer_reports"]["layer1_norm"]["underflow_ratio"] > 0.95
+assert res["layer_reports"]["layer2_attn"]["has_nan"] == True
+assert res["layer_reports"]["layer3_ffn"]["has_nan"] == True
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **离群值（Outliers）与动态范围撕裂**：
+   在大语言模型各层激活中，存在极少数特征通道的数值比其他正常通道大几个数量级（例如正常值在 $0.1 \sim 1.0$，而离群值高达 $50 \sim 100$）。
+   如果采用整个 Tensor 共享一个缩放系数（Tensor-wise）：为了防止最大离群值在 FP8（最大 448）中上溢，缩放因子必须根据最大值设定；这导致剩余 99.9% 的正常微小特征在缩放后全部低于 FP8 的最小表示精度，被硬件强制截断为 0，引发灾难性下溢与精度崩塌。
+2. **$1 \times 128$ 分块的信噪比局部隔离**：
+   DeepSeek-V3 将矩阵在隐层特征维度每 128 个 Channel 划分为一个独立 Tile，每个 Tile 拥有专属于自己的 Scale。离群值的影响被死死限制在这 128 个元素的小窗口内部，其他正常的通道瓦片可以使用更大的 Scale 将数值无损映射在 FP8 的饱满区间内，从而实现与 BF16 无损的收敛精度。
+
+### Q2 参考答案
+
+1. **内积方差膨胀与极值发散**：
+   假设 Query 与 Key 向量的每个分量是均值为 0、方差为 1 的独立随机变量。其内积 $q \cdot k = \sum_{i=1}^{d_k} q_i k_i$ 的均值为 0，方差为 $d_k$。当 $d_k=128$ 时，标准差高达 $\sqrt{128} \approx 11.3$。未经缩放的内积打分会出现大量绝对值大于 30~50 的极大极小值。
+2. **Softmax 饱和与梯度消失**：
+   当 Softmax 输入存在巨大差异时，输出概率分布会退化为一个极度尖锐的 One-Hot 分布（最大值接近 1.0，其余全为 0.0）。此时 Softmax 的导数 $S_i(\delta_{ij} - S_j)$ 趋近于 0，反向传播的梯度彻底消失，模型无法继续学习；同时极大值直接逼近甚至超越低精度的指数表示极限，引发数值溢出。除以 $\sqrt{d_k}$ 强制将方差重新归一化为 1，确保了数值处在平缓、梯度健康的活跃区间。
+
+### Q3 参考答案
+
+1. **GPU 片上原子更新标志位**：
+   在 CUDA Kernel 内部（或反向传播梯度更新算子中），每个线程在完成计算后，利用轻量级内置检查（`isnan` / `isinf`）。一旦发现非法数值，立即通过原子操作将显存中一个固定的 1 字节标志位（如 `gpu_nan_flag`）置为 1。该过程完全在 GPU 片上完成，不与 CPU 产生任何同步通信。
+2. **与梯度通信 AllReduce 异步重叠**：
+   在每步反向传播最后进行全机群梯度 AllReduce 时，顺便将这个 1 字节标量打包随同集合通信异步归约。在执行优化器 `optimizer.step()` 前，CPU 仅在读取 Step 完成信号时统一检查一次状态：若标志位被置位，直接跳过当前步的权重更新（Drop Step）并打印告警快照，彻底消除了每层检测带来的 Host-Device 气泡。
+:::

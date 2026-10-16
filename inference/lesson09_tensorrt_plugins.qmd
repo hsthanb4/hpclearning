@@ -1,0 +1,243 @@
+---
+title: "第 9 课：端侧推理引擎源码剖析：TensorRT IPluginV3 插件与执行器架构"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 掌握车载自动驾驶（如 NVIDIA Drive Orin / Thor）与端侧机器人芯片中最核心的高性能推理引擎 —— **NVIDIA TensorRT** 的底层执行架构；
+- 深入推导 TensorRT 10+ 全新现代插件标准 **`IPluginV3`** 的模块化解耦体系（`IPluginV3OneCore`、`IPluginV3OneBuild`、`IPluginV3OneRuntime`）；
+- 搞懂动态形状（Dynamic Shapes）与数据依赖输出形状（Data-Dependent Output Shapes）在插件中的实现；
+- 掌握 `IExecutionContext` 执行器生命周期、片上工作空间（Workspace）内存复用与异步推断队列（`enqueueV3`）。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（TensorRT IPluginV3 模块化插件生命周期与执行流模拟器），并通过测试断言；
+- 三个问答题均说明构建期（Build）与运行期（Runtime）的底层解耦因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[CUDA：第 1 课 线程映射与 Grid-Stride Loop](../cuda/lesson01_vector_add.qmd)、C++ 虚函数与多态接口基础。
+- 本课位置：深入端侧车载感知与控制模型从训练图向高性能物理引擎落地的关键基石。
+
+---
+
+## 核心心智模型
+
+### 1. 为什么工业级端侧部署离不开 TensorRT 自定义插件？
+
+在自动驾驶（如 3D 目标检测、BEV 环视变形注意力、点云体素化）或具身连续控制中，模型中经常包含非标准算子或前沿融合内核（如 Flow Matching 去噪求解器）。标准 ONNX 算子集无法直接表达这些特殊逻辑。
+
+为了让这些算子无缝融入 TensorRT 的图优化流水线（算子融合、显存复用、CUDA Graph 录制），工程师必须实现 **TensorRT Plugin（自定义算子插件）**。
+
+### 2. 传统 `IPluginV2DynamicExt` 的历史缺陷与 `IPluginV3` 的模块化革新
+
+在 TensorRT 8.x/9.x 中广泛使用的 `IPluginV2DynamicExt` 是一套庞大而脆弱的单体接口：
+- 编译期构建逻辑（Supported Formats、Shape Inference）与运行期执行逻辑（`enqueue`）死死揉在一个臃肿的 C++ 类中；
+- 序列化（Serialization）极其繁琐，在反序列化时必须重新构造全部构建期状态，导致加载 Engine 时内存膨胀且脆弱易崩。
+
+在现代 **TensorRT 10.x 及后续标准**中，NVIDIA 全面转向了基于**能力解耦（Capability-Based）的 `IPluginV3` 体系**：
+
+```{mermaid}
+flowchart TD
+    subgraph IPluginV3_Architecture["TensorRT 10+ IPluginV3 模块化能力体系"]
+        direction TB
+        Core["1. IPluginV3OneCore (核心标识接口)<br>插件名称、版本号、命名空间"]
+        
+        Build["2. IPluginV3OneBuild (构建期能力接口)<br>- 支持的精度与数据格式 (FP16/INT8/FP8)<br>- 符号化输出形状推导 (getOutputShapes)<br>- 运行时所需临时工作空间大小 (getWorkspaceSize)"]
+        
+        Runtime["3. IPluginV3OneRuntime (执行期能力接口)<br>- 纯轻量级二进制执行上下文<br>- 接收真实输入指针并调用 CUDA Kernel (enqueue)<br>- 零冗余序列化开销，直接支持 CUDA Graph"]
+    end
+    Core --> Build
+    Core --> Runtime
+```
+<p class="caption" align="center"><em>图 9-1：TensorRT 10 IPluginV3 模块化能力解耦架构</em></p>
+
+- **彻底分离构建与运行**：在端侧车辆或机器人部署时，只需加载 `IPluginV3OneRuntime` 纯执行对象，彻底剥离所有昂贵的编译期元数据，内存开销降低 80% 以上；
+- **支持数据依赖形状（Data-Dependent Shapes）**：原生支持输出张量尺寸由计算结果决定的算子（例如 NMS 过滤后的目标数量、稀疏体素数量）。
+
+---
+
+## 代码实战：TensorRT IPluginV3 模块化生命周期与执行器模拟
+
+我们设计一个面向 TensorRT IPluginV3 架构的仿真器，模拟一个自定义激活+缩放插件在构建期形状推导、Workspace 空间仲裁与运行期异步计算的完整流程。
+
+### 练习题描述
+
+补齐 `CustomTRTPluginV3` 类：
+1. `get_output_shapes(input_shapes)`（模拟 `IPluginV3OneBuild`）：
+   - 根据输入张量形状列表推导输出形状；本插件为一个逐元素算子，输出形状与输入完全一致；
+2. `get_workspace_size(input_shapes)`（模拟 `IPluginV3OneBuild`）：
+   - 计算该算子执行时需要的临时片上显存字节数（例如需要分配与输入等大的临时 FP32 浮点缓冲区：$\text{size} = \text{total\_elements} \times 4$）；
+3. `enqueue(inputs, outputs, workspace_buffer, stream)`（模拟 `IPluginV3OneRuntime`）：
+   - 接收输入数据、预分配的输出空间与临时 Workspace，执行计算逻辑并将结果写入 `outputs[0]`。
+
+::: {#trt_exercise .cell course_role='exercise'}
+```python
+import numpy as np
+
+class CustomTRTPluginV3:
+    def __init__(self, name="CustomScaleActPlugin", version="1.0.0"):
+        self.name = name
+        self.version = version
+
+    def get_output_shapes(self, input_shapes):
+        """
+        构建期：根据输入推导输出形状 (IPluginV3OneBuild)
+        参数: input_shapes: list of tuple of int
+        返回: list of tuple of int
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def get_workspace_size(self, input_shapes):
+        """
+        构建期：计算执行所需临时 Workspace 字节数 (IPluginV3OneBuild)
+        每个元素需要 4 字节临时缓冲
+        返回: int (bytes)
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def enqueue(self, inputs, outputs, workspace, scale=2.0):
+        """
+        运行期：执行算子计算 (IPluginV3OneRuntime)
+        公式: Output = Scale * max(Input, 0) (即 Scale * ReLU(x))
+        计算过程要求借助 workspace 作为中间临时缓冲
+        """
+        # TODO: YOUR CODE HERE
+        pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+plugin = CustomTRTPluginV3()
+
+# 1. 验证构建期形状推导与 Workspace 计算
+in_shapes = [(4, 128, 64)]  # 4 * 128 * 64 = 32768 元素
+out_shapes = plugin.get_output_shapes(in_shapes)
+assert out_shapes == [(4, 128, 64)], f"输出形状不匹配: {out_shapes}"
+
+req_ws = plugin.get_workspace_size(in_shapes)
+assert req_ws == 32768 * 4, f"Workspace 字节数计算错误: {req_ws}"
+
+# 2. 模拟运行期执行
+mock_input = np.array([-3.0, -1.0, 0.0, 2.0, 5.0], dtype=np.float32)
+mock_output = np.zeros_like(mock_input)
+mock_ws = np.zeros_like(mock_input)  # 分配临时工作区
+
+plugin.enqueue(inputs=[mock_input], outputs=[mock_output], workspace=mock_ws, scale=3.0)
+
+# 预期结果: 3.0 * ReLU(x) -> [-3->0, -1->0, 0->0, 2->6, 5->15]
+expected_out = np.array([0.0, 0.0, 0.0, 6.0, 15.0], dtype=np.float32)
+assert np.allclose(mock_output, expected_out), f"计算结果错误: {mock_output}"
+print("TensorRT IPluginV3 插件体系模拟验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么 TensorRT 的 Workspace 内存池能够大幅降低端侧显存占用？
+
+在 TensorRT Engine 执行期间，各个串行执行的 Plugin 插件都需要申请额外的临时显存（Workspace）。TensorRT 是如何在整个计算图层面统筹规划 Workspace 的？为什么几十个算子不会各自累加显存，而是共享同一块物理显存？
+
+**你的答案：**
+
+### Q2：`IPluginV3` 如何原生配合 CUDA Graph 录制？
+
+在自动驾驶低延迟闭环中，端到端调用通常依赖 CUDA Graph 消除 CPU 下发开销。在 `IPluginV3OneRuntime::enqueue` 内部，为什么绝对禁止发起 `cudaMalloc`、`cudaStreamSynchronize` 或任何主机端动态内存分配？
+
+**你的答案：**
+
+### Q3：什么是数据依赖输出形状（Data-Dependent Shapes）？
+
+以 3D 目标检测的 3D-NMS 算子为例：过滤后留下的障碍物数量是完全由当前帧检测置信度动态决定的。传统静态推理引擎在此类算子处为何必须回传 CPU？TensorRT 10 的 `IExprBuilder` 是如何实现在纯 GPU 片上完成动态维度更新的？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现形状传递、Workspace 字节计算与就地临时缓冲计算逻辑，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述 Workspace 显存复用、CUDA Graph 不变性与动态图推导因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#trt_solution .cell course_role='solution' execution_count=1}
+```python
+class CustomTRTPluginV3:
+    def __init__(self, name="CustomScaleActPlugin", version="1.0.0"):
+        self.name = name
+        self.version = version
+
+    def get_output_shapes(self, input_shapes):
+        # 逐元素算子，输出形状与输入第 0 个张量严格对齐
+        return [tuple(input_shapes[0])]
+
+    def get_workspace_size(self, input_shapes):
+        total_elements = 1
+        for dim in input_shapes[0]:
+            total_elements *= dim
+        # 每个 float32 元素需要 4 字节片上临时空间
+        return total_elements * 4
+
+    def enqueue(self, inputs, outputs, workspace, scale=2.0):
+        x = inputs[0]
+        # 1. 第一步：将 ReLU 结果写入临时 workspace 缓冲
+        np.maximum(x, 0.0, out=workspace)
+        # 2. 第二步：将 scale 缩放结果从 workspace 写入最终 output 空间
+        np.multiply(workspace, scale, out=outputs[0])
+
+# 验证执行
+plugin = CustomTRTPluginV3()
+in_shapes = [(4, 128, 64)]
+assert plugin.get_output_shapes(in_shapes) == [(4, 128, 64)]
+assert plugin.get_workspace_size(in_shapes) == 32768 * 4
+
+mock_input = np.array([-3.0, -1.0, 0.0, 2.0, 5.0], dtype=np.float32)
+mock_output = np.zeros_like(mock_input)
+mock_ws = np.zeros_like(mock_input)
+plugin.enqueue(inputs=[mock_input], outputs=[mock_output], workspace=mock_ws, scale=3.0)
+expected_out = np.array([0.0, 0.0, 0.0, 6.0, 15.0], dtype=np.float32)
+assert np.allclose(mock_output, expected_out)
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **计算图时序重叠与生命周期着色（Liveness Analysis）**：
+   在 TensorRT 执行器中，各个网络层在时序上是先后依次执行的。算子 A 计算完毕后，其在 Workspace 中存放的临时特征图生命周期立即结束，这块显存地址可以立刻被后续的算子 B 覆盖重用。
+2. **全局最大峰值分配（Peak Sizing）**：
+   TensorRT 在构建引擎时，遍历全图所有算子申报的 `getWorkspaceSize()`，取所有活跃区间内重叠需求的最大值，在初始化阶段一次性预分配一个全局共享的 Workspace 内存池。几十个算子在执行时仅是轮流借用该内存池的不同偏移区间，将原本可能高达数 GB 的临时显存开销压缩至几十 MB。
+
+### Q2 参考答案
+
+1. **CUDA Graph 静态拓扑契约**：
+   CUDA Graph 的核心机制是通过一次录制将所有内核的物理指针、Grid 维度与发射参数固化在硬件 Pushbuffer 中。
+2. **禁止动态操作的原因**：
+   - 若在 `enqueue` 内部调用 `cudaMalloc`，不仅会破坏静态地址映射，还会触发驱动级显存锁导致 Graph 录制中断（`cudaErrorStreamCaptureUnsupported`）；
+   - 若调用 `cudaStreamSynchronize`，会打破异步队列流水线，强行逼停正在并行的其他 Stream。所有中间缓冲必须使用 TensorRT 预先分配好的输入输出指针或 Workspace 指针。
+
+### Q3 参考答案
+
+1. **传统引擎被迫回传 CPU 的瓶颈**：
+   对于 NMS 过滤算子，由于输入每帧检测到的障碍物数量不确定（有时是 5 个，有时是 50 个），传统推理引擎无法为下游跟踪网络分配固定显存，必须将检测计数 `count` 拷回 CPU，由 Python 动态重新调用 `cudaMalloc`，导致严重的 Host-Device 同步气泡。
+2. **TensorRT 10 片上表达式机制**：
+   TensorRT 引入了 `IExprBuilder` 与符号化张量（Size Tensor）。下游算子将上游插件返回的标量指针直接声明为形状表达式（如 `declareSizeTensor`），显存分配器在 GPU 内部完成上界的预分配或动态视图偏移，全程零 CPU 介入，在纯 GPU 硬件管线内无缝支持动态数据驱动图。
+:::

@@ -1,0 +1,295 @@
+---
+title: "第 14 课：真机与仿真混合回传飞轮：分布式向量化仿真与 Sim-to-Real 数据闭环"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 掌握具身机器人与自动驾驶中**仿真到真实世界（Sim-to-Real）**的鸿沟根因与物理系统辨识；
+- 搞懂 GPU 向量化物理仿真（如 Isaac Lab / MuJoCo GPU）中的**领域随机化（Domain Randomization）**技术；
+- 深入推导真机影子模式（Shadow Mode）、人工接管（Intervention）困难样本挖掘与端云混合回传飞轮；
+- 掌握大规模海量仿真数据与稀缺真机数据在分布式 Replay Buffer 中的混合采样配比与重要性权重纠偏。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（Sim-to-Real 混合数据回传飞轮与困难样本采样器），并通过测试断言；
+- 三个问答题均说明物理仿真误差、影子模式与数据飞轮因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 7 课：DQN：回放、目标网络与过估计](lesson07_dqn.qmd)、[第 12 课：大规模 RL 系统](lesson12_rl_system.qmd)。
+- 本课位置：强化学习主线从纯数字仿真走向工业级物理世界落地进化的终章。
+
+---
+
+## 核心心智模型
+
+### 1. Sim-to-Real 鸿沟与数据飞轮的必然性
+
+在物理世界中收集真实机器人与无人车数据，成本极其昂贵、速度极其缓慢且充满机械损坏风险。因此，利用 GPU 上万个并发物理仿真环境（如 NVIDIA Isaac Lab、Genesis）能够以千倍真实时间的速度快速积累上亿帧交互数据。
+
+然而，**仿真永远不可能 100% 还原真实物理世界**：
+- 真实桌面的微观摩擦系数不均、接触碰撞软接触动力学误差；
+- 真实相机的动态模糊、逆光过曝与镜头畸变；
+- 真实执行器的不可测通信延迟与电芯电压波动。
+
+在仿真中表现接近满分的策略，直接刷写到真机上往往因为**未见过的分布外扰动（OOD）**瞬间跌落瘫痪。
+
+```{mermaid}
+flowchart TD
+    subgraph Sim2RealFlywheel["Sim-to-Real 混合数据回传飞轮闭环体系"]
+        direction TB
+        subgraph SimCloud["1. 云端大规模 GPU 向量化仿真 (低成本、高吞吐)"]
+            Isaac["上万个 GPU 仿真器并发运行"] --> DR["领域随机化 (Domain Randomization)<br>随机扰动摩擦力、质量、时延与光照"]
+            DR --> SimBuffer["生成千万级仿真轨迹数据 D_sim"]
+        end
+
+        subgraph RealWorld["2. 真实物理世界真机集群 (高成本、高价值)"]
+            Robots["物理机器人 / 自动驾驶车队 (真机运行)"] --> ShadowMode["影子模式 (Shadow Mode) & 人工接管监测"]
+            ShadowMode --> Mining["困难长尾样本挖掘 (Hard Example Mining)<br>检测到轨迹偏离与安全接管时触发抓取"]
+            Mining --> RealBuffer["回传高质量真机接管数据 D_real"]
+        end
+
+        subgraph Flywheel["3. 端云混合后训练飞轮 (Hybrid Policy Learning)"]
+            SimBuffer & RealBuffer --> Sampler["动态混合采样器 (Hybrid Sampler: alpha * Real + (1-alpha) * Sim)"]
+            Sampler --> Learner["分布式强化学习 / 流匹配策略更新"]
+            Learner --> Deploy["新策略 OTA 持续部署回真机，飞轮滚转"]
+        end
+    end
+```
+<p class="caption" align="center"><em>图 14-1：仿真域随机化与真机影子模式混合回传数据飞轮</em></p>
+
+---
+
+### 2. 影子模式（Shadow Mode）与人工接管触发机制
+
+在真实车队或人形机器人作业中，系统运行**影子模式**：
+1. **主控系统**运行保守可靠的基线控制器（Base Controller）；
+2. **待评估的新策略**在后台静默运行推理，输出预测动作；
+3. **安全监控看门狗**实时对比两者差异：
+   - 当人类安全员发生**人工接管（Intervention）**时；
+   - 或当新策略的预测轨迹与人类专家驾驶轨迹的散度（KL Divergence / L2 误差）突然爆发时；
+4. 边缘芯片自动将接管前 10 秒至接管后 5 秒的多模态全量数据（高清视频、点云、底盘 CAN 总线）进行高优先级标记，通过 5G 异步回传至云端数据中心。
+
+---
+
+## 代码实战：Sim-to-Real 混合数据飞轮与接管样本挖掘器
+
+我们实现一个生产级真机-仿真混合回传回放池，具备困难样本自动标记挖掘与混合批次均衡采样能力。
+
+### 练习题描述
+
+补齐 `SimToRealFlywheelBuffer` 类：
+1. `push_sim_trajectory(trajectory_data)`：
+   - 将 GPU 向量化仿真生成的轨迹存入仿真缓冲区（`sim_buffer`）；
+2. `ingest_real_robot_telemetry(trajectory_data, did_human_intervene)`：
+   - 摄入真实机器人回传数据；若发生了人工接管（`did_human_intervene=True`），自动标记为高优先级困难样本（`priority = 5.0`），存入真机缓冲区（`real_buffer`）；
+3. `sample_hybrid_batch(batch_size, real_ratio=0.2)`：
+   - 从真机缓冲区抽取 `int(batch_size * real_ratio)` 个样本，其余从仿真缓冲区抽取；若真机数据不足，自动用仿真数据补齐；
+   - 返回混合批次列表及当前真机样本在批次中的实际占比。
+
+::: {#flywheel_exercise .cell course_role='exercise'}
+```python
+import numpy as np
+
+class SimToRealFlywheelBuffer:
+    def __init__(self, max_sim_capacity=10000, max_real_capacity=2000):
+        self.sim_buffer = []
+        self.real_buffer = []
+        self.max_sim = max_sim_capacity
+        self.max_real = max_real_capacity
+        self.hard_example_count = 0
+
+    def push_sim(self, sample_id, data):
+        """
+        存入仿真样本。
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def ingest_real(self, sample_id, data, intervened=False):
+        """
+        存入真实真机样本。若发生人工接管，标记为困难样本。
+        """
+        # TODO: YOUR CODE HERE
+        pass
+
+    def sample_hybrid_batch(self, batch_size, real_ratio=0.2):
+        """
+        混合采样。
+        返回: (sampled_list: list, actual_real_ratio: float)
+        """
+        # TODO: YOUR CODE HERE
+        pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+flywheel = SimToRealFlywheelBuffer()
+
+# 1. 灌入 100 个仿真样本
+for i in range(100):
+    flywheel.push_sim(f"sim_{i}", {"action": np.zeros(7)})
+assert len(flywheel.sim_buffer) == 100
+
+# 2. 灌入 10 个真机样本，其中 3 个有人工接管
+for j in range(10):
+    intervened = (j < 3)
+    flywheel.ingest_real(f"real_{j}", {"action": np.ones(7)}, intervened=intervened)
+
+assert len(flywheel.real_buffer) == 10
+assert flywheel.hard_example_count == 3
+
+# 3. 采样混合批次 (batch_size=20, 期望 real_ratio=0.2 -> 4 个真机样本, 16 个仿真样本)
+batch, actual_ratio = flywheel.sample_hybrid_batch(batch_size=20, real_ratio=0.2)
+assert len(batch) == 20
+assert abs(actual_ratio - 0.2) < 1e-4
+
+num_real_sampled = sum(1 for item in batch if "real_" in item["id"])
+num_sim_sampled = sum(1 for item in batch if "sim_" in item["id"])
+assert num_real_sampled == 4
+assert num_sim_sampled == 16
+
+print("Sim-to-Real 混合数据回传飞轮验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么无节制地扩大领域随机化（Domain Randomization）范围反而会导致策略变笨？
+
+如果在仿真中无限制地扩大物理参数随机化范围（例如将地面摩擦系数在 $[0.01, 10.0]$ 之间随机，将机器人质量在 $[0.1M, 10M]$ 之间随机），策略网络为了在所有离谱物理环境下都能存活，会退化成什么形态？如何通过“主动系统辨识（System Identification）”解决？
+
+**你的答案：**
+
+### Q2：人工接管（Human Intervention）数据在模仿学习中为什么具有极高的信息量？
+
+在自动驾驶中，正常行驶的数据大多是枯燥平直的跟车巡航（低熵数据）；而人类安全员突然接管方向盘的瞬间（高熵临界数据），揭示了模型的什么本质缺陷？为什么仅仅几百次接管数据往往比几万小时的平稳行驶数据更能提升模型鲁棒性？
+
+**你的答案：**
+
+### Q3：如何解决真机与仿真数据的分布偏移（Distributional Shift）？
+
+由于仿真渲染的图像与真实相机图像存在明显的视觉域差异（Visual Domain Gap），如果直接将仿真与真机图像混合在一起输入同一个视觉编码器，网络很容易通过背景纹理的微小噪声区分出“这是仿真还是真机”。如何通过自监督预训练（如 Masked Autoencoding）或特征不变性约束消除域偏置？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现仿真/真机容量淘汰队列、接管困难样本标记与精确比例混合抽样，通过测试断言；
+- Q1～Q3 各 2 分：深入阐述过度随机化过保守退化、接管高熵边界与视觉域对齐因果链；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#flywheel_solution .cell course_role='solution' execution_count=1}
+```python
+class SimToRealFlywheelBuffer:
+    def __init__(self, max_sim_capacity=10000, max_real_capacity=2000):
+        self.sim_buffer = []
+        self.real_buffer = []
+        self.max_sim = max_sim_capacity
+        self.max_real = max_real_capacity
+        self.hard_example_count = 0
+
+    def push_sim(self, sample_id, data):
+        if len(self.sim_buffer) >= self.max_sim:
+            self.sim_buffer.pop(0)
+        self.sim_buffer.append({"id": sample_id, "data": data, "is_real": False})
+
+    def ingest_real(self, sample_id, data, intervened=False):
+        if len(self.real_buffer) >= self.max_real:
+            self.real_buffer.pop(0)
+        if intervened:
+            self.hard_example_count += 1
+        self.real_buffer.append({
+            "id": sample_id,
+            "data": data,
+            "is_real": True,
+            "intervened": intervened,
+            "priority": 5.0 if intervened else 1.0
+        })
+
+    def sample_hybrid_batch(self, batch_size, real_ratio=0.2):
+        desired_real = int(batch_size * real_ratio)
+        actual_real = min(desired_real, len(self.real_buffer))
+        actual_sim = batch_size - actual_real
+        
+        # 若仿真数据不足，则按最大可用仿真抽取
+        if actual_sim > len(self.sim_buffer):
+            actual_sim = len(self.sim_buffer)
+            
+        sampled = []
+        # 从真机缓冲区抽取
+        if actual_real > 0:
+            indices_real = np.random.choice(len(self.real_buffer), size=actual_real, replace=False)
+            for idx in indices_real:
+                sampled.append(self.real_buffer[idx])
+                
+        # 从仿真缓冲区抽取
+        if actual_sim > 0:
+            indices_sim = np.random.choice(len(self.sim_buffer), size=actual_sim, replace=False)
+            for idx in indices_sim:
+                sampled.append(self.sim_buffer[idx])
+                
+        real_count = sum(1 for x in sampled if x["is_real"])
+        final_ratio = float(real_count / len(sampled)) if sampled else 0.0
+        return sampled, final_ratio
+
+# 验证执行
+flywheel = SimToRealFlywheelBuffer()
+for i in range(100):
+    flywheel.push_sim(f"sim_{i}", {"action": np.zeros(7)})
+assert len(flywheel.sim_buffer) == 100
+
+for j in range(10):
+    intervened = (j < 3)
+    flywheel.ingest_real(f"real_{j}", {"action": np.ones(7)}, intervened=intervened)
+
+assert len(flywheel.real_buffer) == 10
+assert flywheel.hard_example_count == 3
+
+batch, actual_ratio = flywheel.sample_hybrid_batch(batch_size=20, real_ratio=0.2)
+assert len(batch) == 20
+assert abs(actual_ratio - 0.2) < 1e-4
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **过宽随机化引发的过度保守策略（Over-Conservative Policy）**：
+   策略网络为了同时满足超低摩擦（如冰面）与超高摩擦（如强粘胶）的物理极值，梯度优化会逼迫策略收敛到所有物理环境的最保守交集。例如四足机器人或双臂策略会退化为行动极其迟缓、僵硬的爬行，彻底失去高动态敏捷性。
+2. **主动系统辨识与自适应隐空间（System ID & Latent Adaptation）**：
+   更先进的做法是引入自适应机制（如 RMA, Rapid Motor Adaptation）：策略包含一个轻量级环境编码器（Estimator），根据前几步的关节反馈误差在线推测当前的摩擦力、负载质量隐变量 $z_t$，动态微调动作输出，而不是让单一静态权重盲目承受无限随机化。
+
+### Q2 参考答案
+
+1. **长尾复合分布外状态（Compound Error at the Tails）**：
+   在平顺工况下，神经网络很容易凭借记忆平缓输出。接管动作发生的情境，恰恰是当前策略的累积误差已经达到了无法自愈、即将发生物理危险的临界边缘（Out-of-Distribution Boundary）。
+2. **高质量示范修正（Optimal Recovery Action）**：
+   人类专家在接管瞬间做出的修正动作，直接为网络提供了“如何从失控危险状态挽救回安全流形（Recovery Trajectory）”的最强学习信号。这种高信息熵的监督样本能够精准修补价值函数或流匹配速度场在危险边界的梯度断崖，其泛化价值远超数万个平凡巡航样本。
+
+### Q3 参考答案
+
+1. **视觉伪影与虚假特征依赖（Spurious Feature Reliance）**：
+   仿真引擎（如 Unreal / Unity）渲染的光影纹理、网格反光与真实相机 ISP 管线输出的物理噪点差异明显。若直接混合，神经网络的深层特征会发生模式分化，倾向于依赖特定纹理走捷径。
+2. **特征级解耦与模态对齐（Modality Invariant Representations）**：
+   - **自监督骨干预训练**：使用大量真实世界无标注视频通过 DINOv2 / MAE 预训练视觉骨干，在微调时冻结浅层特征提取器；
+   - **几何中间表征桥梁**：不直接使用原始像素，而是将图像转化为跨域不变的几何抽象中间层（如 2.5D 深度图、表面法向量 Surface Normal 或 3D 占据栅格 Occupancy Grid），从根本上抹平视觉渲染鸿沟。
+:::

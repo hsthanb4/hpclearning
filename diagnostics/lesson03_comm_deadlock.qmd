@@ -1,0 +1,326 @@
+---
+title: "第 3 课：分布式通信死锁逆向定位与状态还原"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 彻底掌握分布式训练中通信死锁（Deadlock）与挂起（Hang）的本质因果链：乱序通信握手、P2P 循环等待、CUDA Stream 交叉依赖与集合通信成员缺失；
+- 熟练运用工业级排查工具链（`NCCL_DEBUG` 环境变量、NCCL Flight Recorder、`py-spy`、GDB 堆栈跟踪）抓取死锁现场；
+- 掌握构建分布式“等待依赖图（Wait-For Graph）”并基于图遍历算法逆向定位环路死锁的实战方法。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（分布式通信死锁有向环检测与状态逆向还原器），并通过测试断言；
+- 三个问答题均说明底层通信原语与硬件状态迁移因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[训练系统：第 3 课 分布式通信原语](../train/lesson03.qmd)、[框架运行时：第 3 课 Process Group 与 Collective 契约](../runtime/lesson03.qmd)。
+- 本课位置：深入万卡集群故障排查深水区，攻克最令人头疼的“无报错无日志、全机群静默挂起”疑难杂症。
+
+---
+
+## 核心心智模型
+
+### 1. 通信死锁的三大典型物理诱因
+
+在由 NCCL（NVIDIA Collective Communications Library）承载的多卡分布式系统中，死锁通常表现为：**没有任何崩溃日志，所有卡 GPU 利用率降为 0%，进程卡在某个通信调用处永不返回**。
+
+常见的三大典型物理诱因为：
+
+#### 诱因一：P2P 异步通信乱序等待闭环（P2P Circular Wait）
+
+在流水线并行（PP）或 MoE 专家并行通信中，节点间使用 `dist.send` 与 `dist.recv`（或 `isend`/`irecv`）：
+
+```{mermaid}
+flowchart LR
+    subgraph DeadlockLoop["典型 P2P 相互阻塞死锁闭环"]
+        direction TB
+        subgraph Rank0["Rank 0 (Node A)"]
+            R0_Send["dist.send(to=Rank 1)<br>同步阻塞等待对端接收确认"]
+        end
+        subgraph Rank1["Rank 1 (Node B)"]
+            R1_Send["dist.send(to=Rank 0)<br>同步阻塞等待对端接收确认"]
+        end
+    end
+    R0_Send -.->|"等待 Rank 1 调 recv"| Rank1
+    R1_Send -.->|"等待 Rank 0 调 recv"| Rank0
+```
+<p class="caption" align="center"><em>图 3-1：两张卡同时调用同步 send 形成的经典通信死锁</em></p>
+
+- **因果链**：当张量大小超过 NCCL 内核内嵌缓冲区（In-line Eager Buffer）阈值时，`send` 必须采用握手协议（Rendezvous Protocol），即等待接收端分配好显存并返回就绪确认才能开始传输。如果 Rank 0 和 Rank 1 都先调用同步 `send`，双方都无法进入下一行代码调用 `recv`，产生永久等待。
+- **解法**：强制统一配对顺序（例如偶数 Rank 先 send 后 recv，奇数 Rank 先 recv 后 send），或全部改用非阻塞异步原语 `isend`/`irecv` 配合统一的 `wait()`。
+
+#### 诱因二：集合通信算子类型与顺序失配（Collective Mismatch）
+
+所有属于同一个通信域（ProcessGroup）的 Rank，必须在物理时间轴上以**完全一致的顺序调用完全相同的集合通信算子**：
+
+```{mermaid}
+flowchart TD
+    subgraph StepTimeline["通信调用失配时序"]
+        direction LR
+        subgraph R0["Rank 0 (正常执行)"]
+            A0["AllReduce(Grads)"] --> B0["Broadcast(Weights)"]
+        end
+        subgraph R1["Rank 1 (因代码分支走错)"]
+            B1["Broadcast(Weights)"] --> A1["AllReduce(Grads)"]
+        end
+    end
+    A0 -.->|"等待所有人进入 AllReduce"| A1
+    B1 -.->|"等待所有人进入 Broadcast"| B0
+```
+<p class="caption" align="center"><em>图 3-2：不同 Rank 算子调用顺序颠倒导致的集合通信死锁</em></p>
+
+- 如果某一行业务代码写了 `if rank == 0: dist.all_reduce()`，或者由于数据 DataLoader 分片未对齐导致 Rank 0 比其他 Rank 少跑了一个 Batch 提前退出了循环，未退出的卡将在下一次集合通信处永久挂死。
+
+#### 诱因三：CUDA Stream 异步依赖环（Cross-Stream Hang）
+
+在现代大模型框架中，计算与通信通常分配在不同的 CUDA Stream 上并发执行：
+- 如果 Stream 1（计算流）等待 Stream 2（通信流）发出的 Event A；
+- 而 Stream 2 在执行集合通信前，又插入了等待 Stream 1 的 Event B；
+- 只要调度顺序稍有偏差，两个流在 GPU 硬件调度器队列中就会互相死锁。
+
+---
+
+### 2. 工业级死锁逆向定位工具链
+
+当万卡集群发生静默挂起时，高效排障四步法：
+
+1. **第一步：配置 NCCL 深度环境变量并重现**
+   ```bash
+   export NCCL_DEBUG=INFO
+   export NCCL_DEBUG_SUBSYS=COLL,P2P,ENV
+   export TORCH_DISTRIBUTED_DEBUG=DETAIL
+   export NCCL_ASYNC_ERROR_HANDLING=1
+   ```
+   - 开启后，NCCL 会打印每一次 Ring 通信的拓扑建立、环路初始化以及超时日志，直接暴露哪张卡未响应。
+
+2. **第二步：动态捕获 Python 调用栈 (`py-spy`)**
+   无需重启进程，直接注入挂起的 Python 进程：
+   ```bash
+   py-spy dump --pid <PID>
+   ```
+   - 立即输出每个线程当前的 Python 调用行号。快速对比各卡：如果发现 Rank 0 停在 `line 120: dist.all_reduce`，而 Rank 1 停在 `line 145: dist.broadcast`，立刻抓到失配根因。
+
+3. **第三步：GDB 堆栈溯源 (C++ / CUDA 层面)**
+   ```bash
+   gdb -p <PID> -ex "thread apply all bt" --batch > gdb_trace.log
+   ```
+   - 查看是否卡在 `ncclKernel_AllReduce_RING_LL` 或 `cudaStreamSynchronize`。
+
+4. **第四步：利用 NCCL Flight Recorder (NCCL 2.14+)**
+   ```bash
+   export NCCL_DUMP_ON_COLL_TIMEOUT=1
+   ```
+   - 超时后 NCCL 会自动 dump 出内部循环缓冲区的最后 $K$ 次通信快照，精准指出最后一次未配对成功的 `seq_num`。
+
+---
+
+## 代码实战：分布式通信死锁有向环检测与状态逆向还原器
+
+在分布式健康管理守护进程（Health Watchdog）中，我们需要实时收集各个 Rank 上报的“正在等待的通信对端与序列号”，构建分布式有向等待图，并在毫秒级内自动检测是否存在有向循环等待死锁（Cycle in Wait-For Graph）。
+
+### 练习题描述
+
+补齐 `detect_comm_deadlock` 函数：
+1. 解析各 Rank 上报的通信状态，提取有向依赖边：如果 Rank $A$ 正在等待来自 Rank $B$ 的数据传输或握手，则存在一条由 $A \to B$ 的有向边；
+2. 构建有向等待图（Wait-For Graph）；
+3. 运用深度优先搜索（DFS）算法检测图中是否存在环路；
+4. 如果存在死锁环路，提取并返回死锁环上的 Rank 序列（例如 `[0, 1, 0]`），并指出具体的死锁原因；若无环路，返回健康状态。
+
+::: {#deadlock_exercise .cell course_role='exercise'}
+```python
+def detect_comm_deadlock(rank_states):
+    """
+    根据各 Rank 的当前通信等待快照，检测是否存在死锁有向环。
+    
+    参数:
+    - rank_states: dict of {int: dict}, key 为 rank_id, value 包含:
+        - "current_op": str, 当前执行的算子 (如 "send", "recv", "all_reduce")
+        - "waiting_for_ranks": list of int, 当前算子正在等待哪些 rank 响应
+        - "op_seq": int, 通信序列号
+        
+    返回:
+    - dict, 包含:
+        - "is_deadlocked": bool, 是否死锁
+        - "cycle_ranks": list of int, 死锁环路上的 rank 节点列表 (如 [0, 1, 0])
+        - "root_cause": str, 死锁原因分析
+    """
+    # TODO: YOUR CODE HERE
+    pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+# 测试场景 1：Rank 0 正在 send 等待 Rank 1，Rank 1 正在 send 等待 Rank 0（经典双向循环死锁）
+deadlock_snapshot = {
+    0: {"current_op": "send", "waiting_for_ranks": [1], "op_seq": 105},
+    1: {"current_op": "send", "waiting_for_ranks": [0], "op_seq": 105},
+    2: {"current_op": "all_reduce", "waiting_for_ranks": [], "op_seq": 105},
+}
+
+res1 = detect_comm_deadlock(deadlock_snapshot)
+print("测试 1 诊断结果:", res1)
+assert res1["is_deadlocked"] == True
+assert (res1["cycle_ranks"] == [0, 1, 0] or res1["cycle_ranks"] == [1, 0, 1])
+assert "循环等待" in res1["root_cause"] or "死锁" in res1["root_cause"]
+
+# 测试场景 2：健康依赖链（Rank 0 -> Rank 1 -> Rank 2，无环路）
+healthy_snapshot = {
+    0: {"current_op": "recv", "waiting_for_ranks": [1], "op_seq": 201},
+    1: {"current_op": "recv", "waiting_for_ranks": [2], "op_seq": 201},
+    2: {"current_op": "compute", "waiting_for_ranks": [], "op_seq": 201},
+}
+res2 = detect_comm_deadlock(healthy_snapshot)
+print("测试 2 诊断结果:", res2)
+assert res2["is_deadlocked"] == False
+assert res2["cycle_ranks"] == []
+
+print("分布式死锁检测器验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么 Ring AllReduce 在丢包时容易表现为“全环死锁挂起”？
+
+在基于环形拓扑的 Ring AllReduce 算法中，每个 GPU 只与环上的逻辑上游（Predecessor）和逻辑下游（Successor）直连。如果其中一条物理链路发生严重网络拥塞或丢包，通信流水线为什么会在全环所有卡上迅速发生级联死锁？
+
+**你的答案：**
+
+### Q2：`isend`/`irecv` 是否能彻底保证不发生通信死锁？
+
+在复杂网络拓扑中，如果代码中全部替换为非阻塞的 `dist.isend()` 与 `dist.irecv()`，是否就高枕无忧了？在什么情况下（例如未及时调用 `wait()`、请求句柄过多导致驱动队列溢出）依然会引发系统级死锁或崩溃？
+
+**你的答案：**
+
+### Q3：如何设计一个生产级集群通信看门狗（Watchdog）系统？
+
+在大规模训练框架中，如何借助心跳检测、分布式锁或 NCCL Timeout 机制，在死锁发生时自动完成现场内存 Core Dump、快速定位首发故障节点（Root Cause Node），并在不破坏未受损 Pod 的情况下触发局部热重启？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确构建有向依赖图，使用 DFS/Tarjan 算法准确检测环路并返回死锁节点路径，通过测试断言；
+- Q1～Q3 各 2 分：必须给出环路状态传递与协议层的因果逻辑；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#deadlock_solution .cell course_role='solution' execution_count=1}
+```python
+def detect_comm_deadlock(rank_states):
+    # 1. 构建邻接表图 graph: rank -> list of waiting ranks
+    graph = {}
+    for rank, state in rank_states.items():
+        graph[rank] = state.get("waiting_for_ranks", [])
+    
+    # 2. 深度优先搜索 (DFS) 检测有向环
+    # 状态: 0 = 未访问, 1 = 当前递归栈中, 2 = 已完全访问
+    visited = {r: 0 for r in rank_states}
+    parent_map = {}
+    cycle_path = []
+    
+    def dfs(node, path):
+        visited[node] = 1
+        path.append(node)
+        
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                continue
+            if visited[neighbor] == 1:
+                # 发现环路！提取环中节点
+                idx = path.index(neighbor)
+                cycle_path.extend(path[idx:] + [neighbor])
+                return True
+            elif visited[neighbor] == 0:
+                if dfs(neighbor, path):
+                    return True
+                    
+        path.pop()
+        visited[node] = 2
+        return False
+
+    for rank in rank_states:
+        if visited[rank] == 0:
+            if dfs(rank, []):
+                break
+                
+    if cycle_path:
+        root_cause = f"检测到分布式通信有向循环等待死锁！参与环路的节点序列为: {cycle_path}。各节点互为上下游且均处于阻塞等待对端释放状态。"
+        return {
+            "is_deadlocked": True,
+            "cycle_ranks": cycle_path,
+            "root_cause": root_cause
+        }
+    else:
+        return {
+            "is_deadlocked": False,
+            "cycle_ranks": [],
+            "root_cause": "系统通信依赖图无环，当前处于正常异步等待或计算状态。"
+        }
+
+# 执行验证
+deadlock_snapshot = {
+    0: {"current_op": "send", "waiting_for_ranks": [1], "op_seq": 105},
+    1: {"current_op": "send", "waiting_for_ranks": [0], "op_seq": 105},
+    2: {"current_op": "all_reduce", "waiting_for_ranks": [], "op_seq": 105},
+}
+healthy_snapshot = {
+    0: {"current_op": "recv", "waiting_for_ranks": [1], "op_seq": 201},
+    1: {"current_op": "recv", "waiting_for_ranks": [2], "op_seq": 201},
+    2: {"current_op": "compute", "waiting_for_ranks": [], "op_seq": 201},
+}
+res1 = detect_comm_deadlock(deadlock_snapshot)
+assert res1["is_deadlocked"] == True
+assert (res1["cycle_ranks"] == [0, 1, 0] or res1["cycle_ranks"] == [1, 0, 1])
+
+res2 = detect_comm_deadlock(healthy_snapshot)
+assert res2["is_deadlocked"] == False
+assert res2["cycle_ranks"] == []
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **紧密耦合的令牌环依赖（Strict Pipeline Dependency）**：
+   Ring AllReduce 将大张量切分为 $N$ 份切片，通信分 $2(N-1)$ 步沿单向逻辑环同步推进。在第 $k$ 步中，Rank $i$ 必须接收来自 Rank $i-1$ 的第 $s$ 份数据切片，才能将其与本地数据累加后转发给 Rank $i+1$。
+2. **级联反压与全环挂起（Backpressure Cascade）**：
+   如果单张卡因为网卡丢包重传或 PCIe 拥塞产生延迟，它的下游节点因为等不到上游切片而阻塞；而该下游节点的下游同样无法收到数据，顺着逻辑环迅速蔓延。更致命的是，经过一圈之后，始发节点的输入端也会因为等待环尾的回传而停摆。整个通信环上所有 SM 核心全部死锁在硬件栅障处，形成不可逆的级联挂死。
+
+### Q2 参考答案
+
+1. **未及时调用 `wait()` 导致的缓冲区撑爆**：
+   `isend`/`irecv` 仅将操作注册到后台通信流。如果循环内无节制地频繁调用 `isend` 而没有及时配合 `wait()` 校验完成状态，底层 NCCL 的代理线程（Proxy Thread）和硬件命令队列（Channel Descriptors）会被瞬间填满，最终导致后续的 `isend` 强制阻塞退化为同步等待，甚至触发驱动显存溢出。
+2. **底层显存悬空（Dangling Pointer）与异步覆写风险**：
+   若在 `wait()` 真正返回前，主线程提前修改或释放了传给 `isend` 的张量物理显存，会导致跨节点通信传输被破坏的数据或触发非法内存访问中断，令对端节点在解析元数据时崩溃或无限等待校验和，引发间接死锁。
+
+### Q3 参考答案
+
+1. **多级心跳与硬件超时监控**：
+   - 框架内部开启 `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`（如 120 秒）；
+   - 每个训练 Step 开始与结束时由独立的 Watchdog 线程向集中式协调器（如 Redis 或 etcd）上报心跳戳；
+2. **首发慢节点定位与状态 Dump**：
+   - 当检测到超时，Watchdog 首先对比各节点的最后进度序号（Step Index）与各流状态。停留在最小序号的节点即为**根因掉队节点（Root-cause Straggler / Faulty Node）**；
+   - 自动向故障节点发送信号触发 `gdb` 和 `py-spy` 打印线程调用栈，并将现场显存与网卡寄存器状态 Dump 存盘；
+3. **弹性热重启（Graceful Elastic Recovery）**：
+   - 依赖类似 PyTorch TorchElastic / Kubernetes Volcano 架构，隔离该故障卡并从就近的分布式 Checkpoint 瞬时恢复状态，避免全集群千卡人工介入排障。
+:::

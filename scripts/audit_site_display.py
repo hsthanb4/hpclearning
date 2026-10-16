@@ -26,15 +26,16 @@ CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 # All courses defined in _quarto.yml
 COURSES = {
-    "train": 14,
-    "cuda": 12,
+    "train": 16,
+    "cuda": 17,
     "cutlass": 8,
     "triton": 10,
     "mlir": 8,
-    "rl": 12,
-    "inference": 8,
-    "runtime": 8,
+    "rl": 14,
+    "inference": 11,
+    "runtime": 11,
     "platform": 8,
+    "diagnostics": 5,
 }
 
 def get_all_expected_lessons():

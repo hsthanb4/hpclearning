@@ -1,0 +1,318 @@
+---
+title: "第 2 课：Nsight Compute 算子微架构瓶颈逐级归因"
+jupyter: python3
+---
+
+::: {.callout-note appearance="simple"}
+**参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
+:::
+
+## 本课目标与完成标准
+
+学完后你应能：
+
+- 熟练看懂 NVIDIA Nsight Compute (`ncu`) 的微架构性能指标，建立以 **Speed-of-Light (SOL)** 和 **Roofline 模型**为核心的算子调优心智模型；
+- 精准判断算子是受限于**显存带宽（Memory-bound）**还是受限于**计算吞吐（Compute-bound）**，并推导其物理性能上限；
+- 深入分析 Warp Scheduler 的指令发射停顿（Stalls），逐项排查长延时指令（Long Scoreboard）、访存等待（MIO Throttle）与 Shared Memory Bank Conflicts；
+- 掌握理论 Occupancy（占用率）与实际达成性能的非线性辩证关系。
+
+通过必须同时满足：
+
+- 独立补齐本课代码填空题（Roofline 边界判定与 Warp 停顿根因归因器），并通过测试断言；
+- 三个问答题均说明硬件行为因果链；
+- 总分不低于 8/10。
+
+## 前置关系
+
+- 前置要求：[第 1 课：Nsight Systems 全链路 Timeline](lesson01_nsight_systems.qmd)、CUDA 线程分块模型（Thread/Warp/Block/SM）。
+- 本课位置：深入微架构核心，指导具体单个算子的极限性能压榨。
+
+---
+
+## 核心心智模型
+
+### 1. Speed-of-Light (SOL) 与 Roofline 物理基准
+
+当我们分析一个 GPU 算子的性能时，最关键的第一步永远是：**这个算子离硬件物理极限还有多远？**
+
+NVIDIA 在 Nsight Compute 中使用 **Speed-of-Light (SOL)** 概括核心利用率：
+- **Compute SOL (SM %)**：SM 计算核心（FP32 ALU / Tensor Core 等）达成的实际算力占理论峰值的百分比；
+- **Memory SOL (DRAM %)**：全局显存控制器达成的实际吞吐量占硬件物理带宽的百分比。
+
+根据经典的 **Roofline 模型**，任何算子的性能上限由其**算术强度（Arithmetic Intensity）**决定：
+
+$$\text{Arithmetic Intensity (AI)} = \frac{\text{Floating Point Operations (FLOPs)}}{\text{Memory Access (Bytes)}}$$
+
+```{mermaid}
+flowchart LR
+    subgraph Roofline["Roofline 性能模型与硬件约束"]
+        direction TB
+        subgraph MemBound["显存受限区 (Memory-Bound)<br>AI < 拐点"]
+            M1["瓶颈：显存物理带宽 (GB/s)"]
+            M2["算力利用率极低 (SM % 很低)"]
+            M3["典型算子：LayerNorm, Softmax, Elementwise Add/Activation"]
+            M4["调优方向：算子融合消除读写、合并访存"]
+        end
+        subgraph TurningPoint["硬件转折点 (Ridge Point)<br>AI* = 峰值算力 / 峰值带宽"]
+            P["NVIDIA A100: ~150 FLOPs/Byte<br>H100: ~200 FLOPs/Byte"]
+        end
+        subgraph ComputeBound["计算受限区 (Compute-Bound)<br>AI > 拐点"]
+            C1["瓶颈：ALU / Tensor Core 计算核心峰值"]
+            C2["显存带宽不是瓶颈 (DRAM % 可不高)"]
+            C3["典型算子：大维度 GEMM, 高维卷积"]
+            C4["调优方向：增大分块尺寸 Tile, 提升 Tensor Core 指令占比"]
+        end
+    end
+    MemBound --> TurningPoint --> ComputeBound
+```
+<p class="caption" align="center"><em>图 2-1：Roofline 算子性能特征与优化方向</em></p>
+
+- 如果算术强度低于硬件转折点，算子必然落在**显存受限区（Memory-Bound）**，无论如何优化计算逻辑，性能都无法突破显存带宽上限；
+- 只有提高计算访存比（例如利用 Shared Memory 复用数据、进行算子融合），才能将算子向右推移，逼近或跨过转折点。
+
+---
+
+### 2. Warp 停顿（Issue Stalls）深层原因拆解
+
+每个 SM 内部拥有若干个 Warp Scheduler（例如 Volta/Ampere/Hopper 每个 SM 有 4 个 Warp 调度器）。调度器每个时钟周期尝试从就绪（Eligible）的 Warp 中选取一条指令发射（Issue）到硬件执行管线中。
+
+如果某个周期调度器**无法发射指令**，说明 Warp 遇到了**流水线停顿（Stall）**。Nsight Compute 将这些停顿归类为几个核心原因：
+
+```{mermaid}
+flowchart TD
+    subgraph WarpStallCategories["Warp Scheduler 停顿原因与微架构定位"]
+        direction TB
+        LS["1. Long Scoreboard (长延时计分板停顿)"] -->|"根因"| LS_R["正在等待全局显存 (Global Memory) 异步加载返回 (常伴随未合并访存或低缓存命中)"]
+        
+        MIO["2. MIO Throttle (内存输入输出管线阻塞)"] -->|"根因"| MIO_R["Shared Memory 频繁发生 Bank Conflicts，或局部访存指令发射队列被打满"]
+        
+        Math["3. Math Pipe Throttle (算术执行管线忙)"] -->|"根因"| Math_R["FP32 单元或 Tensor Core 流水线处于全负荷计算中 (这是健康的计算受限特征)"]
+        
+        Drain["4. Drain (等待屏障同步)"] -->|"根因"| Drain_R["执行了 __syncthreads()，部分线程早早到达，等待 Block 内其他落后线程"]
+        
+        NotSel["5. Not Selected (就绪但未被选中)"] -->|"根因"| NotSel_R["同时有多个 Warp 均处于就绪状态，硬件调度器仲裁轮转 (说明并发充分，健康指标)"]
+    end
+```
+<p class="caption" align="center"><em>图 2-2：Warp 指令发射停顿分类与硬件根因</em></p>
+
+### 3. Occupancy（占用率）的真实取舍
+
+许多初学者误以为“Occupancy（活跃 Warp 占 SM 最大硬件容量的比例）越高越好，必须达到 100%”。
+
+然而在现代硬件上：
+- **过高的 Occupancy 会引发显存缓存反冲（Cache Thrashing）**：每个线程块分配到的寄存器数量被迫受到严格限制（防止 Register Spilling 溢出到 Local Memory），同时 L1 Cache / Shared Memory 被过多线程瓜分，导致局部数据复用率下降；
+- **成熟高效算子的常态**：许多达到极致性能的 GEMM 算子（如 CUTLASS、DeepGEMM），其 Occupancy 往往仅有 30%~50%，因为它们让每个 Warp 承担了极大的计算瓦片（Tile），通过深度的指令级并行（ILP, Instruction-Level Parallelism）完全隐藏了指令延迟，性能远超盲目追求 100% 占用率的朴素实现。
+
+---
+
+## 代码实战：Roofline 边界判定与 Warp 停顿根因归因器
+
+在自动化算子评测与持续优化中，我们需要根据硬件参数和 profiler 采集的指标自动输出调优建议。
+
+### 练习题描述
+
+补齐 `diagnose_kernel_profile` 函数：
+1. 计算输入算子的算术强度（FLOPs/Byte）；
+2. 根据给定的 GPU 硬件峰值算力（TFLOPS）与显存带宽（GB/s），计算该硬件的 Roofline 转折点（Ridge Point）；
+3. 计算该算子理论上的最高可达性能（$\text{Achievable TFLOPS} = \min(\text{Peak TFLOPS}, \text{AI} \times \text{Peak Bandwidth})$）；
+4. 判断该算子当前的受限类型（`"memory-bound"` 或 `"compute-bound"`）；
+5. 分析 Warp Stalls 占比分布，识别占比最高的停顿根因并给出具体的系统级优化建议。
+
+::: {#ncu_exercise .cell course_role='exercise'}
+```python
+def diagnose_kernel_profile(hw_specs, kernel_metrics):
+    """
+    结合硬件规格与 Kernel 实际运行指标，进行 Roofline 评估与 Warp 停顿根因归因。
+    
+    参数:
+    - hw_specs: dict, 包含:
+        - "peak_tflops": float, 对应精度硬件理论峰值 (TFLOPS)
+        - "peak_bandwidth_gb_s": float, 显存物理带宽 (GB/s)
+    - kernel_metrics: dict, 包含:
+        - "flops": int, 算子执行的总浮点运算次数
+        - "bytes": int, 算子读写全局显存的总字节数
+        - "duration_us": float, 实际执行耗时 (微秒)
+        - "stall_breakdown": dict of {str: float}, 各停顿类型的百分比 (总和 100)
+    
+    返回:
+    - dict, 包含:
+        - "arithmetic_intensity": float, 算术强度 (FLOPs/Byte)
+        - "hardware_ridge_point": float, 硬件拐点 (FLOPs/Byte)
+        - "bound_type": str, "memory-bound" 或 "compute-bound"
+        - "achieved_tflops": float, 实际达成算力 (TFLOPS)
+        - "top_stall_reason": str, 占比最高的停顿类型
+        - "optimization_advice": str, 针对性优化建议
+    """
+    # TODO: YOUR CODE HERE
+    pass
+```
+:::
+
+### 检查与验证代码
+
+```python
+hw_a100 = {
+    "peak_tflops": 312.0,            # A100 Tensor Core BF16 峰值 ( Dense )
+    "peak_bandwidth_gb_s": 2039.0     # HBM2e 物理峰值带宽
+}
+
+# 模拟一个典型 LayerNorm 算子指标
+kernel_layernorm = {
+    "flops": 2048 * 4096 * 5,         # M=2048, N=4096, 约 4.19e7 FLOPs
+    "bytes": 2048 * 4096 * 2 * 3,     # 读输入(2B) + 写输出(2B) + 读Gamma(2B)，约 5.03e7 Bytes
+    "duration_us": 32.0,
+    "stall_breakdown": {
+        "Long Scoreboard": 54.2,      # 全局访存长延时占主导
+        "MIO Throttle": 15.1,
+        "Math Pipe Throttle": 2.5,
+        "Drain": 8.2,
+        "Not Selected": 20.0
+    }
+}
+
+res = diagnose_kernel_profile(hw_a100, kernel_layernorm)
+print("诊断报告:", res)
+assert abs(res["arithmetic_intensity"] - 0.8333) < 0.01, f"Expected AI ~0.833, got {res['arithmetic_intensity']}"
+assert abs(res["hardware_ridge_point"] - 153.016) < 0.1, f"Expected Ridge ~153.0, got {res['hardware_ridge_point']}"
+assert res["bound_type"] == "memory-bound"
+assert res["top_stall_reason"] == "Long Scoreboard"
+assert "融合" in res["optimization_advice"] or "访存" in res["optimization_advice"]
+print("Nsight Compute 算子诊断归因器验证通过！")
+```
+
+---
+
+## 思考与问答题
+
+### Q1：为什么小算子融合（Fusion）能成倍提升 Memory-bound 算子的吞吐？
+
+以 `Y = LayerNorm(GeLU(X) + Residual)` 为例，在没有算子融合前，GPU 会执行三次独立的 Kernel。请从物理显存（DRAM）读写带宽和片上缓存（SRAM/Register）的生命周期，推导融合后算力与吞吐大幅跃升的物理本质。
+
+**你的答案：**
+
+### Q2：Shared Memory Bank Conflict 与 Warp 停顿有何关联？
+
+在 Nsight Compute 中，当出现极高的 `MIO Throttle` 停顿，且伴随 `shared_load_bank_conflict` 计数激增时，硬件微架构层面究竟发生了什么？如何通过 Padding（对齐填充）技巧消除 32-way 广播或冲突？
+
+**你的答案：**
+
+### Q3：为什么追求极致性能的算子往往采用“双缓冲（Double Buffering）”或“异步流水线（Async Pipeline）”？
+
+在 Ampere（SM80）引入 `cp.async` 和 Hopper（SM90）引入 TMA 之前，为什么计算逻辑经常被 `Long Scoreboard` 停顿阻塞？双缓冲机制是如何在物理层面将指令发射与数据搬运完全重叠的？
+
+**你的答案：**
+
+---
+
+## 评分与通过规则
+
+- 代码 4 分：正确实现算术强度、硬件转折点计算，正确判定瓶颈类型与顶层停顿分析，通过测试断言；
+- Q1～Q3 各 2 分：必须给出物理显存到片上寄存器的搬运路径因果逻辑；
+- 通过线：总分 $\ge 8/10$。
+
+---
+
+::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
+## 参考答案（仅 answer 分支）
+
+::: {#ncu_solution .cell course_role='solution' execution_count=1}
+```python
+def diagnose_kernel_profile(hw_specs, kernel_metrics):
+    flops = kernel_metrics["flops"]
+    bytes_io = kernel_metrics["bytes"]
+    duration_s = kernel_metrics["duration_us"] * 1e-6
+    
+    # 1. 算术强度 AI (FLOPs/Byte)
+    ai = flops / bytes_io if bytes_io > 0 else 0.0
+    
+    # 2. 硬件转折点 Ridge Point = Peak FLOPS / Peak Bandwidth
+    # 注意单位换算: TFLOPS = 1e12, GB/s = 1e9 => (peak_tflops * 1e12) / (peak_bandwidth_gb_s * 1e9) = (tflops * 1000) / gb_s
+    peak_flops = hw_specs["peak_tflops"] * 1e12
+    peak_bandwidth = hw_specs["peak_bandwidth_gb_s"] * 1e9
+    ridge_point = peak_flops / peak_bandwidth
+    
+    # 3. 判断瓶颈类型
+    bound_type = "memory-bound" if ai < ridge_point else "compute-bound"
+    
+    # 4. 实际达成算力 TFLOPS
+    achieved_tflops = (flops / duration_s) / 1e12 if duration_s > 0 else 0.0
+    
+    # 5. 分析最高停顿原因
+    stalls = kernel_metrics.get("stall_breakdown", {})
+    top_stall = max(stalls.items(), key=lambda item: item[1])[0] if stalls else "Unknown"
+    
+    # 6. 生成针对性优化建议
+    if bound_type == "memory-bound":
+        if top_stall == "Long Scoreboard":
+            advice = "典型显存受限算子，主要瓶颈为全局访存长延时。建议：合并全局内存读写（Coalescing）、通过算子融合减少显存往返、或使用向量化读取（如 float4/half8）。"
+        elif top_stall == "MIO Throttle":
+            advice = "共享内存带宽瓶颈或指令发射拥堵。建议：排查 Shared Memory Bank Conflicts，采用 Padding 错位布局。"
+        else:
+            advice = "显存受限算子。建议：考虑前后算子就地融合（Fusion），将中间张量常驻在寄存器或 Shared Memory 中直接消费。"
+    else:
+        if top_stall == "Math Pipe Throttle":
+            advice = "健康的计算受限状态。已充分发挥计算单元潜能。若需进一步提升，可升级为更高算力的 Tensor Core 指令或采用更低精度（如 FP8/INT8）。"
+        elif top_stall == "Drain":
+            advice = "受限于线程同步栅障（__syncthreads）。建议：减少多余同步，尝试 Warp-level 原语或异步拷贝流水线（Double Buffering）。"
+        else:
+            advice = "计算受限算子。建议：调大 ThreadBlock 负责的计算瓦片（Tile Size），提高寄存器级指令重用率（ILP）。"
+            
+    return {
+        "arithmetic_intensity": ai,
+        "hardware_ridge_point": ridge_point,
+        "bound_type": bound_type,
+        "achieved_tflops": achieved_tflops,
+        "top_stall_reason": top_stall,
+        "optimization_advice": advice
+    }
+
+# 验证执行
+hw_a100 = {
+    "peak_tflops": 312.0,
+    "peak_bandwidth_gb_s": 2039.0
+}
+kernel_layernorm = {
+    "flops": 2048 * 4096 * 5,
+    "bytes": 2048 * 4096 * 2 * 3,
+    "duration_us": 32.0,
+    "stall_breakdown": {
+        "Long Scoreboard": 54.2,
+        "MIO Throttle": 15.1,
+        "Math Pipe Throttle": 2.5,
+        "Drain": 8.2,
+        "Not Selected": 20.0
+    }
+}
+res = diagnose_kernel_profile(hw_a100, kernel_layernorm)
+assert abs(res["arithmetic_intensity"] - 0.8333) < 0.01
+assert abs(res["hardware_ridge_point"] - 153.016) < 0.1
+assert res["bound_type"] == "memory-bound"
+assert res["top_stall_reason"] == "Long Scoreboard"
+print("参考实现验证 100% 通过！")
+```
+:::
+
+### Q1 参考答案
+
+1. **未融合状态下的物理显存浪费**：
+   在未融合状态下，每个独立 Kernel 都必须遵循“从高延迟的板载 HBM 显存读取数据 $\to$ 放入片上寄存器计算 $\to$ 再写回板载 HBM 显存”的过程。对于三个连续算子，中间张量（激活值）在昂贵的板载显存中进行了两次多余的写出与重新读入。由于这三个算子都是显存受限型（AI 极低），GPU 绝大部分时间都在等待数据在片外总线（PCIe/HBM）上往返搬运。
+2. **融合消除访存瓶颈**：
+   融合为一个 Kernel 后，数据只需从 HBM 加载一次到片上寄存器，残差加法、激活函数与归一化统计量的计算在片上极高带宽（数十 TB/s）的寄存器和 Shared Memory 中连续完成，最终仅写回最终结果一次。这直接消除了 60%~70% 的全局显存流量，使整体端到端耗时呈现倍数级的下降。
+
+### Q2 参考答案
+
+1. **Shared Memory Bank Conflict 微架构行为**：
+   GPU 片上 Shared Memory 在物理上被等分为 32 个独立的存储体（Banks，每个 Bank 宽度为 4 字节）。一个 Warp 内的 32 个线程并发访问共享内存时，如果多个线程请求的内存地址恰好落入**同一个 Bank 但地址不同**，硬件无法在一个周期内并行返回数据，必须被微架构硬件强制串行化（Serializing Access）。若 32 个线程同时冲突在一个 Bank，需要连续花费 32 个周期才能完成一次访存指令，导致 Warp 调度器被迫进入严重的 `MIO Throttle` 停顿。
+2. **Padding 消除冲突原理**：
+   在申请二维共享内存时（如 `__shared__ half s_tile[32][32]`），因为每行是 32 个元素（恰好等于 32 个 Banks 的周期跨度），第 $i$ 列的元素无论哪一行都会映射到第 $i$ 个 Bank。当按列读取数据时（如转置或 GEMM），同一列的 32 个线程将发生致命的 32-way Bank Conflict。
+   通过在末尾增加一个元素的 Padding（即声明为 `__shared__ half s_tile[32][33]`），每一行的起始地址在物理 Bank 上向后偏移了 1 个单位，使得原本同列的数据被均匀分散错开到 32 个不同的 Banks 中，实现零冲突单周期并发访问。
+
+### Q3 参考答案
+
+1. **传统同步加载的停顿本质**：
+   在传统架构中，数据从全局显存搬运到共享内存，必须先经过线程的通用寄存器：`Global Memory -> Registers -> Shared Memory`。当线程执行读取指令时，由于全局显存存在 200~400 个周期的物理延迟，指令调度器在检测到后续指令依赖该寄存器时，只能将 Warp 挂起在 `Long Scoreboard` 停顿中。
+2. **双缓冲与异步流水线的重叠解法**：
+   双缓冲在 Shared Memory 中开辟两套互不干扰的 Buffer（Stage 0 与 Stage 1）。
+   - 在计算 Stage 0 数据的同时，由异步指令（如 Ampere 的 `cp.async` 或 Hopper 的 TMA）在后台硬件引擎中直接将 Stage 1 的下一次迭代数据从全局显存灌入 Shared Memory，完全绕过寄存器且不占用任何 Warp 的算术执行周期；
+   - 当 Stage 0 计算完毕，Stage 1 数据已恰好在片上就绪，计算与访存完全并行重叠，使得 `Long Scoreboard` 停顿彻底消失。
+:::
