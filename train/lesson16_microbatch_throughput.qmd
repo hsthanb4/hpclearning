@@ -1,5 +1,5 @@
 ---
-title: "第 16 课：小批量高吞吐混合训练优化：微批次流水与动态梯度累积"
+title: "第 16 课：非均质流水线调度：具身多频异构 1F1B 与非对称气泡消除实战"
 jupyter: python3
 ---
 
@@ -7,108 +7,157 @@ jupyter: python3
 **参考答案版**：包含完整代码实现与问答题深度参考解析。建议先独立完成练习题后再展开核对。
 :::
 
-## 本课目标与完成标准
+::: {.callout-important title="统一完成标准与及格线"}
+代码 4 分、Q1～Q3 各 2 分，通过线 8/10。必须解释正确性边界、非均匀流水线气泡率推导公式与各 Stage 显存峰值计算；未实际运行的内容只能标记为静态审查。
+:::
 
-学完后你应能：
+- 对应工程领域：Megatron-LM 异构流水线编排、具身端到端大模型高吞吐训练系统
+- 前置：[第 9 课：流水线并行 PP](lesson09.qmd)、[第 10 课：零气泡流水线](lesson10.qmd)、[第 15 课：异构 5D 并行](lesson15_multimodal_vla.qmd)
+- 状态：已完成
 
-- 掌握具身轨迹长序列、自动驾驶长视频在分布式训练中**样本长度差异极大（Heterogeneous Sample Sizes）**带来的系统挑战；
-- 搞懂为什么固定 Micro-batch Size 会导致显存利用率饥饿（Under-utilization）与频繁显存溢出（OOM）并存；
-- 深入掌握**动态微批次打包（Dynamic Micro-batching / Bin-Packing）**与**自适应梯度累积（Dynamic Gradient Accumulation）**机制；
-- 掌握在 PyTorch DDP 中利用 `no_sync()` 上下文消除中间微批次多余通信气泡的工业级实现。
+## 本课目标
 
-通过必须同时满足：
+完成本课后你需要能够：
 
-- 独立补齐本课代码填空题（动态 Token 预算微批次装箱与梯度累积调度器），并通过测试断言；
-- 三个问答题均说明通信频次与计算利用率折衷因果链；
-- 总分不低于 8/10。
-
-## 前置关系
-
-- 前置要求：[第 2 课：激活、重计算与梯度累积](lesson02.qmd)、[第 4 课：数据并行 DP](lesson04.qmd)。
-- 本课位置：攻克具身多轮交互轨迹与复杂非均质多模态数据在大规模集群训练中的吞吐优化极限。
+- 深刻理解多模态具身模型中，首阶段（视觉编码 ViT）与尾阶段（连续动作去噪 Action Head）耗时显著超前/落后导致的**非均质流水线气泡雪崩机制**；
+- 推导在非均匀阶段延迟向量 $\vec{T}_f = [t_0, t_1, \dots, t_{P-1}]$ 条件下，1F1B 调度稳态流水线气泡率与吞吐上限数学公式；
+- 掌握激活值峰值显存驻留（In-flight Activation Stash）与非对称阶段的耦合机理；
+- 设计并实现工业级**非均质 1F1B 流水线编排模拟器与层重平衡求解器（Layer Re-balancing Solver）**。
 
 ---
 
 ## 核心心智模型
 
-### 1. 异构样本的残酷现实：固定 Batch 的系统崩溃
+### 1. 均质 1F1B 假设的破灭：具身端到端模型的“哑铃型”算力分布
 
-在自动驾驶世界模型或具身机器人多轮交互训练中：
-- 简单的机械臂抓取任务可能仅持续 3 秒（150 个时序步）；
-- 复杂的做饭整理或多路口自动驾驶长轨迹持续长达 60 秒（3000 个时序步），数据量相差 **20 倍**！
+在标准文本大模型的流水线并行（PP，如第 9 课所示）中，有一个基本假设：
+$$\text{所有流水线阶段的计算耗时严格均等}：t_f^{(0)} = t_f^{(1)} = \dots = t_f^{(P-1)} = t_f$$
+在此假设下，只要微批次数量 $m \gg P$，气泡率可以被稀释至 $\frac{P-1}{m + P-1}$。
 
-如果采用传统的固定静态 Micro-batch（例如每张卡每次取 2 个样本）：
-1. **遇到长样本时突发 OOM**：激活值显存与序列长度成正比，瞬间击穿 80GB 显存发生崩溃；
-2. **遇到短样本时算力饥饿**：GPU 显存占用不到 10GB，Tensor Core 大面积闲置，计算强度极低；
-3. **掉队者效应（Straggler Effect）**：机群中分配到长样本的 GPU 正在吃力地计算，而分配到短样本的 GPU 早已跑完，在 NCCL 集合通信前长时间空闲挂起。
+但在具身大模型（如 $\pi_0$、OpenVLA）与自动驾驶端到端模型中，计算负载呈现极端的**“两头重、中间轻”（哑铃型分布）**：
 
 ```{mermaid}
-flowchart TD
-    subgraph HeteroBatch["动态微批次装箱 (Token-Budget Bin Packing) 核心设计"]
+flowchart LR
+    subgraph Stage0["Stage 0: 头部瓶颈 (耗时 3.0x)"]
         direction TB
-        Incoming["异构长短任务样本队列 (包含 150步、800步、2500步等)"] --> BinPack["1. 动态装箱调度器 (Bin-Packing)<br>根据硬件最大显存预算，设定单步 Token 上限 (如 4096 Tokens)"]
-        BinPack --> PackShort["短样本自动合并: 20 个短样本拼为一个饱满批次"]
-        BinPack --> PackLong["长样本单独处理: 1 个长样本切分处理，绝不 OOM"]
-        PackShort & PackLong --> DynAccum["2. 自适应动态梯度累积 (Dynamic Gradient Accumulation)<br>当累计处理量达到全局目标步长时，统一触发反向通信"]
+        ViT["6 路相机高分辨率 ViT<br>3456 Patch Tokens"] --> S0_LLM["LLM 前 4 层"]
     end
+
+    subgraph StageMid["Stage 1 ~ P-2: 中间轻量 (耗时 1.0x)"]
+        direction TB
+        Mid_LLM["标准 Transformer Dense/MoE 层<br>(均匀矩阵乘计算)"]
+    end
+
+    subgraph StageTail["Stage P-1: 尾部瓶颈 (耗时 2.0x)"]
+        direction TB
+        Tail_LLM["LLM 最后 4 层"] --> ActionHead["Diffusion / Flow Matching<br>多步连续动作去噪求解器"]
+    end
+
+    Stage0 -->|"P2P 激活传输"| StageMid -->|"P2P 激活传输"| StageTail
 ```
-<p class="caption" align="center"><em>图 16-1：动态微批次装箱与自适应梯度累积流水线</em></p>
+<p class="caption" align="center"><em>图 16-1：具身 VLA 大模型端到端异构流水线阶段算力分布</em></p>
+
+- **Stage 0（输入端）**：必须前向提取多路高分辨率相机的 Patch 特征，外加跨模态重排通信，前向耗时是中间 Transformer 层的 $2.5 \sim 3.0$ 倍；
+- **Stage 1 ~ Stage $P-2$（中间层）**：纯净的 Transformer 结构，计算高度规整均匀；
+- **Stage $P-1$（动作输出端）**：不仅要计算最后几层 Transformer，还要执行动作去噪生成（如 Flow Matching 多步 ODE 积分或高频动作轨迹解码），耗时是中间层的 $1.8 \sim 2.0$ 倍。
 
 ---
 
-### 2. DDP `no_sync()` 上下文与通信气泡消除
+### 2. 非均质流水线气泡雪崩的数学推导
 
-在梯度累积（Gradient Accumulation）期间，传统的 `model(x).backward()` 会在**每一个 Micro-batch 反向计算时自动触发全机群的梯度 AllReduce**。
-- 如果我们累积 8 个微批次，就会无意义地在网络上发起 8 次通信；
-- **工业级优化**：在前 7 个微批次执行反向传播时，必须显式包裹在 `with model.no_sync():` 上下文中。DDP 会拦截并关闭通信，仅在本地显存就地将梯度累加（`grad += new_grad`）；
-- 仅在最后一个微批次结束时，统一发射单次全局集合通信，将跨节点网络通信开销直接削减 87.5%！
+在点对点（P2P）阻塞通信约束下，**整条流水线的单步节拍被最慢的瓶颈阶段（Bottleneck Stage）强行锁死**：
+$$t_{\text{bottle}} = \max_{p \in [0, P-1]} t_f^{(p)}$$
+
+中间的快速阶段即使很快完成了本地计算，由于下游 Stage $P-1$ 尚未处理完毕，或者上游 Stage 0 尚未吐出新的微批次，中间卡必须进入强制硬件空闲等待（Forced Idle Stalls）。
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant S0 as Stage 0 (慢: 30ms)
+    participant S1 as Stage 1 (快: 10ms)
+    participant S2 as Stage 2 (慢: 20ms)
+
+    S0->>S1: 发送 Micro-batch 0 激活 (耗时 30ms)
+    Note over S1: S1 计算仅需 10ms
+    S1->>S2: 发送 Micro-batch 0 激活 (耗时 10ms)
+    Note over S1: S1 处于饥饿空等！因为 S0 正在计算 MB 1 (需等 20ms)
+    Note over S2: S2 开始执行 MB 0 (需耗时 20ms)
+    S0->>S1: S0 终于算完 MB 1 发给 S1
+```
+<p class="caption" align="center"><em>图 16-2：非均匀耗时引发的流水线强制停顿与饥饿气泡</em></p>
+
+#### 非均质气泡率（Asymmetric Bubble Ratio）定量公式：
+设共有 $P$ 个流水线阶段，每个阶段前向耗时为 $t_f^{(p)}$，微批次数量为 $m$。
+整个流水线处理 $m$ 个微批次稳态流动的理想有用总功为：
+$$W_{\text{useful}} = m \sum_{p=0}^{P-1} t_f^{(p)}$$
+而整个集群实际消耗的墙上时间（Wall-clock Time）由启动开销与瓶颈阶段节拍决定：
+$$T_{\text{wall}} \approx \sum_{p=0}^{P-1} t_f^{(p)} + (m - 1) \cdot t_{\text{bottle}}$$
+因此，集群的真实非均质气泡率为：
+$$\text{Bubble}_{\text{asym}} = 1 - \frac{W_{\text{useful}}}{P \cdot T_{\text{wall}}} = 1 - \frac{m \sum_{p=0}^{P-1} t_f^{(p)}}{P \cdot \left(\sum_{p=0}^{P-1} t_f^{(p)} + (m - 1) \max_p t_f^{(p)}\right)}$$
+
+**结论**：即使微批次数量 $m \to \infty$，稳态气泡率极限也无法降为 0，而是收敛至：
+$$\lim_{m \to \infty} \text{Bubble}_{\text{asym}} = 1 - \frac{\overline{t_f}}{t_{\text{bottle}}}$$
+若瓶颈阶段耗时是平均耗时的 2 倍，**集群将永久损失 50% 的理论算力**！
 
 ---
 
-## 代码实战：动态微批次打包与梯度累积调度器
+### 3. 系统级破局：非均匀层重平衡求解算法（Layer Re-balancing）
 
-我们实现一个生产级动态微批次装箱器，根据各样本实际时序长度动态打包进预设的最大显存容量，并在满足全局更新步长时精准触发 DDP 集合通信信号。
+要彻底消灭非均质气泡，工业界的终极方案是**打破“每张卡均分 $L/P$ 层”的教条**，实行**加权非均匀层分配（Weighted Layer Partitioning）**：
+
+设全网共 $L$ 个语言/动作 Transformer 骨干层，每个层的前向耗时为 $\tau$。
+- Stage 0 拥有固定的视觉前置开销 $T_{\text{vis}}$，分配 $L_0$ 个 Transformer 层；
+- Stage $p$（中间阶段）分配 $L_p$ 个 Transformer 层；
+- Stage $P-1$ 拥有固定的动作去噪头开销 $T_{\text{action}}$，分配 $L_{P-1}$ 个 Transformer 层。
+
+约束条件与优化目标：
+$$\min_{\{L_p\}} \max_{p \in [0, P-1]} T_p \quad \text{s.t.} \quad \sum_{p=0}^{P-1} L_p = L, \quad L_p \in \mathbb{N}$$
+通过削减两头阶段的 Transformer 层数、大幅增加中间阶段的层数，使得各 Stage 总耗时实现微秒级完全对齐：$T_0 \approx T_1 \approx \dots \approx T_{P-1}$，直接将异构气泡率压回传统均质水平！
+
+---
+
+## 代码实战：非均质 1F1B 流水线模拟器与层重平衡求解器
+
+我们实现一个生产级流水线事件驱动模拟器，精确跟踪每个微批次在异构阶段间的状态推进，并求解最优层重平衡方案。
 
 ### 练习题描述
 
-补齐 `DynamicBatchAccumulator` 类：
-1. `pack_microbatches(samples, max_tokens_per_microbatch)`：
-   - 采用贪心装箱算法（First-Fit Decreasing 或顺序装箱），将样本列表（每个样本有其 `token_count`）切分为若干个 Micro-batch，保证每个 Micro-batch 的总 Token 数严格不超过 `max_tokens_per_microbatch`；
-2. `schedule_step(microbatches, target_tokens_per_optimizer_step)`：
-   - 遍历微批次列表，模拟前向与反向流水；
-   - 跟踪当前累积的 Token 总数；
-   - 在未达到目标更新量前，标记 `sync_gradients=False`（对应 `no_sync()`）；
-   - 当达到或超过更新量时，标记 `sync_gradients=True`，并输出触发优化器更新的步点。
+补齐 `AsymmetricPipelineScheduler` 类：
+1. `simulate_1f1b_execution(stage_latencies, num_microbatches)`：
+   - 输入各 Stage 耗时列表 $[t_0, t_1, \dots, t_{P-1}]$ 与微批次数量 $m$；
+   - 模拟标准 1F1B 调度时序，计算流水线总耗时、各卡有效利用时间与整体气泡率（Bubble Ratio）；
+2. `solve_optimal_layer_partition(total_layers, layer_cost, s0_fixed_cost, s_tail_fixed_cost, num_stages)`：
+   - 基于贪心负载最小化算法，在固定前置/后置额外开销下，为每个 Stage 分配最优的整数层数 $L_p$，使得各 Stage 耗时方差最小，返回最优层分配列表 $[L_0, L_1, \dots, L_{P-1}]$。
 
-::: {#microbatch_exercise .cell course_role='exercise'}
+::: {#asym_pp_exercise .cell course_role='exercise'}
 ```python
-class DynamicBatchAccumulator:
-    def __init__(self, max_tokens_per_microbatch=4096, target_step_tokens=8192):
-        self.max_tokens = max_tokens_per_microbatch
-        self.target_step_tokens = target_step_tokens
+import numpy as np
 
-    def pack_microbatches(self, sample_token_counts):
+class AsymmetricPipelineScheduler:
+    def __init__(self):
+        pass
+
+    def simulate_1f1b_execution(self, stage_latencies, num_microbatches):
         """
-        将样本贪心装箱为符合 max_tokens 预算的 Micro-batch 列表。
-        每个元素为该 Micro-batch 包含的样本索引列表。
+        模拟非均质 1F1B 前向阶段流水执行时序
         
         参数:
-        - sample_token_counts: list of int, 各样本的时序长度/Token数
+        - stage_latencies: list of float, 长度为 P, 各 Stage 单个微批次前向耗时 (毫秒)
+        - num_microbatches: int, 微批次数量 m
+        
         返回:
-        - microbatches: list of list of int (样本索引)
+        - total_time: float, 最后一个微批次在 Stage P-1 结束的墙上时间
+        - bubble_ratio: float, 集群空转气泡率 (0.0 ~ 1.0)
         """
         # TODO: YOUR CODE HERE
         pass
 
-    def schedule_accumulation(self, microbatches, sample_token_counts):
+    def solve_optimal_layer_partition(self, total_layers, layer_cost, s0_fixed_cost, s_tail_fixed_cost, num_stages):
         """
-        规划微批次执行顺序与梯度同步时机。
+        求解使各 Stage 耗时最接近的最优层分配
         
-        返回: list of dict, 每个元素包含:
-            - "mb_index": int
-            - "tokens_in_mb": int
-            - "accumulated_tokens": int
-            - "should_sync": bool, 本次微批次是否触发 AllReduce 通信更新
+        返回:
+        - layers_per_stage: list of int, 长度为 num_stages, sum(layers_per_stage) == total_layers
         """
         # TODO: YOUR CODE HERE
         pass
@@ -118,165 +167,207 @@ class DynamicBatchAccumulator:
 ### 检查与验证代码
 
 ```python
-scheduler = DynamicBatchAccumulator(max_tokens_per_microbatch=1000, target_step_tokens=2500)
+scheduler = AsymmetricPipelineScheduler()
 
-# 模拟 6 个非均质长短样本
-sample_tokens = [200, 300, 450, 950, 150, 600]
+# 场景 1: 4 个 Stage, 未优化的极端哑铃型负载
+# Stage 0: 30ms (ViT 瓶颈), Stage 1: 10ms, Stage 2: 10ms, Stage 3: 20ms (Action Head 瓶颈)
+latencies_unbalanced = [30.0, 10.0, 10.0, 20.0]
+m = 8 # 8 个微批次
 
-# 1. 验证装箱打包
-mbs = scheduler.pack_microbatches(sample_tokens)
-print("装箱微批次分布:", mbs)
-# 验证每个 microbatch 的总 Token 数均不超过 1000
-for mb in mbs:
-    total = sum(sample_tokens[idx] for idx in mb)
-    assert total <= 1000, f"微批次超出显存预算: {total} > 1000"
+total_time, bubble_ratio = scheduler.simulate_1f1b_execution(latencies_unbalanced, m)
+# 理论有用总功: 8 * (30 + 10 + 10 + 20) = 8 * 70 = 560ms
+# 瓶颈阶段为 Stage 0 (30ms), 8 个微批次在 Stage 0 耗时即已达到 240ms, 加管道充水
+assert total_time >= 280.0, f"总时间计算异常: {total_time}"
+assert bubble_ratio > 0.40, f"未平衡状态下气泡率应当极高 (>40%), 实际: {bubble_ratio:.2%}"
 
-# 2. 验证累积规划调度
-plan = scheduler.schedule_accumulation(mbs, sample_tokens)
-print("微批次累积调度计划:")
-for step in plan:
-    print(step)
+# 场景 2: 求解最优层重平衡
+# 总计 32 层 Transformer, 每层耗时 2.0ms
+# Stage 0 有 ViT 固定耗时 16.0ms; Stage 3 有动作头固定耗时 8.0ms; 中间 Stage 无额外开销
+num_stages = 4
+total_layers = 32
+layer_cost = 2.0
+s0_fixed = 16.0
+s3_fixed = 8.0
 
-# 检查最后一个满足 target_step_tokens (2500) 时是否正确触发同步标志
-sync_steps = [s for s in plan if s["should_sync"]]
-assert len(sync_steps) >= 1
-# 总 token 数为 2650 >= 2500，必须至少有一次触发同步
-assert plan[-1]["should_sync"] == True
-# 确保在未达到 2500 之前的中间微批次 should_sync 为 False
-assert plan[0]["should_sync"] == False
+optimal_layers = scheduler.solve_optimal_layer_partition(
+    total_layers=total_layers,
+    layer_cost=layer_cost,
+    s0_fixed_cost=s0_fixed,
+    s_tail_fixed_cost=s3_fixed,
+    num_stages=num_stages
+)
 
-print("动态微批次与自适应梯度累积调度器验证通过！")
+assert sum(optimal_layers) == total_layers, "总层数必须守恒等于 32"
+# Stage 0 负担最重，分配层数应最少；Stage 1, 2 应分担最多层数
+assert optimal_layers[0] < optimal_layers[1], "Stage 0 应该分配更少层以平衡固定开销"
+assert optimal_layers[3] < optimal_layers[2], "Stage 3 应该分配少于中间 Stage 的层数"
+
+# 使用平衡后的层数重新计算各 Stage 耗时
+balanced_latencies = [
+    s0_fixed + optimal_layers[0] * layer_cost,
+    optimal_layers[1] * layer_cost,
+    optimal_layers[2] * layer_cost,
+    s3_fixed + optimal_layers[3] * layer_cost,
+]
+_, new_bubble_ratio = scheduler.simulate_1f1b_execution(balanced_latencies, m)
+assert new_bubble_ratio < bubble_ratio, f"层重平衡后气泡率必须显著下降！原气泡: {bubble_ratio:.2%}, 新气泡: {new_bubble_ratio:.2%}"
+
+print(f"原始异构气泡率: {bubble_ratio:.2%} -> 重平衡后气泡率: {new_bubble_ratio:.2%}")
+print("非均质流水线调度与层重平衡求解测试 100% 通过！")
 ```
 
 ---
 
 ## 思考与问答题
 
-### Q1：在小批量（Micro-batch=1~2）训练中，Batch Normalization 为什么会彻底失效？
-
-为什么在具身控制与现代大模型架构中，所有网络层几乎全部淘汰了 Batch Normalization (BN)，全面转向 LayerNorm 或 RMSNorm？当 Micro-batch 极小时，BN 的均值和方差统计量会出现什么致命偏差？
-
-**你的答案：**
-
-### Q2：跨节点数据加载中，如何平衡各 GPU 的 Token 预算以杜绝掉队者（Straggler）？
-
-在多机多卡训练中，如果各 Rank 的 DataLoader 各自随机读取样本，可能 Rank 0 分配到的批次总长为 4000 Tokens，而 Rank 1 分配到的仅有 1000 Tokens。分布式采样器（Distributed Batch Sampler）应如何全局协同，确保全集群所有卡每步的计算量高度对称？
-
-**你的答案：**
-
-### Q3：梯度累积（Gradient Accumulation）在数学上是否严格等价于单次大 Batch 训练？
-
-从权重更新轨迹与优化器内部状态（以 Adam 优化器的一阶矩 $m_t$ 和二阶矩 $v_t$ 为例）推导：8 次 Micro-batch 梯度累加后执行一次 `optimizer.step()`，与直接将 8 个样本并为一个大 Batch 前向后更新一次，是否存在数学差异？
-
-**你的答案：**
-
----
-
-## 评分与通过规则
-
-- 代码 4 分：正确实现贪心动态装箱、显存预算防溢出约束与自适应通信同步触发点判定，通过测试断言；
-- Q1～Q3 各 2 分：深入阐述归一化层统计偏差、跨卡全局分发与优化器数学等价性因果链；
-- 通过线：总分 $\ge 8/10$。
-
----
-
-::: {.callout-tip collapse="true" title="💡 点击展开参考答案与详细代码实现" icon="false"}
-## 参考答案（仅 answer 分支）
-
-::: {#microbatch_solution .cell course_role='solution' execution_count=1}
-```python
-class DynamicBatchAccumulator:
-    def __init__(self, max_tokens_per_microbatch=4096, target_step_tokens=8192):
-        self.max_tokens = max_tokens_per_microbatch
-        self.target_step_tokens = target_step_tokens
-
-    def pack_microbatches(self, sample_token_counts):
-        microbatches = []
-        current_mb = []
-        current_tokens = 0
-        
-        for idx, count in enumerate(sample_token_counts):
-            if count > self.max_tokens:
-                raise ValueError(f"单个样本 Token 数 ({count}) 超出微批次最大显存预算 ({self.max_tokens})！必须对样本切分！")
-            
-            if current_tokens + count <= self.max_tokens:
-                current_mb.append(idx)
-                current_tokens += count
-            else:
-                # 当前桶已满，开辟新桶
-                if current_mb:
-                    microbatches.append(current_mb)
-                current_mb = [idx]
-                current_tokens = count
-                
-        if current_mb:
-            microbatches.append(current_mb)
-            
-        return microbatches
-
-    def schedule_accumulation(self, microbatches, sample_token_counts):
-        plan = []
-        accumulated = 0
-        
-        for mb_idx, mb in enumerate(microbatches):
-            mb_tokens = sum(sample_token_counts[idx] for idx in mb)
-            accumulated += mb_tokens
-            
-            # 判断是否达到全局更新步长阈值，或者已经是最后一个微批次
-            is_last = (mb_idx == len(microbatches) - 1)
-            should_sync = (accumulated >= self.target_step_tokens) or is_last
-            
-            plan.append({
-                "mb_index": mb_idx,
-                "tokens_in_mb": mb_tokens,
-                "accumulated_tokens": accumulated,
-                "should_sync": should_sync
-            })
-            
-            if should_sync and not is_last:
-                # 重置累积计数器，准备下一个全局更新步
-                accumulated = 0
-                
-        return plan
-
-# 验证执行
-scheduler = DynamicBatchAccumulator(max_tokens_per_microbatch=1000, target_step_tokens=2500)
-sample_tokens = [200, 300, 450, 950, 150, 600]
-mbs = scheduler.pack_microbatches(sample_tokens)
-
-for mb in mbs:
-    total = sum(sample_tokens[idx] for idx in mb)
-    assert total <= 1000
-
-plan = scheduler.schedule_accumulation(mbs, sample_tokens)
-sync_steps = [s for s in plan if s["should_sync"]]
-assert len(sync_steps) >= 1
-assert plan[-1]["should_sync"] == True
-assert plan[0]["should_sync"] == False
-print("参考实现验证 100% 通过！")
-```
+### Q1：非均匀 Stage 延迟为什么会导致标准 1F1B 中间卡出现大量“隐式停顿（Forced Stalls）”？请从 P2P 阻塞发送给出时序因果分析。
+::: {.callout-note collapse="true"}
+#### 参考解析
+1. **点对点通信背压（Backpressure）机制**：
+   在流水线并行实现中（如基于 NCCL Send/Recv 或 PyTorch P2P 通信），如果中间 Stage 1 已经完成了第 $m$ 个微批次的前向计算，它必须将激活值张量通过 `P2P.send` 推送给 Stage 2。
+   若 Stage 2 正在缓慢地计算前一个复杂的微批次，其接收缓冲区尚未释放，Stage 1 的发送操作就会被阻塞在 CUDA Stream 或内核套接字上。
+2. **上游饥饿与下游阻塞的双重夹击**：
+   同时，当 Stage 1 等待下游就绪时，它无法立即开始下一个微批次，因为上游 Stage 0（正在耗时跑庞大的 ViT）还没有吐出第 $m+1$ 个微批次的数据。
+3. **因果链总结**：
+   快速阶段陷入“上游来不及喂数据，下游来不及收数据”的双重闭锁。流水线硬件时钟无法形成平滑的滑动齿轮，大量 SM 周期白白浪费在同步等待上。
 :::
 
-### Q1 参考答案
+### Q2：为什么不能通过无限制增加 Micro-batch 数量 $m$ 来稀释非均匀气泡？请给出激活值常驻显存上限的定量公式与 OOM 临界点。
+::: {.callout-note collapse="true"}
+#### 参考解析
+1. **激活值驻留生命周期与阶段深度的关系**：
+   在 1F1B 调度中，前向计算产出的激活值（Activations）必须保存在显存的暂存队列（Stash Queue）中，直到对应的反向传播步骤执行完毕才能释放。
+   在流水线第 $p$ 个 Stage，处于激活状态的在飞微批次数量（In-flight Micro-batches）在充水阶段达到峰值，峰值数量为 $P - p$。
+2. **显存峰值数学公式**：
+   每个微批次在单个 Stage 产生的激活值显存占用为：
+   $$M_{\text{act\_mb}} = S \times b_{\mu} \times h \times L_{\text{stage}} \times \left(34 + 5 \times \frac{a \cdot S}{h}\right) \text{ Bytes}$$
+   Stage $p$ 在流水线稳态时的常驻激活值显存为：
+   $$M_{\text{peak}}^{(p)} \approx \min(m, P - p) \cdot M_{\text{act\_mb}}$$
+3. **OOM 临界制约**：
+   若盲目增大 $m$ 以求稀释气泡，虽然在充水期后在飞数量被截断在 $P-p$，但**全局批次大小 $B_{\text{global}} = m \times b_{\mu} \times \text{DP}$ 会同步膨胀**！过大的全局 Batch 会破坏随机梯度下降（SGD/Adam）的学习动态，导致泛化性能崩溃；此外，如果微批次切分过小（$b_{\mu}=1$），单步 GEMM 算力利用率大幅跌落，反而得不偿失。
+:::
 
-1. **小样本统计量的剧烈方差冲击**：
-   Batch Normalization 依赖于当前 Batch 内所有样本在空间和通道维度上的统计均值 $\mu_B$ 与方差 $\sigma_B^2$ 来归一化特征。当 Micro-batch 只有 1 或 2 时，这 1~2 个样本的统计量极不具备总体代表性，方差产生剧烈的随机扰动，破坏了网络对特征尺度的学习。
-2. **LayerNorm / RMSNorm 的单样本内敛闭环**：
-   LayerNorm / RMSNorm 仅在单个样本内部的隐层维度（Channel/Hidden Dim）上独立计算均值与平方和，完全不跨样本交互。无论 Batch Size 是一万还是只有一个样本，其数学归一化行为严格恒定一致，完美适配微批次流水与端到端小批量部署。
+### Q3：在具身机器人持续学习（Continual Learning / Online RL）场景中，视觉感知与动作决策的频率严重不对齐，如何设计多速率异步流水线（Multi-Rate Asynchronous Pipeline）以规避物理时钟丢帧？
+::: {.callout-note collapse="true"}
+#### 参考解析
+1. **时钟解耦与双速率缓冲区（Dual-Rate Buffer）**：
+   视觉环境更新频率通常较低（如相机 20Hz~30Hz），而低层动作执行器与状态反馈频率极高（如力控 100Hz~200Hz）。
+   在训练端，不能将两个子网络绑定在同频率的同一条同步流水线上，必须引入**多速率时空缓存队列**：
+   视觉 Stage 独立以低频更新并在共享内存中维护全局最新的环境潜空间表征（Latent State Token）；动作 Stage 以高频微批次读取最新的 Latent Token 持续进行策略梯度与流匹配训练。
+2. **异步陈旧梯度补偿（Staleness-Aware Compensation）**：
+   由于视觉特征更新慢，高频动作网络反向传播回传给视觉投影层的梯度存在 1~2 个步长的时间滞后（Staleness）。
+   系统必须在跨阶段边界应用**阻尼修正系数**：
+   $$\nabla_{\theta_{\text{vis}}} \mathcal{L} \leftarrow \lambda^{\Delta t} \cdot \nabla_{\theta_{\text{vis}}} \mathcal{L}, \quad \lambda \in (0.9, 1.0)$$
+   通过梯度阻尼衰减，既允许高频动作去噪模块保持实时迭代，又防止陈旧梯度引起视觉编码器权重发散，彻底消灭物理执行端的丢帧失控风险。
+:::
 
-### Q2 参考答案
+---
 
-1. **分布式长尾掉队危害（Distributed Straggler）**：
-   若无全局约束，即便每张卡独立做了装箱，各卡分配到的总计算量（Token 数量）也会出现不对称。计算快的卡早早停在梯度 AllReduce 通信处，其昂贵的算力被完全冻结，集群有效训练算力降为最慢卡的水平。
-2. **全局批采样器（Token-Balanced Distributed Sampler）**：
-   在每个 Epoch 开始前，由分布式数据采样器在全局维度将所有样本按长度进行排序或多项式装箱，将长短样本成对交叉分配给各个 Rank，确保每个卡在每个优化步中分配到的总 Token 预算差异控制在 2% 以内，彻底消除掉队者气泡。
+## 评分细则
 
-### Q3 参考答案
+| 题目 | 得分点 | 扣分标准 |
+| :--- | :--- | :--- |
+| **代码题：非均质 1F1B 模拟器** | 准确模拟各 Stage 首个前向发射、后续依赖等待与墙上总时间 | 未考虑上游就绪依赖或气泡时间统计错误扣 2 分 |
+| **代码题：层重平衡求解器** | 算法能够最小化极值耗时，输出合法整数分配且总层数严格守恒 | 层数总和不守恒或未优先平衡瓶颈阶段扣 2 分 |
+| **Q1：中间卡隐式停顿机理** | 阐明 P2P 发送背压阻塞与上游数据到达延迟的双重耦合关系 | 仅定性描述空闲未指出阻塞通信机制扣 1 分 |
+| **Q2：增加微批次的显存上限** | 列出在飞微批次激活值驻留显存公式，指出全局 Batch 膨胀副作用 | 未给出与阶段深度 $P-p$ 的定量关系扣 1 分 |
+| **Q3：多速率异步流水线设计** | 阐明双速率时钟解耦与梯度陈旧性（Staleness）阻尼衰减机制 | 未给出异步梯度的稳定化措施扣 1 分 |
 
-1. **数学上严格等价的前提**：
-   在不包含 Batch Normalization 等跨样本算子且采用纯线性损失求和的前提下，根据微积分的线性叠加原理，总损失对参数的梯度等于各个微批次损失梯度之和：
-   $$\nabla_\theta \mathcal{L}_{\text{total}} = \sum_k \nabla_\theta \mathcal{L}_k$$
-   因此累加后的总梯度向量在浮点运算精度内与一次性大 Batch 计算出的梯度完全等价。
-2. **优化器单步更新的完美对齐**：
-   只要确保在累积期间不要提前触发 `optimizer.step()`，而是将所有微批次的梯度全部在显存中加和（并除以总样本数做平均）之后，再传入 Adam 优化器计算 $m_t$ 和 $v_t$，其最终的参数权重更新轨迹与直接使用超大 Batch 训练严格一致。
+---
+
+::: {#asym_pp_solution .cell course_role='solution'}
+```python
+import numpy as np
+
+class AsymmetricPipelineScheduler:
+    def __init__(self):
+        pass
+
+    def simulate_1f1b_execution(self, stage_latencies, num_microbatches):
+        """
+        精确事件驱动模拟非均质流水线前向执行
+        stage_end_time[p]: 当前 stage p 刚刚完成上一个任务的时间
+        mb_ready_time[m]: 微批次 m 在上一个 stage 刚刚完成并可供当前 stage 使用的时间
+        """
+        P = len(stage_latencies)
+        m = num_microbatches
+
+        # 记录每个 stage 空闲可接新任务的绝对时间戳
+        stage_available = [0.0] * P
+        # 记录微批次到达各 stage 并可执行的时间
+        # mb_ready_for_stage[m][p]: 微批次 m 可以开始在 stage p 执行的时间
+        mb_ready = [[0.0] * P for _ in range(m)]
+
+        for mb in range(m):
+            for p in range(P):
+                # 开始时间必须同时满足:
+                # 1. stage p 硬件空闲
+                # 2. 上游 stage p-1 产出的数据已到达 (p=0 时无需等待上游)
+                data_ready = mb_ready[mb][p] if p == 0 else mb_ready[mb][p]
+                start_time = max(stage_available[p], data_ready)
+                cost = stage_latencies[p]
+                end_time = start_time + cost
+
+                # 更新硬件与数据就绪时间
+                stage_available[p] = end_time
+                if p + 1 < P:
+                    mb_ready[mb][p + 1] = end_time
+
+        # 总墙上时间是 Stage P-1 处理完最后一个微批次的时间
+        total_time = stage_available[-1]
+
+        # 统计有用总功与整体气泡率
+        useful_work = sum(stage_latencies) * m
+        total_cluster_capacity = P * total_time
+        bubble_ratio = 1.0 - (useful_work / total_cluster_capacity)
+
+        return total_time, max(0.0, bubble_ratio)
+
+    def solve_optimal_layer_partition(self, total_layers, layer_cost, s0_fixed_cost, s_tail_fixed_cost, num_stages):
+        """
+        使用贪心负载最小化算法将 total_layers 分配到各 stage
+        每个 stage 初始层数为 1 (至少 1 层以保持流水线完整)
+        """
+        P = num_stages
+        fixed_costs = [0.0] * P
+        fixed_costs[0] = s0_fixed_cost
+        fixed_costs[-1] = s_tail_fixed_cost
+
+        # 初始每卡分 1 层
+        layers = [1] * P
+        remaining_layers = total_layers - P
+
+        # 每次将 1 层分配给当前总耗时最小的 stage
+        for _ in range(remaining_layers):
+            current_latencies = [fixed_costs[i] + layers[i] * layer_cost for i in range(P)]
+            # 找到当前负载最小的 stage 赋给它一层
+            min_idx = int(np.argmin(current_latencies))
+            layers[min_idx] += 1
+
+        return layers
+
+# 验证执行
+scheduler = AsymmetricPipelineScheduler()
+latencies_unbalanced = [30.0, 10.0, 10.0, 20.0]
+m = 8
+total_time, bubble_ratio = scheduler.simulate_1f1b_execution(latencies_unbalanced, m)
+assert total_time >= 280.0
+assert bubble_ratio > 0.40
+
+optimal_layers = scheduler.solve_optimal_layer_partition(32, 2.0, 16.0, 8.0, 4)
+assert sum(optimal_layers) == 32
+assert optimal_layers[0] < optimal_layers[1]
+assert optimal_layers[3] < optimal_layers[2]
+
+balanced_latencies = [
+    16.0 + optimal_layers[0] * 2.0,
+    optimal_layers[1] * 2.0,
+    optimal_layers[2] * 2.0,
+    8.0 + optimal_layers[3] * 2.0,
+]
+_, new_bubble_ratio = scheduler.simulate_1f1b_execution(balanced_latencies, m)
+assert new_bubble_ratio < bubble_ratio
+
+print("参考实现验证 100% 通过！")
+```
 :::
