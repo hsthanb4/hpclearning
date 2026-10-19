@@ -1,0 +1,1455 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.10.18">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>系统设计 01：万卡千亿/万亿 MoE 超大规模预训练平台设计 – HPC / AI Infra 面试课程</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-5a1953863e1f72ef3b996ef827f01ca7.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-bb62276ab45c84d9efd712f51ff97b5a.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-c23ae8bcde1ab63edce3c632584dd13f.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7381337e273cda72aa4f884aa8562a50.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-c23ae8bcde1ab63edce3c632584dd13f.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+<script src="../site_libs/quarto-diagram/mermaid.min.js"></script>
+<script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
+<link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
+
+
+<link rel="stylesheet" href="../styles.css">
+</head>
+
+<body class="nav-sidebar docked nav-fixed quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="../index.html">
+    <span class="navbar-title">HPC &amp; AI Infra</span>
+    </a>
+  </div>
+            <div id="quarto-search" class="" title="Search"></div>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarCollapse" aria-controls="navbarCollapse" role="menu" aria-expanded="false" aria-label="Toggle navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+  <span class="navbar-toggler-icon"></span>
+</button>
+          <div class="collapse navbar-collapse" id="navbarCollapse">
+            <ul class="navbar-nav navbar-nav-scroll me-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="../index.html"> 
+<span class="menu-text">首页</span></a>
+  </li>  
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu-" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">推荐学习路径</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu-">    
+        <li>
+    <a class="dropdown-item" href="../train/index.html">
+ <span class="dropdown-text">1. 训练系统 (16课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cuda/index.html">
+ <span class="dropdown-text">2. CUDA Kernel (17课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../triton/index.html">
+ <span class="dropdown-text">3. Triton Kernel (10课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../cutlass/index.html">
+ <span class="dropdown-text">4. CUTLASS / CuTe (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../mlir/index.html">
+ <span class="dropdown-text">5. MLIR 编译器 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../runtime/index.html">
+ <span class="dropdown-text">6. 框架运行时 (11课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../inference/index.html">
+ <span class="dropdown-text">7. 推理引擎源码 (11课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../platform/index.html">
+ <span class="dropdown-text">8. 集群平台与运维 (8课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../rl/index.html">
+ <span class="dropdown-text">9. 强化学习与后训练 (14课)</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../diagnostics/index.html">
+ <span class="dropdown-text">10. 性能剖析与状态审计 (5课)</span></a>
+  </li>  
+    </ul>
+  </li>
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu--1" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">面试备战进阶</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu--1">    
+        <li>
+    <a class="dropdown-item" href="../cheatsheet/index.html">
+ <span class="dropdown-text">💡 核心公式推导速查</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../system_design/index.html">
+ <span class="dropdown-text">🏗️ 系统设计专题总览</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../system_design/01_moe_pretrain_cluster.html">
+ <span class="dropdown-text">Case 1: 万卡 MoE 预训练平台</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../system_design/02_low_latency_inference_cluster.html">
+ <span class="dropdown-text">Case 2: 高并发低时延推理集群</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="../system_design/03_embodied_fleet_data_flywheel.html">
+ <span class="dropdown-text">Case 3: 具身车队数据飞轮与后训练</span></a>
+  </li>  
+    </ul>
+  </li>
+</ul>
+            <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/hsthanb4/hpclearning"> <i class="bi bi-github" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+</ul>
+          </div> <!-- /navcollapse -->
+            <div class="quarto-navbar-tools">
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+</div>
+      </div> <!-- /container-fluid -->
+    </nav>
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../system_design/01_moe_pretrain_cluster.html">系统设计 01：万卡千亿/万亿 MoE 超大规模预训练平台设计</a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../system_design/index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">AI Infra 架构设计面试专题（System Design for AI Infra）</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../system_design/01_moe_pretrain_cluster.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text">系统设计 01：万卡千亿/万亿 MoE 超大规模预训练平台设计</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../system_design/02_low_latency_inference_cluster.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">系统设计 02：高并发、低时延分布式 LLM / VLA 推理服务集群设计</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../system_design/03_embodied_fleet_data_flywheel.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">系统设计 03：规模化具身机器人车队遥操作数据飞轮与持续学习系统</span></a>
+  </div>
+</li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">本页目录</h2>
+   
+  <ul>
+  <li><a href="#整体架构全景图" id="toc-整体架构全景图" class="nav-link active" data-scroll-target="#整体架构全景图">整体架构全景图</a></li>
+  <li><a href="#步骤-1物理容量测算与时间边界评估" id="toc-步骤-1物理容量测算与时间边界评估" class="nav-link" data-scroll-target="#步骤-1物理容量测算与时间边界评估">步骤 1：物理容量测算与时间边界评估</a>
+  <ul class="collapse">
+  <li><a href="#计算总量与训练耗时推演" id="toc-计算总量与训练耗时推演" class="nav-link" data-scroll-target="#计算总量与训练耗时推演">1. 计算总量与训练耗时推演</a></li>
+  <li><a href="#静态显存与动态显存账本" id="toc-静态显存与动态显存账本" class="nav-link" data-scroll-target="#静态显存与动态显存账本">2. 静态显存与动态显存账本</a></li>
+  </ul></li>
+  <li><a href="#步骤-2硬件网络拓扑与导轨对齐rail-optimized-architecture" id="toc-步骤-2硬件网络拓扑与导轨对齐rail-optimized-architecture" class="nav-link" data-scroll-target="#步骤-2硬件网络拓扑与导轨对齐rail-optimized-architecture">步骤 2：硬件网络拓扑与导轨对齐（Rail-Optimized Architecture）</a>
+  <ul class="collapse">
+  <li><a href="#rail-导轨对齐拓扑设计" id="toc-rail-导轨对齐拓扑设计" class="nav-link" data-scroll-target="#rail-导轨对齐拓扑设计">8-Rail 导轨对齐拓扑设计</a></li>
+  </ul></li>
+  <li><a href="#步骤-35d-混合并行编排与-deepep-跨机通信重叠" id="toc-步骤-35d-混合并行编排与-deepep-跨机通信重叠" class="nav-link" data-scroll-target="#步骤-35d-混合并行编排与-deepep-跨机通信重叠">步骤 3：5D 混合并行编排与 DeepEP 跨机通信重叠</a>
+  <ul class="collapse">
+  <li><a href="#并行度正交组合决策" id="toc-并行度正交组合决策" class="nav-link" data-scroll-target="#并行度正交组合决策">1. 并行度正交组合决策</a></li>
+  <li><a href="#deepep节点限制路由与两级拓扑感知通信" id="toc-deepep节点限制路由与两级拓扑感知通信" class="nav-link" data-scroll-target="#deepep节点限制路由与两级拓扑感知通信">2. DeepEP：节点限制路由与两级拓扑感知通信</a></li>
+  <li><a href="#dual-pipe-双向交织流水线计算通信-100-隐藏" id="toc-dual-pipe-双向交织流水线计算通信-100-隐藏" class="nav-link" data-scroll-target="#dual-pipe-双向交织流水线计算通信-100-隐藏">3. Dual-Pipe 双向交织流水线（计算通信 100% 隐藏）</a></li>
+  </ul></li>
+  <li><a href="#步骤-4万卡级高可靠容错与高可用架构" id="toc-步骤-4万卡级高可靠容错与高可用架构" class="nav-link" data-scroll-target="#步骤-4万卡级高可靠容错与高可用架构">步骤 4：万卡级高可靠容错与高可用架构</a>
+  <ul class="collapse">
+  <li><a href="#故障平均间隔时间mtbf推演" id="toc-故障平均间隔时间mtbf推演" class="nav-link" data-scroll-target="#故障平均间隔时间mtbf推演">1. 故障平均间隔时间（MTBF）推演</a></li>
+  <li><a href="#基于-daly-公式求解最优-checkpoint-周期" id="toc-基于-daly-公式求解最优-checkpoint-周期" class="nav-link" data-scroll-target="#基于-daly-公式求解最优-checkpoint-周期">2. 基于 Daly 公式求解最优 Checkpoint 周期</a></li>
+  <li><a href="#秒级局部热替换与无感自愈流程" id="toc-秒级局部热替换与无感自愈流程" class="nav-link" data-scroll-target="#秒级局部热替换与无感自愈流程">3. 秒级局部热替换与无感自愈流程</a></li>
+  </ul></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<div class="quarto-title-block"><div><h1 class="title">系统设计 01：万卡千亿/万亿 MoE 超大规模预训练平台设计</h1><button type="button" class="btn code-tools-button" id="quarto-code-tools-source"><i class="bi"></i> Code</button></div></div>
+<p class="subtitle lead">4096 卡集群架构、8-Rail RoCE 导轨对齐、DeepEP 跨节点通信优化与 Daly 容错体系全景</p>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-simple callout-note">
+<div class="callout-body d-flex">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-body-container">
+<p><strong>题目背景</strong>：假设你是某头部 AI 实验室的分布式训练 Infra 负责人，需要设计一个支撑 <strong>500B+ 总参数、前向激活 37B 参数的混合专家大模型（MoE，类似 DeepSeek-V3 架构）</strong> 的超大规模预训练系统。使用 4096 张 NVIDIA H800/H100 GPU（512 台 8 卡节点），目标在 60 天内高效率吞吐 15T Tokens，有效训练时间占比要求 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo>≥</mo><mn>95</mn><mi>%</mi></mrow><annotation encoding="application/x-tex">\ge 95\%</annotation></semantics></math>。</p>
+</div>
+</div>
+</div>
+<section id="整体架构全景图" class="level2">
+<h2 class="anchored" data-anchor-id="整体架构全景图">整体架构全景图</h2>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart TD
+    subgraph PretrainCluster["4096 卡 MoE 万卡预训练平台整体架构"]
+        direction TB
+        subgraph Hardware["1. 硬件与网络基础设施 (Rail-Optimized Spine-Leaf)"]
+            Nodes["512 台 8 卡 H800 节点 (NVLink 900GB/s 域)"]
+            RoCE["8-Rail 独立导轨无损网络 (每卡独占 400Gbps NIC, 0 跨导轨冲突)"]
+            Storage["GPUDirect Storage + 分级分块并行文件系统 (Lustre / CPFS)"]
+            Nodes &lt;--&gt; RoCE
+            Nodes &lt;--&gt; Storage
+        end
+
+        subgraph Parallelism["2. 5D 混合并行编排拓扑 (PP16 x EP64 x DP4, TP=1)"]
+            direction LR
+            PP["流水线并行 PP=16&lt;br&gt;(Dual-Pipe 双向交织流水)"]
+            EP["专家并行 EP=64&lt;br&gt;(跨 8 节点分布式专家池)"]
+            DP["数据并行 DP=4&lt;br&gt;(ZeRO-1 优化器状态切分)"]
+            DeepEP["DeepEP 跨机通信库&lt;br&gt;(节点限制路由 + NVLink-RDMA 两级聚合)"]
+            PP --- EP --- DP --- DeepEP
+        end
+
+        subgraph Resilience["3. 万卡级高可用与容错调度 (Daly 最优周期 + 秒级自愈)"]
+            direction LR
+            Daly["Daly 最优 Checkpoint 周期计算&lt;br&gt;(Tau* ~ 60 分钟自动快照)"]
+            InMem["In-Memory 双副本异步落盘&lt;br&gt;(0 阻塞计算流水线)"]
+            HotSpare["热备节点池 (2% Hot Spares)&lt;br&gt;(动态 Rank 重映射, 60s 内局部恢复)"]
+            Daly --- InMem --- HotSpare
+        end
+
+        Hardware --&gt; Parallelism --&gt; Resilience
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 1-1：万卡 MoE 超大规模预训练平台系统架构全景</em>
+</p>
+<hr>
+</section>
+<section id="步骤-1物理容量测算与时间边界评估" class="level2">
+<h2 class="anchored" data-anchor-id="步骤-1物理容量测算与时间边界评估">步骤 1：物理容量测算与时间边界评估</h2>
+<p>在动手写任何配置文件之前，架构师必须进行严格的<strong>第一性原理物理测算（Back-of-the-Envelope Calculation）</strong>：</p>
+<section id="计算总量与训练耗时推演" class="level3">
+<h3 class="anchored" data-anchor-id="计算总量与训练耗时推演">1. 计算总量与训练耗时推演</h3>
+<ul>
+<li><strong>单 Token 浮点运算量</strong>：对于 MoE 模型，单步仅激活 37B 参数，浮点开销按激活参数计算： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">FLOPs/Token</mtext><mo>≈</mo><mn>6</mn><mo>×</mo><msub><mi mathvariant="normal">Φ</mi><mtext mathvariant="normal">activated</mtext></msub><mo>=</mo><mn>6</mn><mo>×</mo><mn>37</mn><mo>×</mo><msup><mn>10</mn><mn>9</mn></msup><mo>≈</mo><mn>2.22</mn><mo>×</mo><msup><mn>10</mn><mn>11</mn></msup><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> FLOPs</mtext></mrow></mrow><annotation encoding="application/x-tex">\text{FLOPs/Token} \approx 6 \times \Phi_{\text{activated}} = 6 \times 37 \times 10^9 \approx 2.22 \times 10^{11} \text{ FLOPs}</annotation></semantics></math></li>
+<li><strong>总训练计算预算</strong>： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">Total FLOPs</mtext><mo>=</mo><mn>15</mn><mo>×</mo><msup><mn>10</mn><mn>12</mn></msup><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> Tokens</mtext></mrow><mo>×</mo><mn>2.22</mn><mo>×</mo><msup><mn>10</mn><mn>11</mn></msup><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> FLOPs</mtext></mrow><mo>≈</mo><mn>3.33</mn><mo>×</mo><msup><mn>10</mn><mn>24</mn></msup><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> FLOPs</mtext></mrow></mrow><annotation encoding="application/x-tex">\text{Total FLOPs} = 15 \times 10^{12} \text{ Tokens} \times 2.22 \times 10^{11} \text{ FLOPs} \approx 3.33 \times 10^{24} \text{ FLOPs}</annotation></semantics></math></li>
+<li><strong>集群理论算力供给</strong>： 4096 张 H800 GPU（单卡标称 Dense BF16 算力 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>989</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> TFLOPS</mtext></mrow></mrow><annotation encoding="application/x-tex">989\text{ TFLOPS}</annotation></semantics></math>），设定保守工业级 MFU 目标为 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>52</mn><mi>%</mi></mrow><annotation encoding="application/x-tex">52\%</annotation></semantics></math></strong>： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">Cluster Effective FLOPS</mtext><mo>=</mo><mn>4096</mn><mo>×</mo><mn>989</mn><mo>×</mo><msup><mn>10</mn><mn>12</mn></msup><mo>×</mo><mn>0.52</mn><mo>≈</mo><mn>2.106</mn><mo>×</mo><msup><mn>10</mn><mn>15</mn></msup><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> FLOPs/s</mtext></mrow><mo>=</mo><mn>2.106</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> EFLOPS</mtext></mrow></mrow><annotation encoding="application/x-tex">\text{Cluster Effective FLOPS} = 4096 \times 989 \times 10^{12} \times 0.52 \approx 2.106 \times 10^{15} \text{ FLOPs/s} = 2.106\text{ EFLOPS}</annotation></semantics></math></li>
+<li><strong>纯净计算耗时</strong>： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>T</mi><mtext mathvariant="normal">pure</mtext></msub><mo>=</mo><mfrac><mrow><mn>3.33</mn><mo>×</mo><msup><mn>10</mn><mn>24</mn></msup></mrow><mrow><mn>2.106</mn><mo>×</mo><msup><mn>10</mn><mn>15</mn></msup></mrow></mfrac><mo>≈</mo><mn>1.58</mn><mo>×</mo><msup><mn>10</mn><mn>6</mn></msup><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 秒</mtext></mrow><mo>≈</mo><mn>18.3</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 天</mtext></mrow></mrow><annotation encoding="application/x-tex">T_{\text{pure}} = \frac{3.33 \times 10^{24}}{2.106 \times 10^{15}} \approx 1.58 \times 10^6 \text{ 秒} \approx 18.3 \text{ 天}</annotation></semantics></math> 即使加上容错回滚、验证集评测与数据加载气泡（设定总开销放大系数为 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1.25</mn><mo>×</mo></mrow><annotation encoding="application/x-tex">1.25\times</annotation></semantics></math>），整个预训练周期约 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>23</mn><mo>∼</mo><mn>25</mn></mrow><annotation encoding="application/x-tex">23 \sim 25</annotation></semantics></math> 天</strong>，完全在 60 天交付红线之内。</li>
+</ul>
+</section>
+<section id="静态显存与动态显存账本" class="level3">
+<h3 class="anchored" data-anchor-id="静态显存与动态显存账本">2. 静态显存与动态显存账本</h3>
+<ul>
+<li><strong>总参数量</strong>：<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>500</mn><mtext mathvariant="normal">B</mtext></mrow><annotation encoding="application/x-tex">500\text{B}</annotation></semantics></math>。在生产中采用 FP8 权重存储（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> Byte/param</mtext></mrow></mrow><annotation encoding="application/x-tex">1 \text{ Byte/param}</annotation></semantics></math>），权重仅占 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>500</mn><mtext mathvariant="normal">GB</mtext></mrow><annotation encoding="application/x-tex">500\text{GB}</annotation></semantics></math></strong>；</li>
+<li><strong>梯度与 AdamW 优化器</strong>：采用 ZeRO-1 切分，优化器状态（FP32 状态 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>12</mn><mo>×</mo><mn>500</mn><mo>=</mo><mn>6000</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> GB</mtext></mrow></mrow><annotation encoding="application/x-tex">12 \times 500 = 6000\text{ GB}</annotation></semantics></math>）在 DP 组内均分；</li>
+<li><strong>单卡显存分布</strong>：4096 卡总显存高达 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>80</mn><mtext mathvariant="normal">GB</mtext><mo>=</mo><mn>327</mn><mo>,</mo><mn>680</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> GB</mtext></mrow></mrow><annotation encoding="application/x-tex">4096 \times 80\text{GB} = 327,680\text{ GB}</annotation></semantics></math>。模型静态参数与优化器分摊到单卡仅约 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>2</mn><mtext mathvariant="normal">GB</mtext><mo>∼</mo><mn>4</mn><mtext mathvariant="normal">GB</mtext></mrow><annotation encoding="application/x-tex">2\text{GB} \sim 4\text{GB}</annotation></semantics></math></strong>，剩余 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>76</mn><mtext mathvariant="normal">GB</mtext></mrow><annotation encoding="application/x-tex">76\text{GB}</annotation></semantics></math> 显存全部可用作激活值缓存</strong>，完全能够支持 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>8</mn><mtext mathvariant="normal">K</mtext><mo>∼</mo><mn>32</mn><mtext mathvariant="normal">K</mtext></mrow><annotation encoding="application/x-tex">8\text{K} \sim 32\text{K}</annotation></semantics></math> 的大上下文训练。</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="步骤-2硬件网络拓扑与导轨对齐rail-optimized-architecture" class="level2">
+<h2 class="anchored" data-anchor-id="步骤-2硬件网络拓扑与导轨对齐rail-optimized-architecture">步骤 2：硬件网络拓扑与导轨对齐（Rail-Optimized Architecture）</h2>
+<p>万卡集群最大的通信性能杀手是<strong>跨交换机的网络微突发（Micro-burst）与端口哈希拥塞（ECMP Hash Collisions）</strong>。</p>
+<section id="rail-导轨对齐拓扑设计" class="level3">
+<h3 class="anchored" data-anchor-id="rail-导轨对齐拓扑设计">8-Rail 导轨对齐拓扑设计</h3>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart TD
+    subgraph RailTopo["Rail-Optimized 8 导轨独立无拥塞网络结构"]
+        direction TB
+        subgraph SpineLayer["核心交换机层 (Spine Switches)"]
+            Spine0["Spine Rail 0"]
+            Spine1["Spine Rail 1"]
+            Spine7["Spine Rail 7"]
+        end
+
+        subgraph LeafLayer["叶子交换机层 (Leaf / TOR Switches)"]
+            Leaf0["Leaf Rail 0 组"]
+            Leaf1["Leaf Rail 1 组"]
+            Leaf7["Leaf Rail 7 组"]
+        end
+
+        subgraph NodeCluster["计算节点 (512 台 8 卡节点)"]
+            subgraph Node0["Node 0"]
+                GPU0_0["GPU 0 (NIC 0)"]
+                GPU0_1["GPU 1 (NIC 1)"]
+                GPU0_7["GPU 7 (NIC 7)"]
+            end
+            subgraph Node1["Node 1"]
+                GPU1_0["GPU 0 (NIC 0)"]
+                GPU1_1["GPU 1 (NIC 1)"]
+                GPU1_7["GPU 7 (NIC 7)"]
+            end
+        end
+
+        GPU0_0 &amp; GPU1_0 --&gt; Leaf0 --&gt; Spine0
+        GPU0_1 &amp; GPU1_1 --&gt; Leaf1 --&gt; Spine1
+        GPU0_7 &amp; GPU1_7 --&gt; Leaf7 --&gt; Spine7
+    end
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 1-2：8 导轨对齐物理网络架构 (相同序号 GPU 直连独立导轨)</em>
+</p>
+<ol type="1">
+<li><strong>导轨隔离原则</strong>：每个 8 卡节点的第 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>k</mi><annotation encoding="application/x-tex">k</annotation></semantics></math> 号 GPU（配备独立的第 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>k</mi><annotation encoding="application/x-tex">k</annotation></semantics></math> 块 400Gbps CX7 网卡）<strong>只能且仅能连接到第 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>k</mi><annotation encoding="application/x-tex">k</annotation></semantics></math> 号独立的物理网络平面（Rail <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>k</mi><annotation encoding="application/x-tex">k</annotation></semantics></math>）</strong>；</li>
+<li><strong>零跨导轨拥塞</strong>：
+<ul>
+<li>跨机数据并行（DP）或专家并行（EP）的相同 GPU 序号之间交换数据时，流量被物理锁定在各自平行的 Rail 交换机内部；</li>
+<li>彻底根除了传统随机哈希导致多路通信流挤压同一上行链路的“死锁拥塞”（PFC 拥塞风暴与 Pause 帧泛洪）。</li>
+</ul></li>
+</ol>
+<hr>
+</section>
+</section>
+<section id="步骤-35d-混合并行编排与-deepep-跨机通信重叠" class="level2">
+<h2 class="anchored" data-anchor-id="步骤-35d-混合并行编排与-deepep-跨机通信重叠">步骤 3：5D 混合并行编排与 DeepEP 跨机通信重叠</h2>
+<section id="并行度正交组合决策" class="level3">
+<h3 class="anchored" data-anchor-id="并行度正交组合决策">1. 并行度正交组合决策</h3>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">Total GPUs</mtext><mo>=</mo><mtext mathvariant="normal">TP</mtext><mo>×</mo><mtext mathvariant="normal">EP</mtext><mo>×</mo><mtext mathvariant="normal">PP</mtext><mo>×</mo><mtext mathvariant="normal">DP</mtext><mo>=</mo><mn>1</mn><mo>×</mo><mn>64</mn><mo>×</mo><mn>16</mn><mo>×</mo><mn>4</mn><mo>=</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">\text{Total GPUs} = \text{TP} \times \text{EP} \times \text{PP} \times \text{DP} = 1 \times 64 \times 16 \times 4 = 4096</annotation></semantics></math></p>
+<ul>
+<li><strong>为什么选择 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">TP</mtext><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">\text{TP}=1</annotation></semantics></math>？（架构师核心决策）</strong>： 传统大模型常采用 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">TP</mtext><mo>=</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">\text{TP}=4</annotation></semantics></math> 或 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">TP</mtext><mo>=</mo><mn>8</mn></mrow><annotation encoding="application/x-tex">\text{TP}=8</annotation></semantics></math>。但对于 MoE 模型，每个专家的中间维度已被细化（每个 Token 仅路由到少数几个专家）。若在单专家内再强开 TP，矩阵乘维度将缩至极小，无法打满 Hopper 核心流水线；<strong>果断舍弃 TP（<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">TP</mtext><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">\text{TP}=1</annotation></semantics></math>），将单层注意力与 MLP 完整保留在单卡内跑出峰值 MFU</strong>。</li>
+<li><strong>专家并行 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">EP</mtext><mo>=</mo><mn>64</mn></mrow><annotation encoding="application/x-tex">\text{EP}=64</annotation></semantics></math></strong>：64 张卡分布在 8 个连续物理节点内（利用 Rail 0~7 高速并发），形成一个局部高度自治的专家处理大集群；</li>
+<li><strong>流水线并行 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">PP</mtext><mo>=</mo><mn>16</mn></mrow><annotation encoding="application/x-tex">\text{PP}=16</annotation></semantics></math></strong>：将全网 60 层 Transformer 划分为 16 个阶段，每阶段约 3~4 层；</li>
+<li><strong>数据并行 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">DP</mtext><mo>=</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">\text{DP}=4</annotation></semantics></math></strong>：4 个全局副本，搭配 ZeRO-1 消除优化器冗余。</li>
+</ul>
+<hr>
+</section>
+<section id="deepep节点限制路由与两级拓扑感知通信" class="level3">
+<h3 class="anchored" data-anchor-id="deepep节点限制路由与两级拓扑感知通信">2. DeepEP：节点限制路由与两级拓扑感知通信</h3>
+<p>MoE 的核心通信瓶颈在于前向与反向的两次全交换（All-to-All）。若 64 个专家全随机路由，每张卡需同时向 63 张远端卡发送小数据包，网络吞吐呈断崖式下跌。</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant GPU as 源 GPU (Local Rank)
+    participant NVLink as 机内 NVLink (900 GB/s)
+    participant RDMA as 跨机 400Gbps RoCE v2
+    participant Remote as 目标节点远端专家
+
+    Note over GPU,Remote: 1. 节点限制路由: 每 Token 限制最多派发到 M=4 个节点
+    GPU-&gt;&gt;NVLink: 机内局部聚合: 将发往同一远端节点的各 Token 拼成大包
+    NVLink-&gt;&gt;RDMA: 单节点聚合发射: 由指定网卡发射整块大报文 (零小包碎片)
+    RDMA--&gt;&gt;Remote: 远端节点单次解包并由 NVLink 分发至本地专家卡
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 1-3：DeepEP 节点限制路由与机内-跨机两级聚合时序</em>
+</p>
+<ul>
+<li><strong>节点限制路由（Node-Limited Routing）</strong>： 算法层引入强约束：每个 Token 的 Top-8 专家选择，<strong>最多只允许跨越 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>M</mi><mo>≤</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">M \le 4</annotation></semantics></math> 个物理节点</strong>。硬件网络交互拓扑复杂度直接下降 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>50</mn><mi>%</mi></mrow><annotation encoding="application/x-tex">50\%</annotation></semantics></math> 以上；</li>
+<li><strong>机内聚合与跨机发射解耦</strong>： 在触发跨机 RDMA 之前，节点内 8 张卡先通过 900GB/s NVLink 进行<strong>机内数据搬迁打包</strong>。原本 64 个点对点小通信，被融合成少数几个高带宽大报文，完全吃满 400Gbps 网络线速。</li>
+</ul>
+<hr>
+</section>
+<section id="dual-pipe-双向交织流水线计算通信-100-隐藏" class="level3">
+<h3 class="anchored" data-anchor-id="dual-pipe-双向交织流水线计算通信-100-隐藏">3. Dual-Pipe 双向交织流水线（计算通信 100% 隐藏）</h3>
+<p>标准 1F1B 流水线中，每个微批次必须等待 All-to-All 结束才能开始计算。 系统采用 <strong>Dual-Pipe 双向交织流水线</strong>：</p>
+<pre class="text"><code>Stream 1 (计算引擎): [ Micro-batch m 的 Attention 计算 ] ---&gt; [ Micro-batch m 的 FFN 专家计算 ]
+                             ▲                                         ▲
+                             │ (完全重叠 Overlap)                       │ (完全重叠 Overlap)
+                             ▼                                         ▼
+Stream 2 (通信引擎): [ Micro-batch m+1 的 Dispatch All-to-All ] -&gt; [ Micro-batch m-1 的 Combine All-to-All ]</code></pre>
+<ul>
+<li>计算引擎与通信引擎由独立的 CUDA Stream 驱动；</li>
+<li>当前微批次正在计算高强度 Attention 矩阵乘的 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>15</mn><mtext mathvariant="normal">ms</mtext></mrow><annotation encoding="application/x-tex">15\text{ms}</annotation></semantics></math> 时间窗口，正好足够网络完成下一个微批次的专家跨机 All-to-All 数据预取；</li>
+<li><strong>效果：专家通信耗时被 100% 隐藏在注意力计算阴影之下，实现“零感知通信延迟”</strong>。</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="步骤-4万卡级高可靠容错与高可用架构" class="level2">
+<h2 class="anchored" data-anchor-id="步骤-4万卡级高可靠容错与高可用架构">步骤 4：万卡级高可靠容错与高可用架构</h2>
+<p>在 4096 卡规模下，硬件故障是<strong>常态（Norm）而非异常（Exception）</strong>。</p>
+<section id="故障平均间隔时间mtbf推演" class="level3">
+<h3 class="anchored" data-anchor-id="故障平均间隔时间mtbf推演">1. 故障平均间隔时间（MTBF）推演</h3>
+<p>根据大厂真实硬件统计，单张高端 GPU 的 MTBF 约为 3 年（约 26,000 小时）。 万卡集群的实际有效 MTBF： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mtext mathvariant="normal">MTBF</mtext><mtext mathvariant="normal">cluster</mtext></msub><mo>=</mo><mfrac><mrow><mn>26</mn><mo>,</mo><mn>000</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 小时</mtext></mrow></mrow><mn>4096</mn></mfrac><mo>≈</mo><mn>6.35</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 小时</mtext></mrow></mrow><annotation encoding="application/x-tex">\text{MTBF}_{\text{cluster}} = \frac{26,000\text{ 小时}}{4096} \approx 6.35 \text{ 小时}</annotation></semantics></math> <strong>每隔 6 小时集群必有 1 张卡发生故障（Xid 报错、ECC 双比特翻转、PCIE 掉卡或网卡链路协商降速）</strong>。</p>
+</section>
+<section id="基于-daly-公式求解最优-checkpoint-周期" class="level3">
+<h3 class="anchored" data-anchor-id="基于-daly-公式求解最优-checkpoint-周期">2. 基于 Daly 公式求解最优 Checkpoint 周期</h3>
+<p>如果频繁写盘，写盘耗时会侵蚀有效算力；如果写盘太少，故障回滚会丢失大量计算功。 依据 <strong>Daly 最优周期经典公式</strong>： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>τ</mi><mo>*</mo></msup><mo>=</mo><msqrt><mrow><mn>2</mn><mo>⋅</mo><mtext mathvariant="normal">MTBF</mtext><mo>⋅</mo><msub><mi>t</mi><mtext mathvariant="normal">save</mtext></msub></mrow></msqrt><mo>−</mo><msub><mi>t</mi><mtext mathvariant="normal">save</mtext></msub></mrow><annotation encoding="application/x-tex">\tau^* = \sqrt{2 \cdot \text{MTBF} \cdot t_{\text{save}}} - t_{\text{save}}</annotation></semantics></math> 其中： * <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">MTBF</mtext><mo>=</mo><mn>6.35</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 小时</mtext></mrow><mo>=</mo><mn>381</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 分钟</mtext></mrow></mrow><annotation encoding="application/x-tex">\text{MTBF} = 6.35 \text{ 小时} = 381 \text{ 分钟}</annotation></semantics></math>； * 优化后的异步 In-Memory + GDS 快照写盘耗时 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>t</mi><mtext mathvariant="normal">save</mtext></msub><mo>=</mo><mn>5</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 分钟</mtext></mrow></mrow><annotation encoding="application/x-tex">t_{\text{save}} = 5 \text{ 分钟}</annotation></semantics></math>。 代入公式推导： <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>τ</mi><mo>*</mo></msup><mo>=</mo><msqrt><mrow><mn>2</mn><mo>×</mo><mn>381</mn><mo>×</mo><mn>5</mn></mrow></msqrt><mo>−</mo><mn>5</mn><mo>=</mo><msqrt><mn>3810</mn></msqrt><mo>−</mo><mn>5</mn><mo>≈</mo><mn>61.7</mn><mo>−</mo><mn>5</mn><mo>≈</mo><mn>56.7</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> 分钟</mtext></mrow></mrow><annotation encoding="application/x-tex">\tau^* = \sqrt{2 \times 381 \times 5} - 5 = \sqrt{3810} - 5 \approx 61.7 - 5 \approx 56.7 \text{ 分钟}</annotation></semantics></math></p>
+<p><strong>系统设计准则</strong>：设定自动化 Checkpoint 周期为 <strong>每 60 分钟保存一次</strong>，可保证全集群因故障导致的重算损耗严格控制在 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mi>%</mi></mrow><annotation encoding="application/x-tex">3\%</annotation></semantics></math> 以内</strong>。</p>
+<hr>
+</section>
+<section id="秒级局部热替换与无感自愈流程" class="level3">
+<h3 class="anchored" data-anchor-id="秒级局部热替换与无感自愈流程">3. 秒级局部热替换与无感自愈流程</h3>
+<p>传统方案一旦单卡损坏，全集群 4096 张卡必须全部停机杀死进程，重新拉起镜像、读取权重，耗时往往超过 30 分钟。</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">sequenceDiagram
+    autonumber
+    participant Agent as 节点探针 (Node Exporter)
+    participant Controller as 调度控制器 (K8s / Slurm)
+    participant HotSpare as 热备节点 (Hot Spare Node)
+    participant Cluster as 4096 卡运行集群
+
+    Agent-&gt;&gt;Controller: 1. 硬件探针监测到 GPU 382 发生不可纠正 ECC 错误
+    Controller-&gt;&gt;Cluster: 2. 向故障所在 PP 阶段注入“通信暂停栅栏 (Pause Barrier)”
+    Controller-&gt;&gt;HotSpare: 3. 分配预热备用节点，建立 RDMA 链路
+    Cluster-&gt;&gt;HotSpare: 4. 从同组健康卡通过跨机高速内存副本恢复状态 (&lt;45 秒)
+    HotSpare--&gt;&gt;Cluster: 5. 动态重映射全局通信环 (Dynamic NCCL Comm Re-Init)
+    Controller-&gt;&gt;Cluster: 6. 解除暂停，全集群无损继续前向计算
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p class="caption" align="center">
+<em>图 1-4：万卡局部故障秒级无感热替换自愈流程</em>
+</p>
+<ul>
+<li><strong>热备节点池（Hot Spares）</strong>：集群预留 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>2</mn><mi>%</mi></mrow><annotation encoding="application/x-tex">2\%</annotation></semantics></math> 的空闲热备节点（约 10 台节点）；</li>
+<li><strong>局部快照恢复</strong>：利用相邻节点的本地 NVMe 镜像快速同步损坏节点的权重与优化器状态，无需访问远程分布式文件系统；</li>
+<li><strong>自愈时效</strong>：全流程在 <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>60</mn><mo>∼</mo><mn>90</mn></mrow><annotation encoding="application/x-tex">60 \sim 90</annotation></semantics></math> 秒内自愈完成</strong>，达成全任务有效训练时间 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo>≥</mo><mn>95</mn><mi>%</mi></mrow><annotation encoding="application/x-tex">\ge 95\%</annotation></semantics></math> 的工业级硬指标。</li>
+</ul>
+
+
+<!-- -->
+
+</section>
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+    const viewSource = window.document.getElementById('quarto-view-source') ||
+                       window.document.getElementById('quarto-code-tools-source');
+    if (viewSource) {
+      const sourceUrl = viewSource.getAttribute("data-quarto-source-url");
+      viewSource.addEventListener("click", function(e) {
+        if (sourceUrl) {
+          // rstudio viewer pane
+          if (/\bcapabilities=\b/.test(window.location)) {
+            window.open(sourceUrl);
+          } else {
+            window.location.href = sourceUrl;
+          }
+        } else {
+          const modal = new bootstrap.Modal(document.getElementById('quarto-embedded-source-code-modal'));
+          modal.show();
+        }
+        return false;
+      });
+    }
+    function toggleCodeHandler(show) {
+      return function(e) {
+        const cellDetails = window.document.querySelectorAll(".cell details.code-fold");
+        for (let i=0; i<cellDetails.length; i++) {
+          const details = cellDetails[i];
+          if (show) {
+            details.open = true;
+          } else {
+            details.removeAttribute("open");
+          }
+        }
+        const cellCodeDivs = window.document.querySelectorAll(".cell div.sourceCode.cell-code");
+        const fromCls = show ? "hidden" : "unhidden";
+        const toCls = show ? "unhidden" : "hidden";
+        for (let i=0; i<cellCodeDivs.length; i++) {
+          const codeDiv = cellCodeDivs[i];
+          if (codeDiv.classList.contains(fromCls)) {
+            codeDiv.classList.remove(fromCls);
+            codeDiv.classList.add(toCls);
+          } 
+        }
+        return false;
+      }
+    }
+    const hideAllCode = window.document.getElementById("quarto-hide-all-code");
+    if (hideAllCode) {
+      hideAllCode.addEventListener("click", toggleCodeHandler(false));
+    }
+    const showAllCode = window.document.getElementById("quarto-show-all-code");
+    if (showAllCode) {
+      showAllCode.addEventListener("click", toggleCodeHandler(true));
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/hsthanb4\.github\.io\/hpclearning\/");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> "系统设计 01：万卡千亿/万亿 MoE 超大规模预训练平台设计"</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="an">subtitle:</span><span class="co"> "4096 卡集群架构、8-Rail RoCE 导轨对齐、DeepEP 跨节点通信优化与 Daly 容错体系全景"</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>::: {.callout-note appearance="simple"}</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>**题目背景**：假设你是某头部 AI 实验室的分布式训练 Infra 负责人，需要设计一个支撑 **500B+ 总参数、前向激活 37B 参数的混合专家大模型（MoE，类似 DeepSeek-V3 架构）** 的超大规模预训练系统。使用 4096 张 NVIDIA H800/H100 GPU（512 台 8 卡节点），目标在 60 天内高效率吞吐 15T Tokens，有效训练时间占比要求 $\ge 95\%$。</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="fu">## 整体架构全景图</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    subgraph PretrainCluster[<span class="ot">"</span><span class="st">4096 卡 MoE 万卡预训练平台整体架构</span><span class="ot">"</span>]</span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>        subgraph Hardware[<span class="ot">"</span><span class="st">1. 硬件与网络基础设施 (Rail-Optimized Spine-Leaf)</span><span class="ot">"</span>]</span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>            Nodes[<span class="ot">"</span><span class="st">512 台 8 卡 H800 节点 (NVLink 900GB/s 域)</span><span class="ot">"</span>]</span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>            RoCE[<span class="ot">"</span><span class="st">8-Rail 独立导轨无损网络 (每卡独占 400Gbps NIC, 0 跨导轨冲突)</span><span class="ot">"</span>]</span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>            Storage[<span class="ot">"</span><span class="st">GPUDirect Storage + 分级分块并行文件系统 (Lustre / CPFS)</span><span class="ot">"</span>]</span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>            Nodes &lt;--&gt; RoCE</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>            Nodes &lt;--&gt; Storage</span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>        subgraph Parallelism[<span class="ot">"</span><span class="st">2. 5D 混合并行编排拓扑 (PP16 x EP64 x DP4, TP=1)</span><span class="ot">"</span>]</span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>            direction LR</span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>            PP[<span class="ot">"</span><span class="st">流水线并行 PP=16&lt;br&gt;(Dual-Pipe 双向交织流水)</span><span class="ot">"</span>]</span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>            EP[<span class="ot">"</span><span class="st">专家并行 EP=64&lt;br&gt;(跨 8 节点分布式专家池)</span><span class="ot">"</span>]</span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>            DP[<span class="ot">"</span><span class="st">数据并行 DP=4&lt;br&gt;(ZeRO-1 优化器状态切分)</span><span class="ot">"</span>]</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>            DeepEP[<span class="ot">"</span><span class="st">DeepEP 跨机通信库&lt;br&gt;(节点限制路由 + NVLink-RDMA 两级聚合)</span><span class="ot">"</span>]</span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>            PP --- EP --- DP --- DeepEP</span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        subgraph Resilience[<span class="ot">"</span><span class="st">3. 万卡级高可用与容错调度 (Daly 最优周期 + 秒级自愈)</span><span class="ot">"</span>]</span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>            direction LR</span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>            Daly[<span class="ot">"</span><span class="st">Daly 最优 Checkpoint 周期计算&lt;br&gt;(Tau* ~ 60 分钟自动快照)</span><span class="ot">"</span>]</span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>            InMem[<span class="ot">"</span><span class="st">In-Memory 双副本异步落盘&lt;br&gt;(0 阻塞计算流水线)</span><span class="ot">"</span>]</span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>            HotSpare[<span class="ot">"</span><span class="st">热备节点池 (2% Hot Spares)&lt;br&gt;(动态 Rank 重映射, 60s 内局部恢复)</span><span class="ot">"</span>]</span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>            Daly --- InMem --- HotSpare</span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>        Hardware --&gt; Parallelism --&gt; Resilience</span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-1：万卡 MoE 超大规模预训练平台系统架构全景<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a><span class="fu">## 步骤 1：物理容量测算与时间边界评估</span></span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>在动手写任何配置文件之前，架构师必须进行严格的**第一性原理物理测算（Back-of-the-Envelope Calculation）**：</span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 计算总量与训练耗时推演</span></span>
+<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**单 Token 浮点运算量**：对于 MoE 模型，单步仅激活 37B 参数，浮点开销按激活参数计算：</span>
+<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>  $$\text{FLOPs/Token} \approx 6 \times \Phi_{\text{activated}} = 6 \times 37 \times 10^9 \approx 2.22 \times 10^{11} \text{ FLOPs}$$</span>
+<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**总训练计算预算**：</span>
+<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>  $$\text{Total FLOPs} = 15 \times 10^{12} \text{ Tokens} \times 2.22 \times 10^{11} \text{ FLOPs} \approx 3.33 \times 10^{24} \text{ FLOPs}$$</span>
+<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**集群理论算力供给**：</span>
+<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a>  4096 张 H800 GPU（单卡标称 Dense BF16 算力 $989\text{ TFLOPS}$），设定保守工业级 MFU 目标为 **$52\%$**：</span>
+<span id="cb2-61"><a href="#cb2-61" aria-hidden="true" tabindex="-1"></a>  $$\text{Cluster Effective FLOPS} = 4096 \times 989 \times 10^{12} \times 0.52 \approx 2.106 \times 10^{15} \text{ FLOPs/s} = 2.106\text{ EFLOPS}$$</span>
+<span id="cb2-62"><a href="#cb2-62" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**纯净计算耗时**：</span>
+<span id="cb2-63"><a href="#cb2-63" aria-hidden="true" tabindex="-1"></a>  $$T_{\text{pure}} = \frac{3.33 \times 10^{24}}{2.106 \times 10^{15}} \approx 1.58 \times 10^6 \text{ 秒} \approx 18.3 \text{ 天}$$</span>
+<span id="cb2-64"><a href="#cb2-64" aria-hidden="true" tabindex="-1"></a>即使加上容错回滚、验证集评测与数据加载气泡（设定总开销放大系数为 $1.25\times$），整个预训练周期约 **$23 \sim 25$ 天**，完全在 60 天交付红线之内。</span>
+<span id="cb2-65"><a href="#cb2-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-66"><a href="#cb2-66" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 静态显存与动态显存账本</span></span>
+<span id="cb2-67"><a href="#cb2-67" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**总参数量**：$500\text{B}$。在生产中采用 FP8 权重存储（$1 \text{ Byte/param}$），权重仅占 **$500\text{GB}$**；</span>
+<span id="cb2-68"><a href="#cb2-68" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**梯度与 AdamW 优化器**：采用 ZeRO-1 切分，优化器状态（FP32 状态 $12 \times 500 = 6000\text{ GB}$）在 DP 组内均分；</span>
+<span id="cb2-69"><a href="#cb2-69" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**单卡显存分布**：4096 卡总显存高达 $4096 \times 80\text{GB} = 327,680\text{ GB}$。模型静态参数与优化器分摊到单卡仅约 **$2\text{GB} \sim 4\text{GB}$**，剩余 **$76\text{GB}$ 显存全部可用作激活值缓存**，完全能够支持 $8\text{K} \sim 32\text{K}$ 的大上下文训练。</span>
+<span id="cb2-70"><a href="#cb2-70" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-71"><a href="#cb2-71" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-72"><a href="#cb2-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-73"><a href="#cb2-73" aria-hidden="true" tabindex="-1"></a><span class="fu">## 步骤 2：硬件网络拓扑与导轨对齐（Rail-Optimized Architecture）</span></span>
+<span id="cb2-74"><a href="#cb2-74" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-75"><a href="#cb2-75" aria-hidden="true" tabindex="-1"></a>万卡集群最大的通信性能杀手是**跨交换机的网络微突发（Micro-burst）与端口哈希拥塞（ECMP Hash Collisions）**。</span>
+<span id="cb2-76"><a href="#cb2-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-77"><a href="#cb2-77" aria-hidden="true" tabindex="-1"></a><span class="fu">### 8-Rail 导轨对齐拓扑设计</span></span>
+<span id="cb2-78"><a href="#cb2-78" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-81"><a href="#cb2-81" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb2-82"><a href="#cb2-82" aria-hidden="true" tabindex="-1"></a>flowchart TD</span>
+<span id="cb2-83"><a href="#cb2-83" aria-hidden="true" tabindex="-1"></a>    subgraph RailTopo[<span class="ot">"</span><span class="st">Rail-Optimized 8 导轨独立无拥塞网络结构</span><span class="ot">"</span>]</span>
+<span id="cb2-84"><a href="#cb2-84" aria-hidden="true" tabindex="-1"></a>        direction TB</span>
+<span id="cb2-85"><a href="#cb2-85" aria-hidden="true" tabindex="-1"></a>        subgraph SpineLayer[<span class="ot">"</span><span class="st">核心交换机层 (Spine Switches)</span><span class="ot">"</span>]</span>
+<span id="cb2-86"><a href="#cb2-86" aria-hidden="true" tabindex="-1"></a>            Spine0[<span class="ot">"</span><span class="st">Spine Rail 0</span><span class="ot">"</span>]</span>
+<span id="cb2-87"><a href="#cb2-87" aria-hidden="true" tabindex="-1"></a>            Spine1[<span class="ot">"</span><span class="st">Spine Rail 1</span><span class="ot">"</span>]</span>
+<span id="cb2-88"><a href="#cb2-88" aria-hidden="true" tabindex="-1"></a>            Spine7[<span class="ot">"</span><span class="st">Spine Rail 7</span><span class="ot">"</span>]</span>
+<span id="cb2-89"><a href="#cb2-89" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb2-90"><a href="#cb2-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-91"><a href="#cb2-91" aria-hidden="true" tabindex="-1"></a>        subgraph LeafLayer[<span class="ot">"</span><span class="st">叶子交换机层 (Leaf / TOR Switches)</span><span class="ot">"</span>]</span>
+<span id="cb2-92"><a href="#cb2-92" aria-hidden="true" tabindex="-1"></a>            Leaf0[<span class="ot">"</span><span class="st">Leaf Rail 0 组</span><span class="ot">"</span>]</span>
+<span id="cb2-93"><a href="#cb2-93" aria-hidden="true" tabindex="-1"></a>            Leaf1[<span class="ot">"</span><span class="st">Leaf Rail 1 组</span><span class="ot">"</span>]</span>
+<span id="cb2-94"><a href="#cb2-94" aria-hidden="true" tabindex="-1"></a>            Leaf7[<span class="ot">"</span><span class="st">Leaf Rail 7 组</span><span class="ot">"</span>]</span>
+<span id="cb2-95"><a href="#cb2-95" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb2-96"><a href="#cb2-96" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-97"><a href="#cb2-97" aria-hidden="true" tabindex="-1"></a>        subgraph NodeCluster[<span class="ot">"</span><span class="st">计算节点 (512 台 8 卡节点)</span><span class="ot">"</span>]</span>
+<span id="cb2-98"><a href="#cb2-98" aria-hidden="true" tabindex="-1"></a>            subgraph Node0[<span class="ot">"</span><span class="st">Node 0</span><span class="ot">"</span>]</span>
+<span id="cb2-99"><a href="#cb2-99" aria-hidden="true" tabindex="-1"></a>                GPU0_0[<span class="ot">"</span><span class="st">GPU 0 (NIC 0)</span><span class="ot">"</span>]</span>
+<span id="cb2-100"><a href="#cb2-100" aria-hidden="true" tabindex="-1"></a>                GPU0_1[<span class="ot">"</span><span class="st">GPU 1 (NIC 1)</span><span class="ot">"</span>]</span>
+<span id="cb2-101"><a href="#cb2-101" aria-hidden="true" tabindex="-1"></a>                GPU0_7[<span class="ot">"</span><span class="st">GPU 7 (NIC 7)</span><span class="ot">"</span>]</span>
+<span id="cb2-102"><a href="#cb2-102" aria-hidden="true" tabindex="-1"></a>            end</span>
+<span id="cb2-103"><a href="#cb2-103" aria-hidden="true" tabindex="-1"></a>            subgraph Node1[<span class="ot">"</span><span class="st">Node 1</span><span class="ot">"</span>]</span>
+<span id="cb2-104"><a href="#cb2-104" aria-hidden="true" tabindex="-1"></a>                GPU1_0[<span class="ot">"</span><span class="st">GPU 0 (NIC 0)</span><span class="ot">"</span>]</span>
+<span id="cb2-105"><a href="#cb2-105" aria-hidden="true" tabindex="-1"></a>                GPU1_1[<span class="ot">"</span><span class="st">GPU 1 (NIC 1)</span><span class="ot">"</span>]</span>
+<span id="cb2-106"><a href="#cb2-106" aria-hidden="true" tabindex="-1"></a>                GPU1_7[<span class="ot">"</span><span class="st">GPU 7 (NIC 7)</span><span class="ot">"</span>]</span>
+<span id="cb2-107"><a href="#cb2-107" aria-hidden="true" tabindex="-1"></a>            end</span>
+<span id="cb2-108"><a href="#cb2-108" aria-hidden="true" tabindex="-1"></a>        end</span>
+<span id="cb2-109"><a href="#cb2-109" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-110"><a href="#cb2-110" aria-hidden="true" tabindex="-1"></a>        GPU0_0 &amp; GPU1_0 --&gt; Leaf0 --&gt; Spine0</span>
+<span id="cb2-111"><a href="#cb2-111" aria-hidden="true" tabindex="-1"></a>        GPU0_1 &amp; GPU1_1 --&gt; Leaf1 --&gt; Spine1</span>
+<span id="cb2-112"><a href="#cb2-112" aria-hidden="true" tabindex="-1"></a>        GPU0_7 &amp; GPU1_7 --&gt; Leaf7 --&gt; Spine7</span>
+<span id="cb2-113"><a href="#cb2-113" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb2-114"><a href="#cb2-114" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb2-115"><a href="#cb2-115" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-2：8 导轨对齐物理网络架构 (相同序号 GPU 直连独立导轨)<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb2-116"><a href="#cb2-116" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-117"><a href="#cb2-117" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**导轨隔离原则**：每个 8 卡节点的第 $k$ 号 GPU（配备独立的第 $k$ 块 400Gbps CX7 网卡）**只能且仅能连接到第 $k$ 号独立的物理网络平面（Rail $k$）**；</span>
+<span id="cb2-118"><a href="#cb2-118" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**零跨导轨拥塞**：</span>
+<span id="cb2-119"><a href="#cb2-119" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>跨机数据并行（DP）或专家并行（EP）的相同 GPU 序号之间交换数据时，流量被物理锁定在各自平行的 Rail 交换机内部；</span>
+<span id="cb2-120"><a href="#cb2-120" aria-hidden="true" tabindex="-1"></a><span class="ss">   - </span>彻底根除了传统随机哈希导致多路通信流挤压同一上行链路的“死锁拥塞”（PFC 拥塞风暴与 Pause 帧泛洪）。</span>
+<span id="cb2-121"><a href="#cb2-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-122"><a href="#cb2-122" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-123"><a href="#cb2-123" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-124"><a href="#cb2-124" aria-hidden="true" tabindex="-1"></a><span class="fu">## 步骤 3：5D 混合并行编排与 DeepEP 跨机通信重叠</span></span>
+<span id="cb2-125"><a href="#cb2-125" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-126"><a href="#cb2-126" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 并行度正交组合决策</span></span>
+<span id="cb2-127"><a href="#cb2-127" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-128"><a href="#cb2-128" aria-hidden="true" tabindex="-1"></a>$$\text{Total GPUs} = \text{TP} \times \text{EP} \times \text{PP} \times \text{DP} = 1 \times 64 \times 16 \times 4 = 4096$$</span>
+<span id="cb2-129"><a href="#cb2-129" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-130"><a href="#cb2-130" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**为什么选择 $\text{TP}=1$？（架构师核心决策）**：</span>
+<span id="cb2-131"><a href="#cb2-131" aria-hidden="true" tabindex="-1"></a>  传统大模型常采用 $\text{TP}=4$ 或 $\text{TP}=8$。但对于 MoE 模型，每个专家的中间维度已被细化（每个 Token 仅路由到少数几个专家）。若在单专家内再强开 TP，矩阵乘维度将缩至极小，无法打满 Hopper 核心流水线；**果断舍弃 TP（$\text{TP}=1$），将单层注意力与 MLP 完整保留在单卡内跑出峰值 MFU**。</span>
+<span id="cb2-132"><a href="#cb2-132" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**专家并行 $\text{EP}=64$**：64 张卡分布在 8 个连续物理节点内（利用 Rail 0~7 高速并发），形成一个局部高度自治的专家处理大集群；</span>
+<span id="cb2-133"><a href="#cb2-133" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**流水线并行 $\text{PP}=16$**：将全网 60 层 Transformer 划分为 16 个阶段，每阶段约 3~4 层；</span>
+<span id="cb2-134"><a href="#cb2-134" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**数据并行 $\text{DP}=4$**：4 个全局副本，搭配 ZeRO-1 消除优化器冗余。</span>
+<span id="cb2-135"><a href="#cb2-135" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-136"><a href="#cb2-136" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-137"><a href="#cb2-137" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-138"><a href="#cb2-138" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. DeepEP：节点限制路由与两级拓扑感知通信</span></span>
+<span id="cb2-139"><a href="#cb2-139" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-140"><a href="#cb2-140" aria-hidden="true" tabindex="-1"></a>MoE 的核心通信瓶颈在于前向与反向的两次全交换（All-to-All）。若 64 个专家全随机路由，每张卡需同时向 63 张远端卡发送小数据包，网络吞吐呈断崖式下跌。</span>
+<span id="cb2-141"><a href="#cb2-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-144"><a href="#cb2-144" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb2-145"><a href="#cb2-145" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb2-146"><a href="#cb2-146" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb2-147"><a href="#cb2-147" aria-hidden="true" tabindex="-1"></a>    participant GPU as 源 GPU (Local Rank)</span>
+<span id="cb2-148"><a href="#cb2-148" aria-hidden="true" tabindex="-1"></a>    participant NVLink as 机内 NVLink (<span class="dv">900</span> GB/s)</span>
+<span id="cb2-149"><a href="#cb2-149" aria-hidden="true" tabindex="-1"></a>    participant RDMA as 跨机 <span class="dv">400</span>Gbps RoCE v2</span>
+<span id="cb2-150"><a href="#cb2-150" aria-hidden="true" tabindex="-1"></a>    participant Remote as 目标节点远端专家</span>
+<span id="cb2-151"><a href="#cb2-151" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-152"><a href="#cb2-152" aria-hidden="true" tabindex="-1"></a>    Note over GPU,Remote: <span class="fl">1.</span> 节点限制路由: 每 Token 限制最多派发到 M=<span class="dv">4</span> 个节点</span>
+<span id="cb2-153"><a href="#cb2-153" aria-hidden="true" tabindex="-1"></a>    GPU-&gt;&gt;NVLink: 机内局部聚合: 将发往同一远端节点的各 Token 拼成大包</span>
+<span id="cb2-154"><a href="#cb2-154" aria-hidden="true" tabindex="-1"></a>    NVLink-&gt;&gt;RDMA: 单节点聚合发射: 由指定网卡发射整块大报文 (零小包碎片)</span>
+<span id="cb2-155"><a href="#cb2-155" aria-hidden="true" tabindex="-1"></a>    RDMA--&gt;&gt;Remote: 远端节点单次解包并由 NVLink 分发至本地专家卡</span>
+<span id="cb2-156"><a href="#cb2-156" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb2-157"><a href="#cb2-157" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-3：DeepEP 节点限制路由与机内-跨机两级聚合时序<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb2-158"><a href="#cb2-158" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-159"><a href="#cb2-159" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**节点限制路由（Node-Limited Routing）**：</span>
+<span id="cb2-160"><a href="#cb2-160" aria-hidden="true" tabindex="-1"></a>  算法层引入强约束：每个 Token 的 Top-8 专家选择，**最多只允许跨越 $M \le 4$ 个物理节点**。硬件网络交互拓扑复杂度直接下降 $50\%$ 以上；</span>
+<span id="cb2-161"><a href="#cb2-161" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**机内聚合与跨机发射解耦**：</span>
+<span id="cb2-162"><a href="#cb2-162" aria-hidden="true" tabindex="-1"></a>  在触发跨机 RDMA 之前，节点内 8 张卡先通过 900GB/s NVLink 进行**机内数据搬迁打包**。原本 64 个点对点小通信，被融合成少数几个高带宽大报文，完全吃满 400Gbps 网络线速。</span>
+<span id="cb2-163"><a href="#cb2-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-164"><a href="#cb2-164" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-165"><a href="#cb2-165" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-166"><a href="#cb2-166" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. Dual-Pipe 双向交织流水线（计算通信 100% 隐藏）</span></span>
+<span id="cb2-167"><a href="#cb2-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-168"><a href="#cb2-168" aria-hidden="true" tabindex="-1"></a>标准 1F1B 流水线中，每个微批次必须等待 All-to-All 结束才能开始计算。</span>
+<span id="cb2-169"><a href="#cb2-169" aria-hidden="true" tabindex="-1"></a>系统采用 **Dual-Pipe 双向交织流水线**：</span>
+<span id="cb2-170"><a href="#cb2-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-171"><a href="#cb2-171" aria-hidden="true" tabindex="-1"></a><span class="in">```text</span></span>
+<span id="cb2-172"><a href="#cb2-172" aria-hidden="true" tabindex="-1"></a><span class="in">Stream 1 (计算引擎): [ Micro-batch m 的 Attention 计算 ] ---&gt; [ Micro-batch m 的 FFN 专家计算 ]</span></span>
+<span id="cb2-173"><a href="#cb2-173" aria-hidden="true" tabindex="-1"></a><span class="in">                             ▲                                         ▲</span></span>
+<span id="cb2-174"><a href="#cb2-174" aria-hidden="true" tabindex="-1"></a><span class="in">                             │ (完全重叠 Overlap)                       │ (完全重叠 Overlap)</span></span>
+<span id="cb2-175"><a href="#cb2-175" aria-hidden="true" tabindex="-1"></a><span class="in">                             ▼                                         ▼</span></span>
+<span id="cb2-176"><a href="#cb2-176" aria-hidden="true" tabindex="-1"></a><span class="in">Stream 2 (通信引擎): [ Micro-batch m+1 的 Dispatch All-to-All ] -&gt; [ Micro-batch m-1 的 Combine All-to-All ]</span></span>
+<span id="cb2-177"><a href="#cb2-177" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb2-178"><a href="#cb2-178" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-179"><a href="#cb2-179" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>计算引擎与通信引擎由独立的 CUDA Stream 驱动；</span>
+<span id="cb2-180"><a href="#cb2-180" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>当前微批次正在计算高强度 Attention 矩阵乘的 $15\text{ms}$ 时间窗口，正好足够网络完成下一个微批次的专家跨机 All-to-All 数据预取；</span>
+<span id="cb2-181"><a href="#cb2-181" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**效果：专家通信耗时被 100% 隐藏在注意力计算阴影之下，实现“零感知通信延迟”**。</span>
+<span id="cb2-182"><a href="#cb2-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-183"><a href="#cb2-183" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-184"><a href="#cb2-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-185"><a href="#cb2-185" aria-hidden="true" tabindex="-1"></a><span class="fu">## 步骤 4：万卡级高可靠容错与高可用架构</span></span>
+<span id="cb2-186"><a href="#cb2-186" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-187"><a href="#cb2-187" aria-hidden="true" tabindex="-1"></a>在 4096 卡规模下，硬件故障是**常态（Norm）而非异常（Exception）**。</span>
+<span id="cb2-188"><a href="#cb2-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-189"><a href="#cb2-189" aria-hidden="true" tabindex="-1"></a><span class="fu">### 1. 故障平均间隔时间（MTBF）推演</span></span>
+<span id="cb2-190"><a href="#cb2-190" aria-hidden="true" tabindex="-1"></a>根据大厂真实硬件统计，单张高端 GPU 的 MTBF 约为 3 年（约 26,000 小时）。</span>
+<span id="cb2-191"><a href="#cb2-191" aria-hidden="true" tabindex="-1"></a>万卡集群的实际有效 MTBF：</span>
+<span id="cb2-192"><a href="#cb2-192" aria-hidden="true" tabindex="-1"></a>$$\text{MTBF}_{\text{cluster}} = \frac{26,000\text{ 小时}}{4096} \approx 6.35 \text{ 小时}$$</span>
+<span id="cb2-193"><a href="#cb2-193" aria-hidden="true" tabindex="-1"></a>**每隔 6 小时集群必有 1 张卡发生故障（Xid 报错、ECC 双比特翻转、PCIE 掉卡或网卡链路协商降速）**。</span>
+<span id="cb2-194"><a href="#cb2-194" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-195"><a href="#cb2-195" aria-hidden="true" tabindex="-1"></a><span class="fu">### 2. 基于 Daly 公式求解最优 Checkpoint 周期</span></span>
+<span id="cb2-196"><a href="#cb2-196" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-197"><a href="#cb2-197" aria-hidden="true" tabindex="-1"></a>如果频繁写盘，写盘耗时会侵蚀有效算力；如果写盘太少，故障回滚会丢失大量计算功。</span>
+<span id="cb2-198"><a href="#cb2-198" aria-hidden="true" tabindex="-1"></a>依据 **Daly 最优周期经典公式**：</span>
+<span id="cb2-199"><a href="#cb2-199" aria-hidden="true" tabindex="-1"></a>$$\tau^* = \sqrt{2 \cdot \text{MTBF} \cdot t_{\text{save}}} - t_{\text{save}}$$</span>
+<span id="cb2-200"><a href="#cb2-200" aria-hidden="true" tabindex="-1"></a>其中：</span>
+<span id="cb2-201"><a href="#cb2-201" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>$\text{MTBF} = 6.35 \text{ 小时} = 381 \text{ 分钟}$；</span>
+<span id="cb2-202"><a href="#cb2-202" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>优化后的异步 In-Memory + GDS 快照写盘耗时 $t_{\text{save}} = 5 \text{ 分钟}$。</span>
+<span id="cb2-203"><a href="#cb2-203" aria-hidden="true" tabindex="-1"></a>代入公式推导：</span>
+<span id="cb2-204"><a href="#cb2-204" aria-hidden="true" tabindex="-1"></a>$$\tau^* = \sqrt{2 \times 381 \times 5} - 5 = \sqrt{3810} - 5 \approx 61.7 - 5 \approx 56.7 \text{ 分钟}$$</span>
+<span id="cb2-205"><a href="#cb2-205" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-206"><a href="#cb2-206" aria-hidden="true" tabindex="-1"></a>**系统设计准则**：设定自动化 Checkpoint 周期为 **每 60 分钟保存一次**，可保证全集群因故障导致的重算损耗严格控制在 **$3\%$ 以内**。</span>
+<span id="cb2-207"><a href="#cb2-207" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-208"><a href="#cb2-208" aria-hidden="true" tabindex="-1"></a>---</span>
+<span id="cb2-209"><a href="#cb2-209" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-210"><a href="#cb2-210" aria-hidden="true" tabindex="-1"></a><span class="fu">### 3. 秒级局部热替换与无感自愈流程</span></span>
+<span id="cb2-211"><a href="#cb2-211" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-212"><a href="#cb2-212" aria-hidden="true" tabindex="-1"></a>传统方案一旦单卡损坏，全集群 4096 张卡必须全部停机杀死进程，重新拉起镜像、读取权重，耗时往往超过 30 分钟。</span>
+<span id="cb2-213"><a href="#cb2-213" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-216"><a href="#cb2-216" aria-hidden="true" tabindex="-1"></a><span class="in">```{mermaid}</span></span>
+<span id="cb2-217"><a href="#cb2-217" aria-hidden="true" tabindex="-1"></a>sequenceDiagram</span>
+<span id="cb2-218"><a href="#cb2-218" aria-hidden="true" tabindex="-1"></a>    autonumber</span>
+<span id="cb2-219"><a href="#cb2-219" aria-hidden="true" tabindex="-1"></a>    participant Agent as 节点探针 (Node Exporter)</span>
+<span id="cb2-220"><a href="#cb2-220" aria-hidden="true" tabindex="-1"></a>    participant Controller as 调度控制器 (K8s / Slurm)</span>
+<span id="cb2-221"><a href="#cb2-221" aria-hidden="true" tabindex="-1"></a>    participant HotSpare as 热备节点 (Hot Spare Node)</span>
+<span id="cb2-222"><a href="#cb2-222" aria-hidden="true" tabindex="-1"></a>    participant Cluster as <span class="dv">4096</span> 卡运行集群</span>
+<span id="cb2-223"><a href="#cb2-223" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-224"><a href="#cb2-224" aria-hidden="true" tabindex="-1"></a>    Agent-&gt;&gt;Controller: <span class="fl">1.</span> 硬件探针监测到 GPU <span class="dv">382</span> 发生不可纠正 ECC 错误</span>
+<span id="cb2-225"><a href="#cb2-225" aria-hidden="true" tabindex="-1"></a>    Controller-&gt;&gt;Cluster: <span class="fl">2.</span> 向故障所在 PP 阶段注入“通信暂停栅栏 (Pause Barrier)”</span>
+<span id="cb2-226"><a href="#cb2-226" aria-hidden="true" tabindex="-1"></a>    Controller-&gt;&gt;HotSpare: <span class="fl">3.</span> 分配预热备用节点，建立 RDMA 链路</span>
+<span id="cb2-227"><a href="#cb2-227" aria-hidden="true" tabindex="-1"></a>    Cluster-&gt;&gt;HotSpare: <span class="fl">4.</span> 从同组健康卡通过跨机高速内存副本恢复状态 (&lt;<span class="dv">45</span> 秒)</span>
+<span id="cb2-228"><a href="#cb2-228" aria-hidden="true" tabindex="-1"></a>    HotSpare--&gt;&gt;Cluster: <span class="fl">5.</span> 动态重映射全局通信环 (Dynamic NCCL Comm Re-Init)</span>
+<span id="cb2-229"><a href="#cb2-229" aria-hidden="true" tabindex="-1"></a>    Controller-&gt;&gt;Cluster: <span class="fl">6.</span> 解除暂停，全集群无损继续前向计算</span>
+<span id="cb2-230"><a href="#cb2-230" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb2-231"><a href="#cb2-231" aria-hidden="true" tabindex="-1"></a><span class="dt">&lt;</span><span class="kw">p</span><span class="ot"> class</span><span class="op">=</span><span class="st">"caption"</span><span class="ot"> align</span><span class="op">=</span><span class="st">"center"</span><span class="dt">&gt;&lt;</span><span class="kw">em</span><span class="dt">&gt;</span>图 1-4：万卡局部故障秒级无感热替换自愈流程<span class="dt">&lt;/</span><span class="kw">em</span><span class="dt">&gt;&lt;/</span><span class="kw">p</span><span class="dt">&gt;</span></span>
+<span id="cb2-232"><a href="#cb2-232" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-233"><a href="#cb2-233" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**热备节点池（Hot Spares）**：集群预留 $2\%$ 的空闲热备节点（约 10 台节点）；</span>
+<span id="cb2-234"><a href="#cb2-234" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**局部快照恢复**：利用相邻节点的本地 NVMe 镜像快速同步损坏节点的权重与优化器状态，无需访问远程分布式文件系统；</span>
+<span id="cb2-235"><a href="#cb2-235" aria-hidden="true" tabindex="-1"></a><span class="ss">* </span>**自愈时效**：全流程在 **$60 \sim 90$ 秒内自愈完成**，达成全任务有效训练时间 $\ge 95\%$ 的工业级硬指标。</span>
+</code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal=""><i class="bi"></i></button></div>
+</div></div></div></div></div>
+</div> <!-- /content -->
+
+
+
+
+<footer class="footer"><div class="nav-footer"><div class="nav-footer-center"><div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/hsthanb4/hpclearning/issues" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></div></div></footer><script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>
