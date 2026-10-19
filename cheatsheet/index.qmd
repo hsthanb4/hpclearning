@@ -1,0 +1,232 @@
+---
+title: "AI Infra 面试必备：一页纸核心公式与推导速查表（The Ultimate Cheatsheet）"
+subtitle: "涵盖显存账本、通信量、MFU/HFU、KV Cache、Roofline 拐点与流水线气泡的一站式白板推导心法"
+---
+
+::: {.callout-note appearance="simple"}
+**定位说明**：专为大厂 AI Infra、大模型系统、高性能算子与端侧部署面试打造的**核心量化公式速查表**。拒绝模糊死记硬背，全部公式附带“第一性原理推导”与“即查即用白板心法”。
+:::
+
+## 核心公式速查全景图
+
+```{mermaid}
+flowchart LR
+    subgraph Cheatsheet["AI Infra 六大核心量化推导支柱"]
+        direction TB
+        M1["1. 显存账本 (Memory Accounting)<br>参数/梯度/优化器/激活值/ZeRO-1/2/3"]
+        M2["2. 分布式通信量 (Communication Volume)<br>AllReduce / All-to-All / Ring / Tree"]
+        M3["3. 算力利用率 (MFU & HFU)<br>6Phi 浮点模型 / 有效吞吐与硬件峰值"]
+        M4["4. 推理系统 (Inference & KV Cache)<br>KV Cache 显存容量 / Prefill vs Decode"]
+        M5["5. 硬件微架构 (Roofline Model)<br>算术强度 / HBM 拐点 / 访存受限判定"]
+        M6["6. 流水线气泡 (Pipeline Bubbles)<br>1F1B / 虚拟交织 / 非均质多模态气泡"]
+    end
+```
+
+---
+
+## 模块一：大模型静态与动态显存账本
+
+设模型总参数量为 $\Phi$（单位：十亿参数量，如 $\Phi = 70\text{B} = 7 \times 10^{10}$ 个浮点数）。
+
+### 1. 静态显存（Static Memory: 模型参数 + 梯度 + 优化器）
+
+对于标准 FP16 / BF16 混合精度训练 + AdamW 优化器：
+
+| 组成部分 | 元素精度 | 单参数字节 | 单卡显存公式 (未切分) | 70B 模型显存实例 |
+| :--- | :---: | :---: | :---: | :---: |
+| **模型参数 (Parameters)** | FP16 / BF16 | 2 Bytes | $M_{\text{param}} = 2\Phi$ | $140\text{ GB}$ |
+| **反向梯度 (Gradients)** | FP16 / BF16 | 2 Bytes | $M_{\text{grad}} = 2\Phi$ | $140\text{ GB}$ |
+| **优化器状态 (AdamW)** | FP32 | 12 Bytes | $M_{\text{opt}} = 12\Phi$ | $840\text{ GB}$ |
+| - *FP32 主权重副本 (Master Weights)* | FP32 | 4 Bytes | $4\Phi$ | $280\text{ GB}$ |
+| - *FP32 一阶动量 (Momentum)* | FP32 | 4 Bytes | $4\Phi$ | $280\text{ GB}$ |
+| - *FP32 二阶动量 (Variance)* | FP32 | 4 Bytes | $4\Phi$ | $280\text{ GB}$ |
+| **总常驻静态显存** | - | **16 Bytes** | **$M_{\text{static}} = 16\Phi$** | **$1120\text{ GB}$** |
+
+> **白板心算心法**：
+> 记住口诀 **“二四十六”** —— 参数占 $2\Phi$，梯度加参数占 $4\Phi$，加上 AdamW 优化器一共是 **$16\Phi$ Bytes**（约等于参数量数值的 16 倍，70B 需要 1120 GB，相当于 14 张 80GB A100/H100 显卡）。若优化器保存 FP32 梯度，则为 $18\Phi$ 或 $20\Phi$。
+
+---
+
+### 2. ZeRO-1 / ZeRO-2 / ZeRO-3 (FSDP) 显存切分公式
+
+设数据并行组内 GPU 卡数为 $N_{\text{dp}}$：
+
+1. **ZeRO-1（优化器状态切分）**：
+   $$M_{\text{static}}^{\text{ZeRO-1}} = 2\Phi + 2\Phi + \frac{12\Phi}{N_{\text{dp}}} = 4\Phi + \frac{12\Phi}{N_{\text{dp}}}$$
+   *当 $N_{\text{dp}} \to \infty$ 时，显存渐进下限为 $4\Phi$（节省约 75% 显存）。*
+2. **ZeRO-2（优化器状态 + 梯度切分）**：
+   $$M_{\text{static}}^{\text{ZeRO-2}} = 2\Phi + \frac{2\Phi + 12\Phi}{N_{\text{dp}}} = 2\Phi + \frac{14\Phi}{N_{\text{dp}}}$$
+   *当 $N_{\text{dp}} \to \infty$ 时，显存渐进下限为 $2\Phi$（仅常驻模型参数，节省约 87.5% 显存）。*
+3. **ZeRO-3 / FSDP（参数 + 梯度 + 优化器全切分）**：
+   $$M_{\text{static}}^{\text{ZeRO-3}} = \frac{16\Phi}{N_{\text{dp}}}$$
+   *所有静态数据均匀分摊，显存占用与卡数严格成反比。*
+
+---
+
+### 3. 动态激活值显存（Activation Memory）精算公式
+
+设序列长度为 $s$，微批次大小为 $b$，隐藏层维度为 $h$，注意力头数为 $a$，全网 Transformer 层数为 $L$。
+
+每个标准 Transformer 层在前向传播过程中暂存的激活值显存总量（FP16/BF16）：
+$$M_{\text{act\_layer}} = s \cdot b \cdot h \cdot \left(34 + 5 \cdot \frac{a \cdot s}{h}\right) \text{ Bytes}$$
+
+**详细物理构成推导（常数 34 与 5 的来源）**：
+* Attention 模块：
+  * Q, K, V 投影输入与输出：$2sbh \times 3 = 6sbh$ Bytes
+  * 注意力得分矩阵 $Q K^T$ 与 Softmax 输出：$2 \times (a \cdot s^2 \cdot b \times 2) = 4as^2b$ Bytes
+  * 注意力 Dropout 掩码：$1 \times as^2b$ Byte $\to$ 合计注意力矩阵占用 **$5as^2b$**
+  * Attention 对 V 聚合后输出映射（Projection）：$2sbh$ Bytes
+  * Attention 残差连接与 Dropout：$2sbh + 1sbh = 3sbh$ Bytes
+* MLP / FFN 模块：
+  * 两层全连接（中间维度扩大至 $4h$）：$2 \times 4sbh + 2 \times 4sbh = 16sbh$ Bytes
+  * 激活函数（GELU/SwiGLU）中间值与 Dropout：$3sbh$ Bytes
+* LayerNorm / RMSNorm：
+  * 两个归一化层的均值与方差暂存：$2 \times 2sbh = 4sbh$ Bytes
+* **小计**：$6 + 2 + 3 + 16 + 3 + 4 = 34sbh$ 线性项，加上 $5as^2b$ 注意力二次方项。
+
+> **重计算（Activation Checkpointing）显存压缩心法**：
+> - **全量重计算（Full Recomputation）**：每层仅保留 LayerNorm 输入（$2sbh$ Bytes），激活显存由 $O(s^2)$ 降为 $O(1)$，代价是增加 33% 的前向 FLOPs 计算量；
+> - **选择性重计算（Selective SAC）**：仅重计算 $O(s^2)$ 的 Attention 部分（消耗算力极小但显存占比极大），保留 MLP 的线性部分。
+
+---
+
+## 模块二：分布式通信算子通信量与时延建模
+
+设待传输张量大小为 $M$ Bytes，参与通信的 GPU 卡数为 $N$。网络通信延迟为 $\alpha$（秒/次），单向网络链路带宽为 $\beta$（Bytes/秒）。
+
+| 通信原语 (Collective) | 每卡发送/接收字节量 (Bytes) | Ring 环形通信时间模型 $T_{\text{comm}}$ | 对应典型应用场景 |
+| :--- | :---: | :---: | :--- |
+| **Ring AllReduce** | **$2 \times \frac{N-1}{N} M$** | $2(N-1)\alpha + 2\frac{N-1}{N}\frac{M}{\beta}$ | 数据并行 DDP / TP 张量并行线性层 |
+| **ReduceScatter** | **$\frac{N-1}{N} M$** | $(N-1)\alpha + \frac{N-1}{N}\frac{M}{\beta}$ | ZeRO-2/3 梯度切分 / 序列并行 SP |
+| **AllGather** | **$\frac{N-1}{N} M$** | $(N-1)\alpha + \frac{N-1}{N}\frac{M}{\beta}$ | ZeRO-3 前向参数重建 / TP 序列展开 |
+| **All-to-All** | **$\frac{N-1}{N} M$** | $(N-1)\alpha + \frac{N-1}{N}\frac{M}{\beta}$ | MoE 专家路由分发 / 跨 Mesh 张量重排 |
+| **P2P Send / Recv** | **$M$** | $\alpha + \frac{M}{\beta}$ | 流水线并行 PP 激活值在相邻 Stage 传递 |
+
+> **白板心算核心法则**：
+> - **为什么 AllReduce 是两倍的 $\frac{N-1}{N}M$？**  
+>   因为 Ring AllReduce 算法在物理实现上严格拆解为两个阶段：第一阶段 **ReduceScatter**（环上流转 $N-1$ 步，每步传输 $\frac{M}{N}$），第二阶段 **AllGather**（环上再流转 $N-1$ 步）。两阶段传输量相等，故 $2 \times \frac{N-1}{N}M$。当 $N \ge 8$ 时，$\frac{N-1}{N} \approx 1$，每卡通信量近似为 **$2M$**。
+
+---
+
+## 模块三：算力利用率（MFU 与 HFU）精算心法
+
+### 1. 浮点运算量（FLOPs per Token）
+
+对于一个稠密标准 Transformer 模型，处理单 Token 的浮点运算量为：
+$$\text{FLOPs/Token} = 6\Phi + 12 \cdot L \cdot a \cdot s \cdot h_{\text{head}}$$
+当序列长度 $s$ 远小于隐藏层维度时，注意力项可忽略，简化为经典黄金法则：
+$$\text{前向计算量} = 2\Phi \text{ FLOPs/Token}, \quad \text{反向计算量} = 4\Phi \text{ FLOPs/Token}$$
+$$\text{标准前向+反向总计算量} = 6\Phi \text{ FLOPs/Token}$$
+*（若开启全量激活重计算，前向额外重算一次，总计算量变为 **$8\Phi \text{ FLOPs/Token}$**）*
+
+---
+
+### 2. MFU 与 HFU 的量化公式
+
+* **模型算力利用率（Model FLOPs Utilization, MFU）**：衡量模型有效计算的纯利用率（**不计入重计算开销**）：
+  $$\text{MFU} = \frac{\text{实际处理 Tokens/sec} \times 6\Phi}{\text{GPU 总卡数} \times \text{单卡理论峰值 FP16/BF16 FLOPS}}$$
+
+* **硬件算力利用率（Hardware FLOPs Utilization, HFU）**：衡量 GPU 芯片物理硬件的忙碌程度（**计入重计算 FLOPs**）：
+  $$\text{HFU} = \frac{\text{实际处理 Tokens/sec} \times (6\Phi + \text{Recompute FLOPs})}{\text{GPU 总卡数} \times \text{单卡理论峰值 FP16/BF16 FLOPS}}$$
+
+> **工业界评判标准**：
+> 优秀集群训练任务的 MFU 通常在 **$45\% \sim 55\%$**（A100/H100 NVLink 域内可突破 $60\%$）。若 MFU 低于 $30\%$，说明严重受限于通信瓶颈、小算子 Launch 开销或流水线气泡。
+
+---
+
+## 模块四：推理引擎显存与吞吐推算（Inference & KV Cache）
+
+### 1. KV Cache 单步与全量显存计算
+
+设批次大小为 $B$，序列长度为 $S$，网络层数为 $L$，模型注意力头数为 $n_{\text{heads}}$，每个注意力头维度为 $d_{\text{head}}$，KV 头数为 $n_{\text{kv\_heads}}$。
+
+在 FP16（2 Bytes）精度下：
+$$\text{单 Token、单层 KV 显存} = 2 \times (\text{Key} + \text{Value}) = 2 \times (2 \times n_{\text{kv\_heads}} \times d_{\text{head}}) = 4 \cdot n_{\text{kv\_heads}} \cdot d_{\text{head}} \text{ Bytes}$$
+
+全网总 KV Cache 显存占用：
+$$M_{\text{KV}} = 4 \cdot B \cdot S \cdot L \cdot n_{\text{kv\_heads}} \cdot d_{\text{head}} \text{ Bytes}$$
+
+| 架构类型 | KV 头数比例 | 显存压缩率 | 典型代表模型 |
+| :--- | :---: | :---: | :--- |
+| **MHA (Multi-Head)** | $n_{\text{kv\_heads}} = n_{\text{heads}}$ | $1.0\times$ (无压缩) | 经典 LLaMA-1、GPT-3 |
+| **GQA (Grouped-Query)** | $n_{\text{kv\_heads}} = \frac{n_{\text{heads}}}{8}$ | **$8\times$ 显存压缩** | LLaMA-2-70B、LLaMA-3、Mistral |
+| **MQA (Multi-Query)** | $n_{\text{kv\_heads}} = 1$ | **$a\times$ 极致压缩** | Falcon-40B |
+
+---
+
+### 2. Prefill 与 Decode 阶段的硬件瓶颈与吞吐上限
+
+```{mermaid}
+flowchart TD
+    subgraph InferenceDualism["推理双阶段硬件本质分野"]
+        direction LR
+        subgraph Prefill["1. Prefill 阶段 (Prompt 处理)"]
+            P_In["输入长文本 S 个 Tokens 一次性前向"] --> P_Compute["大矩阵乘 GEMM: (B*S, h) x (h, h)"]
+            P_Compute --> P_Bound["计算密集型 (Compute-Bound)<br>打满 Tensor Core 峰值 TFLOPS"]
+        end
+        subgraph Decode["2. Decode 阶段 (自回归逐字生成)"]
+            D_In["每次仅输入 1 个 Token (B=1)"] --> D_Mem["GEMV: 权重矩阵与 KV Cache 全部从 HBM 读到片上"]
+            D_Mem --> D_Bound["访存密集型 (Memory-Bound)<br>受限于 HBM 带宽 (TB/s)"]
+        end
+    end
+```
+
+在 Decode 阶段，生成每个 Token 必须将模型参数从 HBM 显存全量读入片上 SRAM 一次。
+**自回归解码的最大物理理论吞吐上限（Tokens/sec）**：
+$$\text{Max Throughput (Decode)} \approx \frac{\text{HBM 带宽 (Bytes/s)}}{\text{单 Token 访存量 (Weights + KV Cache)}}$$
+*例如：A100 SXM4 带宽为 $2039\text{ GB/s}$，运行 70B FP16 模型（权重 $140\text{GB}$），单卡在单批次下的最大理论生成速度仅为：$\frac{2039}{140} \approx 14.5\text{ Tokens/s}$！必须依靠 Continuous Batching 将 Batch 增大，提高算术强度。*
+
+---
+
+## 模块五：微架构与 Roofline 模型速算
+
+### 1. 算术强度（Arithmetic Intensity）
+
+$$I = \frac{\text{浮点运算总次数 (FLOPs)}}{\text{片外显存访问总量 (Bytes)}} \quad (\text{单位: FLOPs/Byte})$$
+
+### 2. 硬件拐点（Machine Balance Point）
+
+硬件拐点是算子从**访存受限（Memory-Bound）**跃迁为**计算受限（Compute-Bound）**的临界临界值：
+$$I^* = \frac{\text{硬件理论峰值算力 (Peak FLOPS)}}{\text{硬件显存总带宽 (HBM Bandwidth Bytes/s)}}$$
+
+| 硬件加速卡 | 算力规格 (BF16 Tensor Core) | HBM 显存带宽 | 硬件临界拐点 $I^*$ |
+| :--- | :---: | :---: | :---: |
+| **NVIDIA V100 (SXM3)** | $125\text{ TFLOPS}$ | $900\text{ GB/s}$ | **$138.9\text{ FLOPs/Byte}$** |
+| **NVIDIA A100 (SXM4)** | $312\text{ TFLOPS}$ | $2039\text{ GB/s}$ | **$153.0\text{ FLOPs/Byte}$** |
+| **NVIDIA H100 (SXM5)** | $989\text{ TFLOPS}$ | $3350\text{ GB/s}$ | **$295.2\text{ FLOPs/Byte}$** |
+| **NVIDIA B200 (Blackwell)** | $2250\text{ TFLOPS}$ | $8000\text{ GB/s}$ | **$281.3\text{ FLOPs/Byte}$** |
+
+> **面试优化判定准则**：
+> - 若算子的 $I < I^*$（如 LayerNorm、Softmax、GEMV、GeLU）：属于 **Memory-Bound**，优化重点是**算子融合（Kernel Fusion）**消除中间读写，或使用 Shared Memory 缓存；
+> - 若算子的 $I > I^*$（如大维度 GEMM、Conv2D）：属于 **Compute-Bound**，优化重点是打满 Tensor Core 瓦片（Tiling）、提升 Warp 活跃度与隐藏指令发射停顿。
+
+---
+
+## 模块六：流水线并行气泡率（Pipeline Bubbles）
+
+设流水线切分为 $P$ 个物理阶段（Stages），微批次数量为 $m$。
+
+### 1. 经典 1F1B 稳态气泡率
+$$\text{Bubble Ratio}_{\text{1F1B}} = \frac{P - 1}{m + P - 1}$$
+*充水期（Warm-up）有 $P-1$ 个微批次前向，抽水期（Cool-down）有 $P-1$ 个微批次反向。*
+
+### 2. 交错式虚拟阶段 1F1B（Interleaved 1F1B）
+每张 GPU 虚拟承接 $v$ 个非连续的虚拟阶段（Virtual Stages）：
+$$\text{Bubble Ratio}_{\text{Interleaved}} = \frac{P - 1}{v \cdot m + P - 1}$$
+*气泡率直接被虚拟阶段数 $v$ 稀释约 $v$ 倍，但代价是模型激活值暂存显存增加。*
+
+### 3. 非均质流水线气泡率（具身 VLA / 多模态两头重场景）
+设各阶段前向耗时向量为 $\vec{T}_f = [t_f^{(0)}, t_f^{(1)}, \dots, t_f^{(P-1)}]$，瓶颈阶段耗时 $t_{\text{bottle}} = \max_p t_f^{(p)}$：
+$$\text{Bubble Ratio}_{\text{asym}} = 1 - \frac{m \sum_{p=0}^{P-1} t_f^{(p)}}{P \cdot \left(\sum_{p=0}^{P-1} t_f^{(p)} + (m - 1) \cdot t_{\text{bottle}}\right)}$$
+*当 $m \to \infty$ 时，稳态极限气泡率为 $1 - \frac{\overline{t_f}}{t_{\text{bottle}}}$，必须依赖**非均匀层分配（Layer Re-balancing）**抹平阶段耗时差异。*
+
+---
+
+## 面试白板推导 60 秒极速通关口诀
+
+1. **显存记三数**：参数为 $2$，梯度为 $2$，AdamW 为 $12$；全网无切分 **$16\Phi$**，ZeRO-1 剩 **$4\Phi$**，ZeRO-2 剩 **$2\Phi$**，ZeRO-3 全摊派 **$\frac{16\Phi}{N}$**。
+2. **激活算两项**：线性项 **$34sbh$**，注意力量级 **$5as^2b$**；全重算去二次方，选择性重算省显存保算力。
+3. **通信看环长**：Ring AllReduce 走两圈，两倍 **$\frac{N-1}{N}M$**；ReduceScatter 与 AllGather 各走一圈，每卡只需单倍量。
+4. **吞吐看六倍**：单 Token 运算量恒定 **$6\Phi$**；每秒 Token 数乘 $6\Phi$ 除以硬件标称算力即为 **MFU**，破 $50\%$ 为合格，破 $60\%$ 为极优。
+5. **推理看阶段**：Prefill 是矩阵乘算力受限（Compute-bound），Decode 是单字生成带宽受限（Memory-bound）；总 KV Cache 显存为 $4BSL \cdot n_{\text{kv}} \cdot d_{\text{head}}$。
+6. **Roofline 辨拐点**：A100 拐点是 **$153$**，H100 拐点是 **$295$**；低于拐点做融合，高于拐点打满 Tensor Core。

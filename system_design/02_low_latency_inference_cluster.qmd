@@ -1,0 +1,171 @@
+---
+title: "系统设计 02：高并发、低时延分布式 LLM / VLA 推理服务集群设计"
+subtitle: "PD 物理分离架构、RDMA 零拷贝 KV 传输、RadixTree 树形前缀复用与具身双频流式调度"
+---
+
+::: {.callout-note appearance="simple"}
+**题目背景**：假设你是某顶尖 AI 公司或自动驾驶/具身独角兽的推理平台架构师，需要设计一个面向全球服务、支撑 **50,000 QPS 峰值请求**的大规模分布式推理基础设施。系统需同时支持大语言模型对话与端侧机器人 VLA 连续动作生成。核心服务等级目标（SLO）：首字延迟 $\text{TTFT} < 100\text{ms}$（P95），连续解码间隔 $\text{TPOT} < 20\text{ms}$（P99），最长上下文支持 64K。
+:::
+
+## 整体架构全景图
+
+```{mermaid}
+flowchart TD
+    subgraph Client["全球客户端与机器人端侧请求接入 (50,000 QPS)"]
+        User["用户对话请求 (HTTP / gRPC)"]
+        Robot["具身机器人高频遥测 (Zenoh / DDS 流式数据)"]
+    end
+
+    subgraph Gateway["智能动态路由网关 (Dynamic Routing & Dispatcher)"]
+        Router["前缀感知与负载均衡路由器 (Prefix-Aware Router)"]
+        CacheMeta["全局 RadixTree 缓存元数据索引服务"]
+        Router <--> CacheMeta
+    end
+
+    subgraph DisaggregatedPool["PD 分离分布式算力池 (Prefill-Decode Disaggregation)"]
+        direction TB
+        subgraph PrefillPool["1. Prefill 算力池 (计算密集型: H100 TP=4)"]
+            P0["Prefill Worker 0<br>(Chunked Prefill 打满 Tensor Core)"]
+            P1["Prefill Worker 1"]
+        end
+
+        subgraph KVBuses["跨机高速 KV Cache 传输总线 (GPUDirect RDMA)"]
+            RDMA_Bus["100Gbps/400Gbps 零拷贝显存直直传总线 (耗时 < 10ms)"]
+        end
+
+        subgraph DecodePool["2. Decode 算力池 (访存密集型: L40S / H100 NVLink)"]
+            D0["Decode Worker 0<br>(Continuous Batching + PagedAttention)"]
+            D1["Decode Worker 1"]
+        end
+
+        PrefillPool --> KVBuses --> DecodePool
+    end
+
+    subgraph EdgeVLA["3. 具身端侧双频异构流式执行 (Robot Edge Engine)"]
+        direction LR
+        VLM_Ctx["云端/车端 VLM 静态语义上下文 (10Hz)"]
+        Fast_Denoiser["本体轻量动作去噪头 (100Hz)"]
+        RHC_Queue["双缓冲滚动时域队列 (Receding Horizon Queue)"]
+        VLM_Ctx --> Fast_Denoiser --> RHC_Queue
+    end
+
+    Client --> Gateway --> DisaggregatedPool
+    Gateway -.-> EdgeVLA
+```
+<p class="caption" align="center"><em>图 2-1：高并发低时延推理服务集群与端侧协同架构全景</em></p>
+
+---
+
+## 步骤 1：物理容量推演与传统混合部署崩溃机理
+
+### 1. 混合部署的“排队队头阻塞（Head-of-Line Blocking）”灾难
+在传统推理框架（如单体 vLLM 实例）中，同一个 Worker 进程在同一张 GPU 上同时处理 Prefill（长输入 Prompt）与 Decode（逐字生成）：
+* **算力特征对抗**：
+  * **Prefill**：属于**计算受限（Compute-Bound）**，单次大矩阵乘耗时 $50\text{ms} \sim 200\text{ms}$，打满 Tensor Core；
+  * **Decode**：属于**访存受限（Memory-Bound）**，要求微秒级调度，每 $15\text{ms}$ 必须完成一步小 GEMV。
+* **时延抖动灾难**：
+  当一个新请求（如 $4\text{K}$ 上下文文档分析）流入时，GPU 必须全力执行大矩阵乘。此时原本正在流畅生成的 64 个并发用户请求**被迫在显存队列中停摆 100ms**！
+  TPOT（解码延迟）瞬间从 $15\text{ms}$ 恶化至 $115\text{ms}$，直接导致视频语音对话卡顿、机器人关节电机丢步失控。
+
+### 2. 结论：物理算力池强制解耦（PD 分离）
+必须在物理硬件层面将推理集群切分为两个完全异构的算力集群：
+1. **Prefill 集群**：专攻大吞吐、高并行矩阵乘，追求极限 TTFT；
+2. **Decode 集群**：专攻高并发显存驻留与低时延 HBM 读写，追求极致 TPOT。
+
+---
+
+## 步骤 2：PD 分离架构与跨机 GPUDirect RDMA 零拷贝迁移
+
+PD 分离的核心系统挑战在于：**Prefill 计算完成后，庞大的 KV Cache 如何在不引起网络拥塞的前提下瞬间转移至 Decode 节点？**
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Router as 动态路由网关
+    participant P as Prefill 节点 (GPU HBM)
+    participant NIC_P as Prefill 节点 RDMA 网卡
+    participant NIC_D as Decode 节点 RDMA 网卡
+    participant D as Decode 节点 (GPU HBM)
+
+    Router->>P: 1. 分发新请求 (Prompt 4K Tokens)
+    P->>P: 2. 执行前向计算产出 KV Cache (约 256MB)
+    Router->>D: 3. 在 Decode 节点预分配 PagedAttention 显存物理块
+    P->>NIC_P: 4. 触发 GPUDirect RDMA Write (零 CPU 内存拷贝)
+    NIC_P-->>NIC_D: 5. 跨机 400Gbps 网络线速直传 (耗时仅 ~5.1ms)
+    NIC_D->>D: 6. 激活写回 Decode 目标显存池
+    D-->>Router: 7. 确认就绪，立即启动流水线自回归解码
+```
+<p class="caption" align="center"><em>图 2-2：跨节点 GPUDirect RDMA 零拷贝 KV Cache 迁移时序</em></p>
+
+### 传输延迟定量推导：
+以 70B 模型（GQA 架构，KV 头数 8，头维度 128，80 层）为例：
+* 每个 Token 的 KV Cache 字节量：$2 \times (2 \times 8 \times 128) \times 80 = 327,680\text{ Bytes} \approx 320\text{ KB}$；
+* 输入长度 $4096$ Tokens 的总 KV Cache 大小：
+  $$\text{Payload} = 4096 \times 320\text{ KB} \approx 1.31\text{ GB}$$
+* 若采用 400Gbps（有效单向带宽约 $45\text{GB/s}$）的 RoCE v2 网络，通过 **GPUDirect RDMA（绕过 Host 内存）** 传输仅需：
+  $$T_{\text{transfer}} = \frac{1.31\text{ GB}}{45\text{ GB/s}} \approx 29.1\text{ ms}$$
+传输耗时控制在 $30\text{ms}$ 以内，完全落在首字延迟 TTFT $< 100\text{ms}$ 的 SLA 预算空间内！
+
+---
+
+## 步骤 3：RadixTree 前缀树缓存复用与 Chunked Prefill 细粒度调度
+
+在 50,000 QPS 的真实高并发场景下，大部分请求包含高度重复的上下文（如 System Prompt、Few-shot 示例、多轮对话历史）。
+
+### 1. 全局 RadixTree 树形前缀缓存（SGLang 体系核心）
+
+```{mermaid}
+flowchart TD
+    subgraph RadixCache["分层树形前缀缓存 (RadixTree LRU 内存池)"]
+        Root["根节点: System Prompt (2048 Tokens)<br>[物理显存 Block 0~127: 全局共享常驻]"]
+        Doc1["子节点 A: 业务文档 A (4096 Tokens)"]
+        Doc2["子节点 B: 业务文档 B (4096 Tokens)"]
+        Q1["会话 1: 用户最新提问 (32 Tokens)"]
+        Q2["会话 2: 用户最新提问 (16 Tokens)"]
+
+        Root --> Doc1 --> Q1
+        Root --> Doc2 --> Q2
+    end
+```
+<p class="caption" align="center"><em>图 2-3：RadixTree 树形前缀缓存多分支动态复用架构</em></p>
+
+* **显存引用计数（Reference Counting）**：系统级提示词被所有会话以只读方式共享，物理显存块只存一份；
+* **前缀命中收益**：
+  若请求命中 RadixTree 中的 2048 个前缀 Token，**该部分无需执行任何神经网络计算，Prefill 耗时直接归零，TTFT 压低至 10ms 物理极限**！
+
+### 2. Chunked Prefill（分块细粒度预算切分）
+对于未命中缓存的长 Prompt，若强行一次性计算，仍会打乱硬件流水。
+* **机制**：将超长序列严格按固定大小（如 512 Tokens）切片为多个连续分块（Chunks）；
+* **配额调度**：在每个调度周期内，限制全局输入 Token 总预算（如每步至多容纳 2048 个 Prefill Tokens），与正在运行的 Decode 请求无缝交织混合打包，消灭突发大算子带来的显存气泡。
+
+---
+
+## 步骤 4：具身 VLA 双频异步流式执行与安全屏障
+
+在服务机器人与自动驾驶场景中，模型推理必须直接驱动真实物理电机，具有极端的“硬实时性”。
+
+```{mermaid}
+flowchart LR
+    subgraph CloudVLM["云端/车端集中大模型 (10Hz 慢环)"]
+        VisionIn["多路环视相机点云流"] --> HeavyVLM["大型视觉语言骨干网 (ViT+LLaMA)<br>提取全局场景认知与任务目标语义"]
+        HeavyVLM --> CtxToken["固化输出全局 Context Token"]
+    end
+
+    subgraph EdgeDenoise["端侧机载微架构 (100Hz 快环: Orin/Thor)"]
+        direction TB
+        Proprio["100Hz 机械臂高频关节状态反馈"] --> ActionHead["轻量 Flow Matching 连续动作去噪器<br>(条件注入 Context Token, 4步极速求解)"]
+        ActionHead --> ChunkQueue["双缓冲滚动时域动作队列 (16步时空轨迹)"]
+        ChunkQueue --> MotorOut["以 100Hz 严格确定性时钟下发电机驱动器"]
+    end
+
+    CtxToken -.->|"高低频异步跨网络解耦解封"| ActionHead
+```
+<p class="caption" align="center"><em>图 2-4：具身机器人高低频解耦异步流式控制体系</em></p>
+
+### 容滞退化与安全屏障机制（Safety Fallback Shield）：
+1. **时间指数滑动平滑（Temporal Ensembling）**：
+   新生成的 16 步动作与旧队列中未执行完毕的步数采用加权衰减平滑：
+   $$a_{\text{cmd}}(t) = \alpha \cdot a_{\text{old}}(t) + (1 - \alpha) \cdot a_{\text{new}}(t)$$
+   彻底杜绝由于跨步预测误差导致的机械臂电机力矩突变（Jerk）；
+2. **超时应急降级（Jitter Shield）**：
+   若跨机网络发生毫秒级丢包或 GPU 排队，导致当前时间步未收到新轨迹，执行器**绝不等待**，自动顺延执行上一周期的备用预测轨迹，并触发动力学阻尼减速制动，确保人机物理接触绝对安全。

@@ -1,0 +1,227 @@
+---
+title: "系统设计 01：万卡千亿/万亿 MoE 超大规模预训练平台设计"
+subtitle: "4096 卡集群架构、8-Rail RoCE 导轨对齐、DeepEP 跨节点通信优化与 Daly 容错体系全景"
+---
+
+::: {.callout-note appearance="simple"}
+**题目背景**：假设你是某头部 AI 实验室的分布式训练 Infra 负责人，需要设计一个支撑 **500B+ 总参数、前向激活 37B 参数的混合专家大模型（MoE，类似 DeepSeek-V3 架构）** 的超大规模预训练系统。使用 4096 张 NVIDIA H800/H100 GPU（512 台 8 卡节点），目标在 60 天内高效率吞吐 15T Tokens，有效训练时间占比要求 $\ge 95\%$。
+:::
+
+## 整体架构全景图
+
+```{mermaid}
+flowchart TD
+    subgraph PretrainCluster["4096 卡 MoE 万卡预训练平台整体架构"]
+        direction TB
+        subgraph Hardware["1. 硬件与网络基础设施 (Rail-Optimized Spine-Leaf)"]
+            Nodes["512 台 8 卡 H800 节点 (NVLink 900GB/s 域)"]
+            RoCE["8-Rail 独立导轨无损网络 (每卡独占 400Gbps NIC, 0 跨导轨冲突)"]
+            Storage["GPUDirect Storage + 分级分块并行文件系统 (Lustre / CPFS)"]
+            Nodes <--> RoCE
+            Nodes <--> Storage
+        end
+
+        subgraph Parallelism["2. 5D 混合并行编排拓扑 (PP16 x EP64 x DP4, TP=1)"]
+            direction LR
+            PP["流水线并行 PP=16<br>(Dual-Pipe 双向交织流水)"]
+            EP["专家并行 EP=64<br>(跨 8 节点分布式专家池)"]
+            DP["数据并行 DP=4<br>(ZeRO-1 优化器状态切分)"]
+            DeepEP["DeepEP 跨机通信库<br>(节点限制路由 + NVLink-RDMA 两级聚合)"]
+            PP --- EP --- DP --- DeepEP
+        end
+
+        subgraph Resilience["3. 万卡级高可用与容错调度 (Daly 最优周期 + 秒级自愈)"]
+            direction LR
+            Daly["Daly 最优 Checkpoint 周期计算<br>(Tau* ~ 60 分钟自动快照)"]
+            InMem["In-Memory 双副本异步落盘<br>(0 阻塞计算流水线)"]
+            HotSpare["热备节点池 (2% Hot Spares)<br>(动态 Rank 重映射, 60s 内局部恢复)"]
+            Daly --- InMem --- HotSpare
+        end
+
+        Hardware --> Parallelism --> Resilience
+    end
+```
+<p class="caption" align="center"><em>图 1-1：万卡 MoE 超大规模预训练平台系统架构全景</em></p>
+
+---
+
+## 步骤 1：物理容量测算与时间边界评估
+
+在动手写任何配置文件之前，架构师必须进行严格的**第一性原理物理测算（Back-of-the-Envelope Calculation）**：
+
+### 1. 计算总量与训练耗时推演
+* **单 Token 浮点运算量**：对于 MoE 模型，单步仅激活 37B 参数，浮点开销按激活参数计算：
+  $$\text{FLOPs/Token} \approx 6 \times \Phi_{\text{activated}} = 6 \times 37 \times 10^9 \approx 2.22 \times 10^{11} \text{ FLOPs}$$
+* **总训练计算预算**：
+  $$\text{Total FLOPs} = 15 \times 10^{12} \text{ Tokens} \times 2.22 \times 10^{11} \text{ FLOPs} \approx 3.33 \times 10^{24} \text{ FLOPs}$$
+* **集群理论算力供给**：
+  4096 张 H800 GPU（单卡标称 Dense BF16 算力 $989\text{ TFLOPS}$），设定保守工业级 MFU 目标为 **$52\%$**：
+  $$\text{Cluster Effective FLOPS} = 4096 \times 989 \times 10^{12} \times 0.52 \approx 2.106 \times 10^{15} \text{ FLOPs/s} = 2.106\text{ EFLOPS}$$
+* **纯净计算耗时**：
+  $$T_{\text{pure}} = \frac{3.33 \times 10^{24}}{2.106 \times 10^{15}} \approx 1.58 \times 10^6 \text{ 秒} \approx 18.3 \text{ 天}$$
+即使加上容错回滚、验证集评测与数据加载气泡（设定总开销放大系数为 $1.25\times$），整个预训练周期约 **$23 \sim 25$ 天**，完全在 60 天交付红线之内。
+
+### 2. 静态显存与动态显存账本
+* **总参数量**：$500\text{B}$。在生产中采用 FP8 权重存储（$1 \text{ Byte/param}$），权重仅占 **$500\text{GB}$**；
+* **梯度与 AdamW 优化器**：采用 ZeRO-1 切分，优化器状态（FP32 状态 $12 \times 500 = 6000\text{ GB}$）在 DP 组内均分；
+* **单卡显存分布**：4096 卡总显存高达 $4096 \times 80\text{GB} = 327,680\text{ GB}$。模型静态参数与优化器分摊到单卡仅约 **$2\text{GB} \sim 4\text{GB}$**，剩余 **$76\text{GB}$ 显存全部可用作激活值缓存**，完全能够支持 $8\text{K} \sim 32\text{K}$ 的大上下文训练。
+
+---
+
+## 步骤 2：硬件网络拓扑与导轨对齐（Rail-Optimized Architecture）
+
+万卡集群最大的通信性能杀手是**跨交换机的网络微突发（Micro-burst）与端口哈希拥塞（ECMP Hash Collisions）**。
+
+### 8-Rail 导轨对齐拓扑设计
+
+```{mermaid}
+flowchart TD
+    subgraph RailTopo["Rail-Optimized 8 导轨独立无拥塞网络结构"]
+        direction TB
+        subgraph SpineLayer["核心交换机层 (Spine Switches)"]
+            Spine0["Spine Rail 0"]
+            Spine1["Spine Rail 1"]
+            Spine7["Spine Rail 7"]
+        end
+
+        subgraph LeafLayer["叶子交换机层 (Leaf / TOR Switches)"]
+            Leaf0["Leaf Rail 0 组"]
+            Leaf1["Leaf Rail 1 组"]
+            Leaf7["Leaf Rail 7 组"]
+        end
+
+        subgraph NodeCluster["计算节点 (512 台 8 卡节点)"]
+            subgraph Node0["Node 0"]
+                GPU0_0["GPU 0 (NIC 0)"]
+                GPU0_1["GPU 1 (NIC 1)"]
+                GPU0_7["GPU 7 (NIC 7)"]
+            end
+            subgraph Node1["Node 1"]
+                GPU1_0["GPU 0 (NIC 0)"]
+                GPU1_1["GPU 1 (NIC 1)"]
+                GPU1_7["GPU 7 (NIC 7)"]
+            end
+        end
+
+        GPU0_0 & GPU1_0 --> Leaf0 --> Spine0
+        GPU0_1 & GPU1_1 --> Leaf1 --> Spine1
+        GPU0_7 & GPU1_7 --> Leaf7 --> Spine7
+    end
+```
+<p class="caption" align="center"><em>图 1-2：8 导轨对齐物理网络架构 (相同序号 GPU 直连独立导轨)</em></p>
+
+1. **导轨隔离原则**：每个 8 卡节点的第 $k$ 号 GPU（配备独立的第 $k$ 块 400Gbps CX7 网卡）**只能且仅能连接到第 $k$ 号独立的物理网络平面（Rail $k$）**；
+2. **零跨导轨拥塞**：
+   - 跨机数据并行（DP）或专家并行（EP）的相同 GPU 序号之间交换数据时，流量被物理锁定在各自平行的 Rail 交换机内部；
+   - 彻底根除了传统随机哈希导致多路通信流挤压同一上行链路的“死锁拥塞”（PFC 拥塞风暴与 Pause 帧泛洪）。
+
+---
+
+## 步骤 3：5D 混合并行编排与 DeepEP 跨机通信重叠
+
+### 1. 并行度正交组合决策
+
+$$\text{Total GPUs} = \text{TP} \times \text{EP} \times \text{PP} \times \text{DP} = 1 \times 64 \times 16 \times 4 = 4096$$
+
+* **为什么选择 $\text{TP}=1$？（架构师核心决策）**：
+  传统大模型常采用 $\text{TP}=4$ 或 $\text{TP}=8$。但对于 MoE 模型，每个专家的中间维度已被细化（每个 Token 仅路由到少数几个专家）。若在单专家内再强开 TP，矩阵乘维度将缩至极小，无法打满 Hopper 核心流水线；**果断舍弃 TP（$\text{TP}=1$），将单层注意力与 MLP 完整保留在单卡内跑出峰值 MFU**。
+* **专家并行 $\text{EP}=64$**：64 张卡分布在 8 个连续物理节点内（利用 Rail 0~7 高速并发），形成一个局部高度自治的专家处理大集群；
+* **流水线并行 $\text{PP}=16$**：将全网 60 层 Transformer 划分为 16 个阶段，每阶段约 3~4 层；
+* **数据并行 $\text{DP}=4$**：4 个全局副本，搭配 ZeRO-1 消除优化器冗余。
+
+---
+
+### 2. DeepEP：节点限制路由与两级拓扑感知通信
+
+MoE 的核心通信瓶颈在于前向与反向的两次全交换（All-to-All）。若 64 个专家全随机路由，每张卡需同时向 63 张远端卡发送小数据包，网络吞吐呈断崖式下跌。
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant GPU as 源 GPU (Local Rank)
+    participant NVLink as 机内 NVLink (900 GB/s)
+    participant RDMA as 跨机 400Gbps RoCE v2
+    participant Remote as 目标节点远端专家
+
+    Note over GPU,Remote: 1. 节点限制路由: 每 Token 限制最多派发到 M=4 个节点
+    GPU->>NVLink: 机内局部聚合: 将发往同一远端节点的各 Token 拼成大包
+    NVLink->>RDMA: 单节点聚合发射: 由指定网卡发射整块大报文 (零小包碎片)
+    RDMA-->>Remote: 远端节点单次解包并由 NVLink 分发至本地专家卡
+```
+<p class="caption" align="center"><em>图 1-3：DeepEP 节点限制路由与机内-跨机两级聚合时序</em></p>
+
+* **节点限制路由（Node-Limited Routing）**：
+  算法层引入强约束：每个 Token 的 Top-8 专家选择，**最多只允许跨越 $M \le 4$ 个物理节点**。硬件网络交互拓扑复杂度直接下降 $50\%$ 以上；
+* **机内聚合与跨机发射解耦**：
+  在触发跨机 RDMA 之前，节点内 8 张卡先通过 900GB/s NVLink 进行**机内数据搬迁打包**。原本 64 个点对点小通信，被融合成少数几个高带宽大报文，完全吃满 400Gbps 网络线速。
+
+---
+
+### 3. Dual-Pipe 双向交织流水线（计算通信 100% 隐藏）
+
+标准 1F1B 流水线中，每个微批次必须等待 All-to-All 结束才能开始计算。
+系统采用 **Dual-Pipe 双向交织流水线**：
+
+```text
+Stream 1 (计算引擎): [ Micro-batch m 的 Attention 计算 ] ---> [ Micro-batch m 的 FFN 专家计算 ]
+                             ▲                                         ▲
+                             │ (完全重叠 Overlap)                       │ (完全重叠 Overlap)
+                             ▼                                         ▼
+Stream 2 (通信引擎): [ Micro-batch m+1 的 Dispatch All-to-All ] -> [ Micro-batch m-1 的 Combine All-to-All ]
+```
+
+* 计算引擎与通信引擎由独立的 CUDA Stream 驱动；
+* 当前微批次正在计算高强度 Attention 矩阵乘的 $15\text{ms}$ 时间窗口，正好足够网络完成下一个微批次的专家跨机 All-to-All 数据预取；
+* **效果：专家通信耗时被 100% 隐藏在注意力计算阴影之下，实现“零感知通信延迟”**。
+
+---
+
+## 步骤 4：万卡级高可靠容错与高可用架构
+
+在 4096 卡规模下，硬件故障是**常态（Norm）而非异常（Exception）**。
+
+### 1. 故障平均间隔时间（MTBF）推演
+根据大厂真实硬件统计，单张高端 GPU 的 MTBF 约为 3 年（约 26,000 小时）。
+万卡集群的实际有效 MTBF：
+$$\text{MTBF}_{\text{cluster}} = \frac{26,000\text{ 小时}}{4096} \approx 6.35 \text{ 小时}$$
+**每隔 6 小时集群必有 1 张卡发生故障（Xid 报错、ECC 双比特翻转、PCIE 掉卡或网卡链路协商降速）**。
+
+### 2. 基于 Daly 公式求解最优 Checkpoint 周期
+
+如果频繁写盘，写盘耗时会侵蚀有效算力；如果写盘太少，故障回滚会丢失大量计算功。
+依据 **Daly 最优周期经典公式**：
+$$\tau^* = \sqrt{2 \cdot \text{MTBF} \cdot t_{\text{save}}} - t_{\text{save}}$$
+其中：
+* $\text{MTBF} = 6.35 \text{ 小时} = 381 \text{ 分钟}$；
+* 优化后的异步 In-Memory + GDS 快照写盘耗时 $t_{\text{save}} = 5 \text{ 分钟}$。
+代入公式推导：
+$$\tau^* = \sqrt{2 \times 381 \times 5} - 5 = \sqrt{3810} - 5 \approx 61.7 - 5 \approx 56.7 \text{ 分钟}$$
+
+**系统设计准则**：设定自动化 Checkpoint 周期为 **每 60 分钟保存一次**，可保证全集群因故障导致的重算损耗严格控制在 **$3\%$ 以内**。
+
+---
+
+### 3. 秒级局部热替换与无感自愈流程
+
+传统方案一旦单卡损坏，全集群 4096 张卡必须全部停机杀死进程，重新拉起镜像、读取权重，耗时往往超过 30 分钟。
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Agent as 节点探针 (Node Exporter)
+    participant Controller as 调度控制器 (K8s / Slurm)
+    participant HotSpare as 热备节点 (Hot Spare Node)
+    participant Cluster as 4096 卡运行集群
+
+    Agent->>Controller: 1. 硬件探针监测到 GPU 382 发生不可纠正 ECC 错误
+    Controller->>Cluster: 2. 向故障所在 PP 阶段注入“通信暂停栅栏 (Pause Barrier)”
+    Controller->>HotSpare: 3. 分配预热备用节点，建立 RDMA 链路
+    Cluster->>HotSpare: 4. 从同组健康卡通过跨机高速内存副本恢复状态 (<45 秒)
+    HotSpare-->>Cluster: 5. 动态重映射全局通信环 (Dynamic NCCL Comm Re-Init)
+    Controller->>Cluster: 6. 解除暂停，全集群无损继续前向计算
+```
+<p class="caption" align="center"><em>图 1-4：万卡局部故障秒级无感热替换自愈流程</em></p>
+
+* **热备节点池（Hot Spares）**：集群预留 $2\%$ 的空闲热备节点（约 10 台节点）；
+* **局部快照恢复**：利用相邻节点的本地 NVMe 镜像快速同步损坏节点的权重与优化器状态，无需访问远程分布式文件系统；
+* **自愈时效**：全流程在 **$60 \sim 90$ 秒内自愈完成**，达成全任务有效训练时间 $\ge 95\%$ 的工业级硬指标。
