@@ -1,0 +1,968 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FlashAttention v1 vs v2 源码导读</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --surface: #ffffff;
+      --surface-2: #eef4ff;
+      --ink: #172033;
+      --muted: #5b667a;
+      --line: #d7deea;
+      --blue: #1d4ed8;
+      --green: #15803d;
+      --orange: #c2410c;
+      --purple: #6d28d9;
+      --red: #b91c1c;
+      --code-bg: #101828;
+      --code-ink: #e6edf7;
+      --shadow: 0 18px 50px rgba(31, 41, 55, 0.12);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+    }
+
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(255, 255, 255, 0.94);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(10px);
+    }
+
+    .nav {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand {
+      font-weight: 760;
+      color: var(--ink);
+      white-space: nowrap;
+    }
+
+    .links {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .links a {
+      font-size: 14px;
+      color: var(--muted);
+      padding: 6px 9px;
+      border-radius: 6px;
+    }
+
+    .links a:hover {
+      background: #edf2ff;
+      color: var(--blue);
+      text-decoration: none;
+    }
+
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 34px 20px 70px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+      align-items: stretch;
+      margin-bottom: 26px;
+    }
+
+    .hero-copy {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 30px;
+      box-shadow: var(--shadow);
+    }
+
+    h1 {
+      font-size: clamp(30px, 5vw, 56px);
+      line-height: 1.05;
+      margin: 0 0 18px;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 760px;
+      margin: 0;
+    }
+
+    .hero-side {
+      background: #101828;
+      color: #fff;
+      border-radius: var(--radius);
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: center;
+      box-shadow: var(--shadow);
+    }
+
+    .metric {
+      display: grid;
+      grid-template-columns: 95px 1fr;
+      gap: 12px;
+      align-items: baseline;
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+    }
+
+    .metric:last-child { border-bottom: 0; }
+    .metric b { font-size: 24px; color: #bfdbfe; }
+    .metric span { color: #dbeafe; }
+
+    section {
+      margin: 24px 0;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: 0 8px 28px rgba(31, 41, 55, 0.06);
+    }
+
+    h2 {
+      margin: 0 0 16px;
+      font-size: 26px;
+      line-height: 1.2;
+    }
+
+    h3 {
+      margin: 18px 0 10px;
+      font-size: 20px;
+    }
+
+    p { margin: 0 0 12px; }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .callout {
+      border-radius: var(--radius);
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .callout.blue { background: #eff6ff; border-color: #bfdbfe; }
+    .callout.green { background: #f0fdf4; border-color: #bbf7d0; }
+    .callout.orange { background: #fff7ed; border-color: #fed7aa; }
+    .callout.purple { background: #f5f3ff; border-color: #ddd6fe; }
+
+    .label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      background: var(--blue);
+      margin-bottom: 10px;
+    }
+
+    .label.green { background: var(--green); }
+    .label.orange { background: var(--orange); }
+    .label.purple { background: var(--purple); }
+    .label.red { background: var(--red); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      display: table;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 12px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eef2ff;
+      color: #27324a;
+      font-size: 14px;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .code-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      border-radius: var(--radius);
+      background: var(--code-bg);
+      color: var(--code-ink);
+      font-size: 13px;
+      line-height: 1.5;
+      border: 1px solid #263449;
+      white-space: pre;
+    }
+
+    code {
+      font-family: "Cascadia Code", "Consolas", "SFMono-Regular", monospace;
+      font-size: 0.95em;
+    }
+
+    .code-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .source-link {
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .node {
+      position: relative;
+      min-height: 92px;
+      padding: 14px;
+      border: 2px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .node b {
+      display: block;
+      color: var(--ink);
+      margin-bottom: 6px;
+    }
+
+    .node span { color: var(--muted); font-size: 14px; }
+    .node.blue { border-color: #93c5fd; background: #eff6ff; }
+    .node.green { border-color: #86efac; background: #f0fdf4; }
+    .node.orange { border-color: #fdba74; background: #fff7ed; }
+    .node.purple { border-color: #c4b5fd; background: #f5f3ff; }
+
+    .matrix-board {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .matrix-panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fbfdff;
+      padding: 16px;
+      min-height: 320px;
+    }
+
+    .matrix-caption {
+      font-weight: 740;
+      margin-bottom: 10px;
+      color: var(--ink);
+    }
+
+    .matrix {
+      position: relative;
+      border: 2px solid #475569;
+      background:
+        linear-gradient(to right, rgba(71, 85, 105, 0.18) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(71, 85, 105, 0.18) 1px, transparent 1px),
+        #ffffff;
+      background-size: 28px 28px;
+      border-radius: 6px;
+      overflow: hidden;
+      min-height: 220px;
+    }
+
+    .matrix.q { width: 260px; height: 280px; }
+    .matrix.kv { width: 300px; height: 280px; }
+    .matrix.s { width: 300px; height: 260px; }
+    .matrix.o { width: 260px; height: 280px; }
+
+    .tile {
+      position: absolute;
+      border: 3px solid;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 8px;
+      font-size: 14px;
+      font-weight: 740;
+      line-height: 1.25;
+    }
+
+    .tile.qtile { left: 0; top: 70px; width: 100%; height: 70px; border-color: #1d4ed8; background: rgba(191, 219, 254, 0.78); color: #1e3a8a; }
+    .tile.kvtile { left: 92px; top: 0; width: 70px; height: 100%; border-color: #15803d; background: rgba(187, 247, 208, 0.78); color: #14532d; writing-mode: vertical-rl; text-orientation: mixed; }
+    .tile.stile { left: 92px; top: 70px; width: 70px; height: 70px; border-color: #c2410c; background: rgba(254, 215, 170, 0.86); color: #7c2d12; }
+    .tile.otile { left: 0; top: 70px; width: 100%; height: 70px; border-color: #6d28d9; background: rgba(221, 214, 254, 0.82); color: #4c1d95; }
+
+    .axis {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 8px;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: 1fr 42px 1fr 42px 1fr;
+      gap: 10px;
+      align-items: center;
+      margin-top: 18px;
+    }
+
+    .flow-arrow {
+      text-align: center;
+      color: var(--blue);
+      font-size: 28px;
+      font-weight: 800;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 6px 0 18px;
+    }
+
+    .tab {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    .tab[aria-selected="true"] {
+      background: #1d4ed8;
+      border-color: #1d4ed8;
+      color: #fff;
+    }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 16px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fbfdff;
+    }
+
+    .step b { color: var(--blue); }
+
+    .footnotes {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .checklist {
+      display: grid;
+      gap: 8px;
+      padding-left: 0;
+      list-style: none;
+      margin: 0;
+    }
+
+    .checklist li {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfdff;
+    }
+
+    @media (max-width: 900px) {
+      .hero,
+      .grid-2,
+      .grid-3,
+      .code-grid,
+      .diagram {
+        grid-template-columns: 1fr;
+      }
+
+      .nav {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .links { justify-content: flex-start; }
+      section { padding: 18px; }
+      .step { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <nav class="nav" aria-label="页面导航">
+      <div class="brand">FlashAttention v1 vs v2 源码导读</div>
+      <div class="links">
+        <a href="#one-line">一句话区别</a>
+        <a href="#source-map">源码地图</a>
+        <a href="#launch">Launch 对照</a>
+        <a href="#kernel">Kernel 主循环</a>
+        <a href="#warp">Warp 分工</a>
+        <a href="#talk-track">讲解脚本</a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="hero-copy">
+        <h1>FlashAttention-2 相比 FlashAttention-1，到底改了什么</h1>
+        <p class="lead">
+          这页按源码导读的方式讲：先看 launch 维度，再看 kernel 主循环，最后看 warp 内 work partitioning。
+          结论不是“数学公式变了”，而是 v2 在保持 exact attention 的前提下，把并行度、warp 分工和非矩阵计算开销重新整理了一遍。
+        </p>
+      </div>
+      <aside class="hero-side" aria-label="核心摘要">
+        <div class="metric"><b>v1</b><span>IO-aware tiling：少写 HBM，不物化完整 attention matrix。</span></div>
+        <div class="metric"><b>v2</b><span>work partitioning：沿 sequence 增加并行，warp 改按 Q 行切。</span></div>
+        <div class="metric"><b>源码</b><span>v1 看 fmha_*，v2 看 flash_* 与 kernel_traits。</span></div>
+      </aside>
+    </div>
+
+    <section id="one-line">
+      <h2>一句话区别</h2>
+      <div class="grid-3">
+        <div class="callout blue">
+          <span class="label">共同点</span>
+          <p>v1 和 v2 都是 exact attention，都用 tiling 和 online softmax 避免把完整 <code>S = QK^T</code> 和 <code>P = softmax(S)</code> 写回 HBM。</p>
+        </div>
+        <div class="callout orange">
+          <span class="label orange">v1 瓶颈</span>
+          <p>v1 的主要突破是 IO-aware，但线程块并行和 warp 内分工还不够理想；部分归并需要经过 shared memory 和同步。</p>
+        </div>
+        <div class="callout green">
+          <span class="label green">v2 改进</span>
+          <p>v2 主要改 work partitioning：更多 thread block 覆盖 query block，warp 内按 Q 切分，让每个 warp 直接负责自己的 output 行。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="source-map">
+      <h2>源码地图：先知道看哪里</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>层级</th>
+            <th>FlashAttention v1.0.9</th>
+            <th>FlashAttention v2.0.9</th>
+            <th>讲解重点</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Python/C++ API</td>
+            <td><code>csrc/flash_attn/fmha_api.cpp</code></td>
+            <td><code>csrc/flash_attn/flash_api.cpp</code></td>
+            <td>参数检查、打包 QKV/KV、选择 fwd/bwd launch。</td>
+          </tr>
+          <tr>
+            <td>launch 模板</td>
+            <td><code>fmha_fwd_launch_template.h</code></td>
+            <td><code>flash_fwd_launch_template.h</code></td>
+            <td>grid 维度、动态 shared memory、head dim dispatch。</td>
+          </tr>
+          <tr>
+            <td>forward kernel</td>
+            <td><code>fmha_fprop_kernel_1xN.h</code></td>
+            <td><code>flash_fwd_kernel.h</code></td>
+            <td>QK、mask、softmax、PV、O 写回的核心流程。</td>
+          </tr>
+          <tr>
+            <td>tile/warp 配置</td>
+            <td><code>fmha/kernel_traits.h</code></td>
+            <td><code>kernel_traits.h</code></td>
+            <td>blockM/blockN/headDim/warps 与 MMA layout。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="launch">
+      <h2>第一处源码差异：launch grid 怎么铺</h2>
+      <div class="code-grid">
+        <div>
+          <div class="code-title">
+            <strong>v1 launch：grid 主要是 batch、head、num_splits</strong>
+            <a class="source-link" href="https://github.com/Dao-AILab/flash-attention/blob/v1.0.9/csrc/flash_attn/src/fmha_fwd_launch_template.h#L71-L88">源码位置</a>
+          </div>
+          <pre><code>// v1: fmha_fwd_launch_template.h
+if (params.num_splits &lt;= 0) {
+  params.num_splits = num_splits_heuristic_fwd(
+    params.b * params.h, nSMs, ctas_per_sm, max_splits);
+}
+
+dim3 grid(params.b, params.h, params.num_splits);
+kernel&lt;&lt;&lt;grid, Kernel_traits::THREADS, smem_size, stream&gt;&gt;&gt;(params);</code></pre>
+        </div>
+        <div>
+          <div class="code-title">
+            <strong>v2 launch：grid.x 直接是 query block</strong>
+            <a class="source-link" href="https://github.com/Dao-AILab/flash-attention/blob/v2.0.9/csrc/flash_attn/src/flash_fwd_launch_template.h#L27-L49">源码位置</a>
+          </div>
+          <pre><code>// v2: flash_fwd_launch_template.h
+const int num_m_block =
+  (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
+
+dim3 grid(num_m_block, params.b, params.h);
+kernel&lt;&lt;&lt;grid, Kernel_traits::kNThreads, smem_size, stream&gt;&gt;&gt;(params);</code></pre>
+        </div>
+      </div>
+
+      <h3>怎么讲这段源码</h3>
+      <p>
+        v1 会根据 <code>batch * heads</code> 和 SM 数量估计 <code>num_splits</code>，目的是让 occupancy 不要太低，但 split 太多会带来额外 HBM 读写和中间结果合并。
+        v2 直接把 query sequence 切成 <code>m_block</code>，让 <code>grid.x</code> 覆盖 query block；这对小 batch、少 head、长序列的训练和推理更友好。
+      </p>
+      <div class="diagram" aria-label="launch 对照图">
+        <div class="node blue"><b>v1 grid.x</b><span>batch</span></div>
+        <div class="node blue"><b>v1 grid.y</b><span>head</span></div>
+        <div class="node orange"><b>v1 grid.z</b><span>num_splits，提升占用率但有合并成本</span></div>
+        <div class="node green"><b>v2 grid.x</b><span>query block，直接增加 sequence 维并行</span></div>
+      </div>
+    </section>
+
+    <section id="kernel">
+      <h2>第二处源码差异：kernel 主循环怎么组织</h2>
+      <div class="tabs" role="tablist" aria-label="kernel 对照标签">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="panel-v1" id="tab-v1">v1 主循环</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="panel-v2" id="tab-v2">v2 主循环</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="panel-pseudo" id="tab-pseudo">共同伪代码</button>
+      </div>
+
+      <div id="panel-v1" class="panel active" role="tabpanel" aria-labelledby="tab-v1">
+        <div class="code-title">
+          <strong>v1：加载 Q/K/V 后，循环内做 QK、softmax、PV，并经 shared memory 做 O reduction</strong>
+          <a class="source-link" href="https://github.com/Dao-AILab/flash-attention/blob/v1.0.9/csrc/flash_attn/src/fmha_fprop_kernel_1xN.h#L321-L650">源码位置</a>
+        </div>
+        <pre><code>// v1 源码讲解用压缩版
+gmem_k.load(); gmem_q.load(); gmem_v.load();
+gmem_q.commit(smem_q);
+gmem_v.commit(smem_v);
+gmem_k.commit(smem_k);
+__syncthreads();
+
+for (int l = blockIdx.z; l &lt; steps; l += step_stride) {
+  gemm_q_k(acc_p);                  // P score = Q * K^T
+  softmax.unpack_noscale(acc_p);
+  softmax.apply_mask(mask);
+  softmax.reduce_max(...);
+  softmax.scale_apply_exp(...);
+  softmax.reduce_sum_before_sync_(...);
+  softmax.pack(frag_p);
+
+  gemm_cl(acc_o, frag_p, frag_v);    // O partial = P * V
+  smem_o.store(acc_o, 0);
+  __syncthreads();
+  softmax.reduce_sum_after_sync_(...);
+  smem_o.load(out);
+  store O or temporary O;
+}</code></pre>
+      </div>
+
+      <div id="panel-v2" class="panel" role="tabpanel" aria-labelledby="tab-v2">
+        <div class="code-title">
+          <strong>v2：从最后一个 K/V block 往前扫描，先处理需要 mask 的块，再处理完整块，acc_o 持续留在寄存器</strong>
+          <a class="source-link" href="https://github.com/Dao-AILab/flash-attention/blob/v2.0.9/csrc/flash_attn/src/flash_fwd_kernel.h#L324-L568">源码位置</a>
+        </div>
+        <pre><code>// v2 源码讲解用压缩版
+clear(acc_o);
+
+for (masking_step...) {
+  flash::gemm(acc_s, Q, K);          // S = QK^T
+  apply_mask_if_needed(scores);
+  softmax_rescale_o(scores, max, sum, acc_o, scale);
+  rP = convert_type(scores);
+  flash::gemm_A_in_regs(acc_o, rP, V);
+}
+
+for (; n_block &gt;= 0; --n_block) {
+  flash::gemm(acc_s, Q, K);
+  softmax_rescale_o(scores, max, sum, acc_o, scale);
+  rP = convert_type(scores);
+  flash::gemm_A_in_regs(acc_o, rP, V);
+}
+
+// epilogue: normalize acc_o, write O and LSE</code></pre>
+      </div>
+
+      <div id="panel-pseudo" class="panel" role="tabpanel" aria-labelledby="tab-pseudo">
+        <div class="code-title">
+          <strong>共同数学流程：online softmax 不变，变的是并行和数据路径</strong>
+        </div>
+        <pre><code>for each query block:
+  load Q block
+  m = -inf; l = 0; acc = 0
+
+  for each K/V block:
+    S = Q @ K.T
+    S = apply_mask(S)
+    m_new = max(m, rowmax(S))
+    P = exp(S - m_new)
+    acc = acc * exp(m - m_new) + P @ V
+    l = l * exp(m - m_new) + rowsum(P)
+    m = m_new
+
+  O = acc / l</code></pre>
+      </div>
+
+      <h3>怎么讲这段源码</h3>
+      <p>
+        v1 和 v2 都遵循同一个 online softmax 数学流程。源码层面最容易讲清楚的区别是：
+        v1 中 <code>smem_o.store</code>、<code>__syncthreads</code>、<code>reduce_sum_after_sync_</code> 这类操作体现了跨 warp 归并路径；
+        v2 中 <code>acc_o</code> 在主循环中持续累加，最后 epilogue 统一归一化和写回，warp 之间的 output 责任边界更清楚。
+      </p>
+    </section>
+
+    <section id="matrix-split">
+      <h2>先用矩阵图理解 block 和 warp</h2>
+      <p>
+        这里有两个不同层级的 “block”：矩阵里的 <strong>Q block / K block / V block</strong> 是算法上的 tile；
+        CUDA 里的 <strong>thread block / CTA</strong> 是执行这些 tile 的线程组。FA2 中可以粗略理解为：一个 CUDA block 负责一个 Q block，然后循环扫描多个 K/V block。
+      </p>
+
+      <div class="matrix-board">
+        <div class="matrix-panel">
+          <div class="matrix-caption">1. 固定一个 CUDA block：它负责一段 Q 行</div>
+          <div class="matrix q" aria-label="Q matrix split by rows">
+            <div class="tile qtile">Q block<br>[kBlockM, head_dim]</div>
+          </div>
+          <div class="axis"><span>纵轴：query token</span><span>横轴：head_dim</span></div>
+          <p style="margin-top: 12px;">
+            <code>blockIdx.x</code> 选中哪一段 Q 行。比如 <code>kBlockM=128</code>，这个 CUDA block 就负责 128 个 query token。
+          </p>
+        </div>
+
+        <div class="matrix-panel">
+          <div class="matrix-caption">2. K/V block 沿 key/value token 维度切</div>
+          <div class="matrix kv" aria-label="K V matrix split by sequence rows">
+            <div class="tile kvtile">K/V block<br>[kBlockN, head_dim]</div>
+          </div>
+          <div class="axis"><span>纵轴：key/value token</span><span>横轴：head_dim</span></div>
+          <p style="margin-top: 12px;">
+            K/V block 不是按 head 切；head 已经由 <code>blockIdx.z</code> 选定。这里是在同一个 head 内，沿 token 序列切 K/V。
+          </p>
+        </div>
+      </div>
+
+      <div class="flow-row" aria-label="Q K V tile compute flow">
+        <div class="matrix-panel">
+          <div class="matrix-caption">Q block</div>
+          <div class="matrix q" style="height: 210px;">
+            <div class="tile qtile">128 行 Q<br>多个 warp 分这些行</div>
+          </div>
+        </div>
+        <div class="flow-arrow">×</div>
+        <div class="matrix-panel">
+          <div class="matrix-caption">K block 转置</div>
+          <div class="matrix kv" style="height: 210px;">
+            <div class="tile kvtile">64 行 K<br>CTA 内共享</div>
+          </div>
+        </div>
+        <div class="flow-arrow">=</div>
+        <div class="matrix-panel">
+          <div class="matrix-caption">S tile = QK^T</div>
+          <div class="matrix s">
+            <div class="tile stile">S tile<br>[kBlockM, kBlockN]</div>
+          </div>
+          <p style="margin-top: 12px;">这个小分数矩阵只在片上参与 softmax，不写完整 N x N 到 HBM。</p>
+        </div>
+      </div>
+
+      <div class="flow-row" aria-label="softmax V output flow">
+        <div class="matrix-panel">
+          <div class="matrix-caption">P tile</div>
+          <div class="matrix s">
+            <div class="tile stile">softmax 后<br>[kBlockM, kBlockN]</div>
+          </div>
+        </div>
+        <div class="flow-arrow">×</div>
+        <div class="matrix-panel">
+          <div class="matrix-caption">V block</div>
+          <div class="matrix kv" style="height: 210px;">
+            <div class="tile kvtile">64 行 V<br>CTA 内共享</div>
+          </div>
+        </div>
+        <div class="flow-arrow">+=</div>
+        <div class="matrix-panel">
+          <div class="matrix-caption">O block 累加器</div>
+          <div class="matrix o" style="height: 210px;">
+            <div class="tile otile">O partial<br>[kBlockM, head_dim]</div>
+          </div>
+          <p style="margin-top: 12px;">每个 warp 只负责其中一部分 Q 行对应的 O 行，acc_o 尽量留在寄存器。</p>
+        </div>
+      </div>
+
+      <div class="callout green" style="margin-top: 18px;">
+        <span class="label green">把三种 block 分清</span>
+        <p>
+          <strong>矩阵 block</strong> 是数据 tile：<code>Q[某 128 行, :]</code>、<code>K/V[某 64 行, :]</code>。
+          <strong>CUDA block</strong> 是执行单位：一组线程负责一个 Q block。
+          <strong>warp</strong> 是 CUDA block 里的 32 个线程小组：在 FA2 的直觉模型里，多个 warp 分摊 Q block 的不同行，共享当前 K/V block。
+        </p>
+      </div>
+    </section>
+
+    <section id="warp">
+      <h2>第三处源码差异：warp 内 work partitioning</h2>
+      <div class="callout blue">
+        <span class="label">先定义 block 的维度</span>
+        <p>
+          <code>Q block</code> 是沿 query 序列维切出来的一段 Q 行，形状近似 <code>[kBlockM, head_dim]</code>。
+          <code>K/V block</code> 是沿 key/value 序列维切出来的一段 K/V 行，形状近似 <code>K: [kBlockN, head_dim]</code>、<code>V: [kBlockN, head_dim]</code>。
+          所以这里的 block 主要是按 token/sequence 维度切，不是按 head 维切；head 和 batch 已经在 <code>grid.y/grid.z</code> 上分开了。
+        </p>
+      </div>
+      <div class="grid-2">
+        <div class="callout orange">
+          <span class="label orange">v1：sliced-K 思维</span>
+          <p>
+            v1 更接近把 K/V 的不同部分分给不同 warp。每个 warp 得到一部分中间输出后，需要通过 shared memory 和同步把结果合并到最终 O。
+            这能减少 HBM，但在 Tensor Core 已经很快时，shared memory 往返和同步会变成更明显的开销。
+          </p>
+        </div>
+        <div class="callout green">
+          <span class="label green">v2：sliced-Q 思维</span>
+          <p>
+            v2 更倾向让不同 warp 负责不同 Q 行。K/V tile 对所有 warp 共享，每个 warp 维护自己负责行的 softmax 状态和 output 累加器，最终少做跨 warp 归并。
+          </p>
+        </div>
+      </div>
+
+      <div class="code-grid" style="margin-top: 16px;">
+        <div>
+          <div class="code-title">
+            <strong>v1：O reduction 相关路径</strong>
+            <a class="source-link" href="https://github.com/Dao-AILab/flash-attention/blob/v1.0.9/csrc/flash_attn/src/fmha_fprop_kernel_1xN.h#L552-L618">源码位置</a>
+          </div>
+          <pre><code>// v1: mapping changes, so recompute row max
+softmax.reduce_max_after_sync_(p_max_o, rows);
+smem_o.store(acc_o, 0);
+__syncthreads();
+softmax.reduce_sum_after_sync_(p_sum_o, rows);
+smem_o.load(out);</code></pre>
+        </div>
+        <div>
+          <div class="code-title">
+            <strong>v2：warp/MMA layout 由 kNWarps 和 TiledMMA 描述</strong>
+            <a class="source-link" href="https://github.com/Dao-AILab/flash-attention/blob/v2.0.9/csrc/flash_attn/src/kernel_traits.h#L51-L79">源码位置</a>
+          </div>
+          <pre><code>// v2: kernel_traits.h
+static constexpr int kNWarps = kNWarps_;
+static constexpr int kNThreads = kNWarps * 32;
+static constexpr int kBlockM = kBlockM_;
+static constexpr int kBlockN = kBlockN_;
+
+using TiledMma = TiledMMA&lt;
+  MMA_Atom_Arch,
+  Layout&lt;Shape&lt;Int&lt;kNWarps&gt;,_1,_1&gt;&gt;,
+  ValLayoutMNK&gt;;</code></pre>
+        </div>
+      </div>
+
+      <div class="diagram" aria-label="warp 分工图">
+        <div class="node orange"><b>v1 warp0..3</b><span>分 K/V 切片，产生局部 O</span></div>
+        <div class="node orange"><b>v1 shared memory</b><span>写入、同步、归并</span></div>
+        <div class="node green"><b>v2 warp0..3</b><span>分 Q 行，每个 warp 对应输出行</span></div>
+        <div class="node green"><b>v2 output</b><span>更少跨 warp 通信，直接写回自己的 O 行</span></div>
+      </div>
+    </section>
+
+    <section id="non-matmul">
+      <h2>第四处差异：v2 减少非 matmul 开销</h2>
+      <p>
+        FA2 论文和博客把一个重要点说得很直接：A100 上 Tensor Core 的 matmul 很快，非 matmul 的 FP32 操作、mask、rescale、shared memory 同步相对更贵。
+        所以 v2 不是只盯着 FLOPs，而是尽量把主循环拆成更规整的路径。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>优化点</th>
+            <th>源码上看什么</th>
+            <th>讲解口径</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>masking 和 non-masking 分离</td>
+            <td><code>n_masking_steps</code> 之后进入普通 <code>for (; n_block &gt;= 0; --n_block)</code></td>
+            <td>边界块和 causal 块需要 mask；内部完整块走更短路径。</td>
+          </tr>
+          <tr>
+            <td>acc_o 寄存器累加</td>
+            <td><code>clear(acc_o)</code> 后多次 <code>gemm_A_in_regs(acc_o, ...)</code></td>
+            <td>输出累加器尽量留在寄存器，最后统一 normalize 和写回。</td>
+          </tr>
+          <tr>
+            <td>sequence 维并行</td>
+            <td><code>grid(num_m_block, params.b, params.h)</code></td>
+            <td>固定同一个 batch 和 head 时，<code>blockIdx.x</code> 可以取多个 query 行块。每个 CUDA block 负责一段 Q 行，并独立扫描全部 K/V，所以同一个 head 里的不同 Q 行块可以并行，提高 SM 利用率。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="talk-track">
+      <h2>录视频时的讲解脚本</h2>
+      <div class="timeline">
+        <div class="step">
+          <b>1. 先讲共同点</b>
+          <span>两者都不改变 attention 数学，都是 exact attention。核心仍然是 tiling + online softmax，节省 HBM 流量。</span>
+        </div>
+        <div class="step">
+          <b>2. 打开 launch 源码</b>
+          <span>对比 v1 的 <code>grid(b, h, num_splits)</code> 和 v2 的 <code>grid(num_m_block, b, h)</code>。这里是 v2 并行度提升最直观的入口。</span>
+        </div>
+        <div class="step">
+          <b>3. 打开 kernel 主循环</b>
+          <span>v1 让观众看 Q/K/V load、softmax、PV、shared memory reduction；v2 看 <code>softmax_rescale_o</code> 和 <code>gemm_A_in_regs</code> 如何循环累加。</span>
+        </div>
+        <div class="step">
+          <b>4. 解释 warp 分工</b>
+          <span>用 sliced-K 到 sliced-Q 的图讲为什么 v2 减少 shared memory 通信。重点是每个 warp 最终负责自己的 Q 行和 O 行。</span>
+        </div>
+        <div class="step">
+          <b>5. 总结 tradeoff</b>
+          <span>v2 更快，但工程复杂度更高，kernel traits、不同 head dim、causal/dropout/varlen 分支更多。面试中要能说清楚“为什么快”和“代价是什么”。</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="interview">
+      <h2>面试速答</h2>
+      <ul class="checklist">
+        <li><strong>FA2 相比 FA1 的本质区别：</strong>不是数学公式变化，而是更好的并行度和 work partitioning。</li>
+        <li><strong>源码第一眼看哪里：</strong>先看 launch grid，再看 forward kernel 主循环，再看 kernel traits 中的 block/warp/MMA 配置。</li>
+        <li><strong>v1 为什么还不够：</strong>IO 降下来了，但 threadblock/warp 分工导致 occupancy 和 shared memory 通信仍有瓶颈。</li>
+        <li><strong>v2 为什么更快：</strong>sequence 维度增加 CTA 并行，warp 按 Q 行切分，减少跨 warp 通信，减少非 matmul FLOPs。</li>
+        <li><strong>什么时候收益明显：</strong>长序列、小 batch、少 head、大模型训练或推理中 attention 占比高时更明显。</li>
+      </ul>
+    </section>
+
+    <section id="practice">
+      <h2>练习题与追问</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>练习 1：手推 online softmax</h3>
+          <p>设一个 Q block 扫描两个 K/V tile，手动写出每次 tile 后的 <code>m</code>、<code>l</code>、<code>acc_o</code> 更新。重点验证 rescale 之后旧 tile 的贡献不会丢。</p>
+        </div>
+        <div class="card">
+          <h3>练习 2：画出数据生命周期</h3>
+          <p>分别标出 Q、K、V、S、P、O 在 HBM、shared memory、register 中停留的位置，并说明 FlashAttention 为什么减少 S/P 的 HBM 写读。</p>
+        </div>
+        <div class="card">
+          <h3>练习 3：对比 v1 与 v2 work partition</h3>
+          <p>从 launch grid、warp 分工、shared memory 通信、sequence 维并行四个角度写对照表。不要只说 v2 更快，要写出更快的机制。</p>
+        </div>
+        <div class="card">
+          <h3>面试追问</h3>
+          <p>如果 head dim、sequence length、causal mask、dropout、varlen batch 同时变化，你会先检查 kernel traits、grid、mask、还是 softmax 状态？给出排查顺序和证据。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="refs" class="footnotes">
+      <h2>参考资料</h2>
+      <p>
+        <a href="https://github.com/Dao-AILab/flash-attention">Dao-AILab/flash-attention 官方仓库</a>；
+        <a href="https://github.com/Dao-AILab/flash-attention/tree/v1.0.9/csrc/flash_attn/src">v1.0.9 csrc/flash_attn/src</a>；
+        <a href="https://github.com/Dao-AILab/flash-attention/tree/v2.0.9/csrc/flash_attn/src">v2.0.9 csrc/flash_attn/src</a>；
+        <a href="https://arxiv.org/abs/2205.14135">FlashAttention v1 论文</a>；
+        <a href="https://arxiv.org/abs/2307.08691">FlashAttention-2 论文</a>；
+        <a href="https://princeton-nlp.github.io/flash-atttention-2/">FlashAttention-2 官方博客</a>。
+      </p>
+    </section>
+  </main>
+
+  <script>
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    const panels = Array.from(document.querySelectorAll(".panel"));
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        tabs.forEach((item) => item.setAttribute("aria-selected", "false"));
+        panels.forEach((panel) => panel.classList.remove("active"));
+        tab.setAttribute("aria-selected", "true");
+        const panel = document.getElementById(tab.getAttribute("aria-controls"));
+        if (panel) panel.classList.add("active");
+      });
+    });
+  </script>
+</body>
+</html>
